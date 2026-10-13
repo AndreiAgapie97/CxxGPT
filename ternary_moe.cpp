@@ -1448,8 +1448,17 @@ int main(int argc, char** argv) {
     const Stats s_moe = bench([&] { moe.forward(tok.data(), out.data()); }, 200);
     printf("\nMoE  d_model=%d experts=%d top_k=%d  kernel=%s\n", d_model, num_experts, top_k,
            moe.kernel.name);
-    printf("  %.3f ms/token (median)   routed to experts %d, %d   out[0]=%.6f  out[15]=%.6f\n",
+    printf("  same token:     %.3f ms/token (median)   routed to experts %d, %d   out[0]=%.6f  out[15]=%.6f\n",
            s_moe.median, moe.idx[0], moe.idx[1], out[0], out[15]);
+
+    // Repeating one token keeps the same two experts hot in cache. A stream
+    // of different tokens spreads routing over all experts, as decoding does.
+    std::vector<std::vector<float>> toks(256, std::vector<float>(size_t(d_model)));
+    for (auto& t : toks)
+        for (auto& v : t) v = nd(rng);
+    size_t next_tok = 0;
+    const Stats s_vary = bench([&] { moe.forward(toks[next_tok++ % toks.size()].data(), out.data()); }, 512);
+    printf("  varying tokens: %.3f ms/token (median)\n", s_vary.median);
 
     return g_failures == 0 ? 0 : 1;
 }

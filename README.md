@@ -74,9 +74,14 @@ The int8 kernels have ~0.8% relative error against fp32. That comes from
 quantizing the activations; the fp32-activation kernels are exact to
 rounding.
 
-MoE layer (d_model 512, 8 experts, top-2, int8 VNNI 512-bit): about
-**50 µs per token on 4 threads**. Before the pool rewrite and job fusion it
-was about 360 µs.
+MoE layer (d_model 512, 8 experts, top-2, int8 VNNI 512-bit), on 4 threads:
+- about **50 µs per token** with one token repeated, so the same two
+  experts stay hot in cache;
+- about **56 µs per token** with a stream of different tokens, which
+  spreads routing over all eight experts, as decoding does.
+
+With one thread, both take roughly 140–220 µs; single-thread runs on this VM vary a lot. Before the pool rewrite and job
+fusion, the repeated-token case took about 360 µs on 4 threads.
 
 ## Tests
 
