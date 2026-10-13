@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # GPU throughput probe: trains each candidate model size for a few steps and
-# prints its speed, its GPU memory, and how many tokens a night would train.
+# prints its speed, its GPU memory, and how many tokens a night would train;
+# then the scripts/night.sh command for each size that fits.
 #   scripts/probe.sh [steps]          (default 20; needs cxxgpt-gpu: make gpu)
-# The defaults match scripts/night.sh, so its TOKS can come from here:
-# BATCH=8 SEQ=512 ACCUM=16 VOCAB=16384, OPT=--muon ("" for AdamW). Other
-# sizes: SIZES="name:--dim 640 --layers 10 --heads 10;...".
+# The defaults match scripts/night.sh: BATCH=8 SEQ=512 ACCUM=16 VOCAB=16384,
+# OPT=--muon ("" for AdamW). Other sizes:
+# SIZES="name:--dim 640 --layers 10 --heads 10;...".
 # The tokens are synthetic (the reasoning curriculum); speed does not depend
 # on what they say, only on the vocabulary size, which VOCAB sets.
 set -euo pipefail
@@ -16,8 +17,10 @@ ACCUM=${ACCUM:-16}
 OPT=${OPT---muon}
 VOCAB=${VOCAB:-16384}
 NIGHT_HOURS=${NIGHT_HOURS:-7.5}
-[ -x ./cxxgpt-gpu ] || { echo "build it first: make gpu"; exit 1; }
-[ -f data/reason.train.tok ] || ./cxxgpt-gpu gen-reasoning --out data/reason > /dev/null
+CX=${CX:-./cxxgpt-gpu}
+GPU=${GPU---gpu}
+[ -x "$CX" ] || { echo "build it first: make gpu"; exit 1; }
+[ -f data/reason.train.tok ] || "$CX" gen-reasoning --out data/reason > /dev/null
 
 DEFAULT_SIZES="d512-dense:--dim 512 --layers 8 --heads 8
 d512-moe-ternary:--dim 512 --layers 8 --heads 8 --experts 8 --topk 2 --ternary
@@ -29,10 +32,11 @@ SIZES=${SIZES:-$DEFAULT_SIZES}
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 printf "%-20s %10s %10s %8s %9s %9s %8s %12s\n" size params active "batch" "ms/step" "tok/s" "GPU MB" "tokens/night"
+cmds=()
 # One size at batch b x accumulation a; output in $tmp/log.
 run() {
   # shellcheck disable=SC2086
-  ./cxxgpt-gpu train --gpu --data data/reason.train.tok --vocab "$VOCAB" --seq "$SEQ" --batch "$1" \
+  "$CX" train $GPU --data data/reason.train.tok --vocab "$VOCAB" --seq "$SEQ" --batch "$1" \
     --accum "$2" --steps "$STEPS" --warmup 5 --eval-every 0 --log-every 10 --save-every 0 --out "$tmp/probe.ckpt" \
     $3 $OPT > "$tmp/log" 2>&1
 }
@@ -56,6 +60,10 @@ while IFS= read -r line; do
     mb=$(sed -n 's/^gpu memory: \([0-9]*\) MB.*/\1/p' "$tmp/log")
     night=$(awk -v t="$toks" -v h="$NIGHT_HOURS" 'BEGIN { printf "%.2fB", t * h * 3600 / 1e9 }')
     printf "%-20s %10s %10s %8s %9s %9s %8s %12s\n" "$name" "$params" "$active" "${b}x$a" "$ms" "$toks" "$mb" "$night"
+    extra=
+    [ "$SEQ" = 512 ] || extra+=" SEQ=$SEQ"
+    [ "$OPT" = --muon ] || extra+=" OPT=\"$OPT\""
+    cmds+=("$name:"$'\n'"  TOKS=$toks BATCH=$b ACCUM=$a$extra MODEL=\"$args\" scripts/night.sh")
   elif grep -qiE "out of memory|ALLOC_FAILED" "$tmp/log"; then
     printf "%-20s does not fit, even at batch 1 x %d\n" "$name" "$SEQ"
   else
@@ -65,3 +73,8 @@ while IFS= read -r line; do
 done <<< "${SIZES//;/$'\n'}"
 echo "batch: sequences per micro-batch x accumulation (BATCH and ACCUM for night.sh); $((BATCH * SEQ * ACCUM)) tokens per step."
 echo "tokens/night: at this speed for $NIGHT_HOURS hours; optimizer ${OPT:-AdamW}."
+if [ ${#cmds[@]} -gt 0 ]; then
+  echo
+  echo "To train one of them for a night:"
+  printf "%s\n" "${cmds[@]}"
+fi

@@ -448,6 +448,13 @@ inline Config read_config(FILE* f) {
 
 inline void save_checkpoint(const std::string& path, const Model<float>& model, const AdamW& opt,
                             const Rng& data_rng) {
+    auto finite = [](const auto& values) {
+        return std::all_of(values.begin(), values.end(), [](float x) { return std::isfinite(x); });
+    };
+    CHECK(finite(model.params) && finite(opt.m) && finite(opt.v), "non-finite checkpoint state");
+    for (const auto& bias : model.router_bias) CHECK(finite(bias), "non-finite router bias");
+    CHECK(opt.m.empty() ? opt.v.empty() : opt.m.size() == model.params.size() && opt.v.size() == opt.m.size(),
+          "invalid checkpoint optimizer size");
     const std::string tmp = path + ".tmp";
     FILE* f = std::fopen(tmp.c_str(), "wb");
     CHECK(f, "cannot write %s", tmp.c_str());
@@ -466,7 +473,8 @@ inline void save_checkpoint(const std::string& path, const Model<float>& model, 
         std::fwrite(opt.v.data(), 4, n, f);
     }
     for (const auto& b : model.router_bias) std::fwrite(b.data(), 4, b.size(), f);
-    CHECK(std::fclose(f) == 0, "error writing %s", tmp.c_str());
+    const bool write_failed = std::ferror(f) != 0;  // a full disk, say: keep the last good checkpoint
+    CHECK(std::fclose(f) == 0 && !write_failed, "error writing %s", tmp.c_str());
     // Replace atomically, so an interrupted save never destroys the last good one.
     CHECK(std::rename(tmp.c_str(), path.c_str()) == 0, "cannot rename %s", tmp.c_str());
 }
@@ -502,14 +510,22 @@ inline void load_checkpoint(const std::string& path, Model<float>& model, AdamW*
     if (has_opt && opt)
         CHECK((has_opt == 2) == opt->muon, "%s was trained %s Muon; resume it %s --muon", path.c_str(),
               has_opt == 2 ? "with" : "without", has_opt == 2 ? "with" : "without");
-    if (has_opt) {
+    if (has_opt && opt) {
         std::vector<float> m(n), v(n);
         CHECK(std::fread(m.data(), 4, n, f) == n && std::fread(v.data(), 4, n, f) == n,
               "truncated optimizer state");
-        if (opt) {
-            opt->m = std::move(m);
-            opt->v = std::move(v);
-        }
+        opt->m = std::move(m);
+        opt->v = std::move(v);
+    } else if (has_opt) {
+        // fseek beyond EOF succeeds on regular files. Check the extent before
+        // skipping moments, even for dense models with no following biases.
+        const long current = std::ftell(f);
+        CHECK(current >= 0 && n <= uint64_t(std::numeric_limits<long>::max()) / 8,
+              "optimizer state exceeds seek range");
+        CHECK(std::fseek(f, 0, SEEK_END) == 0, "cannot seek checkpoint");
+        const long end = std::ftell(f), bytes = long(n * 8);
+        CHECK(end >= current && end - current >= bytes, "truncated optimizer state");
+        CHECK(std::fseek(f, current + bytes, SEEK_SET) == 0, "cannot seek optimizer state");
     }
     for (auto& b : model.router_bias)
         CHECK(std::fread(b.data(), 4, b.size(), f) == b.size(), "truncated router bias");

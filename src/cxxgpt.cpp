@@ -10,6 +10,7 @@
 //   cxxgpt bench-infer [--ckpt model.ckpt | model options]  ternary engine vs fp32 decode
 //
 // Run a subcommand with --help for its options.
+#include <cmath>
 #include <csignal>
 #include <cstdio>
 #include <filesystem>
@@ -391,7 +392,9 @@ int cmd_prep_qa(Args& a) {
     return 0;
 }
 
-void print_eval(const EvalResult& r, bool show_failures) {
+// The table of accuracy per task and difficulty, then up to show_failures
+// of the wrong answers.
+void print_eval(const EvalResult& r, size_t show_failures) {
     std::map<std::string, std::map<int, std::pair<int, int>>> table;
     int min_d = 1 << 30, max_d = -(1 << 30);
     for (const auto& [key, cell] : r.by_task) {
@@ -418,11 +421,16 @@ void print_eval(const EvalResult& r, bool show_failures) {
         std::printf(" %5.1f%%\n", 100.0 * c / std::max(1, n));
     }
     std::printf("overall %.1f%% (%d / %d)\n", 100.0 * r.correct / std::max(1, r.total), r.correct, r.total);
-    if (show_failures)
-        for (const auto& [p, text] : r.failures)
-            std::printf("--- wrong (%s d=%d): %s\n    expected: %s\n    got:      %s\n", p.task.c_str(),
-                        p.difficulty, p.question.c_str(), (p.steps + " #### " + p.answer).c_str(),
-                        text.c_str());
+    // Multi-line answers (GSM8K's) stay indented under their label.
+    auto indent = [](std::string t) {
+        for (size_t i = 0; (i = t.find('\n', i)) != std::string::npos; i += 15) t.replace(i, 1, "\n              ");
+        return t;
+    };
+    for (size_t i = 0; i < std::min(show_failures, r.failures.size()); ++i) {
+        const auto& [p, text] = r.failures[i];
+        std::printf("--- wrong (%s d=%d): %s\n    expected: %s\n    got:      %s\n", p.task.c_str(), p.difficulty,
+                    p.question.c_str(), indent(p.steps + " #### " + p.answer).c_str(), indent(text).c_str());
+    }
 }
 
 int cmd_eval_reasoning(Args& a) {
@@ -444,7 +452,7 @@ int cmd_eval_reasoning(Args& a) {
     }
     const double t0 = now_seconds();
     const EvalResult r = eval_reasoning(model, test, tok, batch);
-    print_eval(r, show);
+    print_eval(r, show ? r.failures.size() : 0);
     std::printf("(%.1f s)\n", now_seconds() - t0);
     return 0;
 }
@@ -455,7 +463,8 @@ struct Backend {
     virtual double forward(const int* inp, const int* tgt, int B, int Tn, bool training) = 0;
     virtual void backward(double loss_scale) = 0;
     virtual void zero_grad() = 0;
-    // Clips the gradient to max_norm (if > 0), then takes an AdamW step.
+    // Clips the gradient to max_norm (if > 0), then takes an AdamW step;
+    // a gradient that is not finite (overflow, NaN) is skipped instead.
     // Returns the gradient norm before clipping.
     virtual double step(double lr, double max_norm) = 0;
     // Updates the router biases from the expert loads since the last call;
@@ -479,7 +488,7 @@ struct CpuBackend : Backend {
     void zero_grad() override { model.zero_grad(); }
     double step(double lr, double max_norm) override {
         const double norm = clip_grad_norm(model, max_norm);
-        opt.update(model, lr);
+        if (std::isfinite(norm)) opt.update(model, lr);
         return norm;
     }
     double balance(double rate) override {
@@ -509,6 +518,7 @@ struct GpuBackend : Backend {
     void zero_grad() override { gpu.zero_grad(); }
     double step(double lr, double max_norm) override {
         const double norm = gpu.grad_norm();
+        if (!std::isfinite(norm)) return norm;
         const double scale = max_norm > 0 && norm > max_norm ? double(float(max_norm / norm)) : 1.0;
         gpu.adamw_step(lr, opt.beta1, opt.beta2, opt.eps, opt.weight_decay, scale);
         ++opt.step;
@@ -556,18 +566,20 @@ int cmd_train(Args& a) {
             "train:  --batch 16 --accum 1 --steps 2000 --lr 1e-3 --min-lr-frac 0.1\n"
             "        --warmup 100 --wd 0.1 --clip 1.0 --bias-rate 1e-3 --seed 1\n"
             "        --muon (Muon instead of AdamW for the matrices in the blocks)\n"
+            "start:  --init FILE (FILE's weights and model; new optimizer, schedule and data order)\n"
             "output: --out model.ckpt --resume --log FILE.csv --log-every 10\n"
             "        --eval-every 200 --eval-batches 20 --save-every 500\n"
             "        --time-limit MINUTES --threads N --profile\n"
             "gpu:    --gpu (train on the GPU; needs cxxgpt-gpu, from make gpu) --no-tf32 (exact fp32 matmuls)\n"
             "reason: --reason-test FILE --reason-every STEPS --reason-limit 300\n"
-            "Ctrl-C saves a checkpoint and stops; --resume continues from --out.\n");
+            "Ctrl-C saves a checkpoint and stops; --resume continues from --out, and\n"
+            "takes precedence over --init once --out exists.\n");
         return 0;
     }
     ThreadPool tp(threads_arg(a));
     g_pool = &tp;
     const std::string data_path = a.str("data"), val_path = a.str("val");
-    const std::string out = a.str("out", "model.ckpt"), log_path = a.str("log");
+    const std::string out = a.str("out", "model.ckpt"), log_path = a.str("log"), init = a.str("init");
     CHECK(!data_path.empty(), "--data is required (see cxxgpt train --help)");
     const TokenData data = load_token_list(data_path);
     TokenData val_data;
@@ -576,7 +588,10 @@ int cmd_train(Args& a) {
     const bool resume = a.flag("resume") && std::filesystem::exists(out);
 
     Config cfg = config_from_args(a, int(data.vocab));
-    if (resume) cfg = peek_checkpoint_config(out);
+    if (resume)
+        cfg = peek_checkpoint_config(out);
+    else if (!init.empty())
+        cfg = peek_checkpoint_config(init);
     const int B = int(a.integer("batch", 16)), accum = int(a.integer("accum", 1));
     const int Tn = std::min(cfg.seq_len, int(a.integer("seq", cfg.seq_len)));
     const long steps = a.integer("steps", 2000), warmup = a.integer("warmup", 100);
@@ -605,6 +620,9 @@ int cmd_train(Args& a) {
     if (resume) {
         load_checkpoint(out, model, &opt, &data_rng);
         std::printf("resumed %s at step %ld\n", out.c_str(), opt.step);
+    } else if (!init.empty()) {
+        load_checkpoint(init, model, nullptr, nullptr);
+        std::printf("starting from the weights in %s\n", init.c_str());
     }
     print_config(cfg, model);
     std::unique_ptr<Backend> backend;
@@ -665,7 +683,7 @@ int cmd_train(Args& a) {
         const double t0 = now_seconds();
         const EvalResult r = eval_reasoning(model, reason_test, tok);
         std::printf("reasoning eval at step %ld (%.1f s):\n", at_step, now_seconds() - t0);
-        print_eval(r, false);
+        print_eval(r, 1);  // one wrong answer, to see what the model writes
         if (log) {
             std::fprintf(log, "# reasoning step %ld: %d/%d\n", at_step, r.correct, r.total);
             std::fflush(log);
@@ -678,6 +696,10 @@ int cmd_train(Args& a) {
     long step = opt.step;
     const long first_step = step;
     size_t empty_groups = 0;
+    constexpr int kMaxBadSteps = 10;
+    int bad_steps = 0;
+    bool diverged = false;
+    long saved_step = resume ? first_step : -1;  // what --out holds
     for (; step < steps && !g_stop;) {
         const double t0 = now_seconds();
         group.sample(data, data_rng, 0, train_end);
@@ -691,7 +713,25 @@ int cmd_train(Args& a) {
         }
         const double loss = accumulated_backward(be, group);
         const double lr_now = lr_at(step, warmup, steps, lr, min_frac);
-        const double gnorm = be.step(lr_now, clip);
+        const double gnorm = std::isfinite(loss) ? be.step(lr_now, clip)
+                                               : std::numeric_limits<double>::quiet_NaN();
+        // A non-finite gradient leaves the weights untouched (Backend::step). A run
+        // of them stops training rather than spending the night on NaNs.
+        if (!std::isfinite(gnorm) || !std::isfinite(loss)) {
+            std::printf("step %ld: loss %g, gradient norm %g; update skipped\n", step + 1, loss, gnorm);
+            be.balance(0);  // discard this attempt's loads without changing biases
+            if (++bad_steps == kMaxBadSteps) {
+                std::printf("stopping: %d diverged steps in a row\n", kMaxBadSteps);
+                diverged = true;
+                break;
+            }
+            if (time_limit > 0 && now_seconds() - t_start > time_limit) {
+                diverged = true;
+                break;
+            }
+            continue;  // failed attempts do not advance optimizer or schedule
+        }
+        bad_steps = 0;
         const double load = be.balance(bias_rate);
         const double ms = (now_seconds() - t0) * 1e3;
         if (step == first_step && be.device_bytes() > 0)
@@ -723,6 +763,7 @@ int cmd_train(Args& a) {
         if (save_every > 0 && (step + 1) % save_every == 0) {
             be.sync();
             save_checkpoint(out, model, opt, data_rng);
+            saved_step = opt.step;
         }
         if (reason_every > 0 && (step + 1) % reason_every == 0 && !last) reason_eval(step + 1);
         ++step;
@@ -733,6 +774,16 @@ int cmd_train(Args& a) {
     }
     if (g_profiler.enabled) g_profiler.report(int(step - first_step));
     if (empty_groups) std::printf("skipped %zu empty sampled groups\n", empty_groups);
+    if (diverged) {
+        // The weights are finite, but whatever overflowed is in them by now:
+        // the last checkpoint is the one to keep.
+        if (saved_step >= 0)
+            std::printf("not saved: %s keeps step %ld; resume it with a lower --lr\n", out.c_str(), saved_step);
+        else
+            std::printf("not saved: no checkpoint yet; start again with a lower --lr\n");
+        if (log) std::fclose(log);
+        return 1;
+    }
     reason_eval(step);
     be.sync();
     save_checkpoint(out, model, opt, data_rng);

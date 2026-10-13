@@ -83,8 +83,9 @@ during training).
 
 ```sh
 scripts/prepare_data.sh              # download, train our tokenizer, write token files
-scripts/probe.sh                     # GPU speed and memory per model size
-TOKS=<tokens/s> scripts/night.sh     # one night of training, checked on GSM8K
+scripts/probe.sh                     # GPU speed and memory per model size, and the
+                                     #   night.sh command for each
+TOKS=... MODEL=... scripts/night.sh  # one night of training, checked on GSM8K
 ```
 
 `prepare_data.sh` fetches GSM8K, TinyStories, FineWeb-Edu,

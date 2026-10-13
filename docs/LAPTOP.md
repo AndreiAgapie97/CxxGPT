@@ -59,6 +59,10 @@ and can do everything else from there.
 - `--time-limit MINUTES` stops training and saves a checkpoint in time for
   the morning. Ctrl-C also saves before stopping. `--resume` continues
   from the checkpoint.
+- If training diverges (the loss or gradient becomes infinite or NaN),
+  that step is skipped; ten in a row stop the run without saving over
+  the last checkpoint. The log then says which step the checkpoint holds;
+  resume it with a lower `--lr` (night.sh: `LR=...`).
 - `nvidia-smi` in another terminal shows GPU load, memory and temperature.
 
 ## The plan
@@ -71,8 +75,11 @@ and can do everything else from there.
    ```sh
    scripts/probe.sh
    ```
-   Pick the largest size that fits and trains at a useful speed; note its
-   tokens per second.
+   It ends with the `night.sh` command for each size that fits, its
+   measured speed and batch filled in. Bigger models learn more from each
+   token but see fewer of them in a night: a reasonable pick is the
+   largest size that still trains 0.3B tokens a night or more (the
+   tokens/night column), so a week of nights gives it a couple of billion.
 3. **Data:** downloads the public datasets (GSM8K, TinyStories,
    FineWeb-Edu, OpenMathInstruct-2, MetaMathQA), trains our tokenizer on a
    sample of them, and writes the token files. Safe to rerun if
@@ -86,7 +93,7 @@ and can do everything else from there.
 
 ```sh
 tmux new -s train
-TOKS=<the probe's tokens per second> scripts/night.sh
+TOKS=... BATCH=... ACCUM=... MODEL="..." scripts/night.sh   # the line the probe printed
 ```
 
 `night.sh` sizes the run so its learning-rate schedule ends when the
@@ -102,5 +109,10 @@ Run the same command again to resume after an interruption. The log is
 Worked math solutions take a larger share (OpenMathInstruct-2, MetaMathQA,
 GSM8K train), with the checkpoint from night 1 as the starting point. What
 exactly depends on what night 1 shows; we decide it together each morning.
+Starting from night 1 looks like this (the model comes from the
+checkpoint; the learning-rate schedule starts over):
+```sh
+RUN=night2 INIT=runs/night1.ckpt MIX="..." TOKS=... BATCH=... ACCUM=... scripts/night.sh
+```
 CPU-scale experiments and engine work continue on the cloud VM during the
 day.
