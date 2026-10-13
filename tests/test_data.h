@@ -1,6 +1,7 @@
 // test_data.h — the JSON reader and the problems file format.
 #pragma once
 
+#include <algorithm>
 #include <cstdio>
 
 #include "../src/json.h"
@@ -70,8 +71,39 @@ inline void test_token_writer() {
            d.tokens.size());
 }
 
+// Files mixed with repeats: tokens in order, masks kept, files without a
+// mask trained on everywhere, the largest vocabulary, and the header peek.
+inline void test_token_list() {
+    TokenData a, b;
+    a.vocab = 300;
+    b.vocab = 500;
+    for (int i = 0; i < 7; ++i) a.tokens.push_back(uint16_t(i * 41 % 300));
+    for (int i = 0; i < 5; ++i) b.tokens.push_back(uint16_t(400 + i)), b.mask.push_back(uint8_t(i % 2));
+    const std::string pa = "/tmp/cxxgpt_test_list_a.tok", pb = "/tmp/cxxgpt_test_list_b.tok";
+    a.save(pa);
+    b.save(pb);
+    const TokenData::Header h = TokenData::peek(pb);
+    EXPECT(h.vocab == 500 && h.has_mask == 1 && h.n == 5, "header of a masked file read wrongly");
+    const TokenData d = TokenData::load_list({{pa, 1}, {pb, 2}, {pa, 1}});
+    const TokenData plain = TokenData::load_list({{pa, 2}});
+    std::remove(pa.c_str());
+    std::remove(pb.c_str());
+    std::vector<uint16_t> tokens;
+    std::vector<uint8_t> mask;
+    for (const TokenData* part : {&a, &b, &b, &a}) {
+        tokens.insert(tokens.end(), part->tokens.begin(), part->tokens.end());
+        if (part->mask.empty()) mask.insert(mask.end(), part->tokens.size(), uint8_t(1));
+        else mask.insert(mask.end(), part->mask.begin(), part->mask.end());
+    }
+    EXPECT(d.vocab == 500 && d.tokens == tokens && d.mask == mask, "mixed token files combined wrongly");
+    EXPECT(plain.vocab == 300 && plain.mask.empty() && plain.tokens.size() == 14 &&
+               std::equal(a.tokens.begin(), a.tokens.end(), plain.tokens.begin() + 7),
+           "a repeated unmasked file combined wrongly");
+}
+
 inline void test_data() {
     test_json();
     test_problem_file();
     test_token_writer();
+    test_token_list();
 }

@@ -63,20 +63,44 @@ and can do everything else from there.
 
 ## The plan
 
-1. **First evening:** setup and tests, then a throughput probe: how many
-   tokens per second each model size trains at, and whether it fits in
-   the 8 GB (a few minutes):
+### First evening (about two hours, mostly downloads)
+
+1. Setup and tests, as above.
+2. **Throughput probe:** how many tokens per second each model size trains
+   at, and whether it fits in the 8 GB (a few minutes):
    ```sh
    scripts/probe.sh
    ```
-   Then the data downloads and our tokenizer:
+   Pick the largest size that fits and trains at a useful speed; note its
+   tokens per second.
+3. **Data:** downloads the public datasets (GSM8K, TinyStories,
+   FineWeb-Edu, OpenMathInstruct-2, MetaMathQA), trains our tokenizer on a
+   sample of them, and writes the token files. Safe to rerun if
+   interrupted:
    ```sh
-   .venv/bin/python scripts/get_data.py gsm8k tinystories fineweb-edu openmath2 metamath
+   scripts/prepare_data.sh
    ```
-   Each source is a few GB at most; everything fits in well under 100 GB.
-2. **Night 1:** general text plus math, so the model learns language.
-3. **Following nights:** worked math solutions (OpenMathInstruct-2,
-   MetaMathQA, GSM8K train), checked every few hundred steps on the
-   GSM8K test set, which training never sees.
-4. **In between:** CPU-scale experiments and engine work continue on the
-   cloud VM during the day; the laptop trains at night.
+   About 10 GB of downloads; everything fits well under 50 GB.
+
+### Night 1
+
+```sh
+tmux new -s train
+TOKS=<the probe's tokens per second> scripts/night.sh
+```
+
+`night.sh` sizes the run so its learning-rate schedule ends when the
+night does (7.5 hours by default), trains on web text, stories and worked
+math, and checks itself on the GSM8K test set, which training never sees:
+validation loss every 500 steps, exact answers every 2000. Its settings
+(model size, optimizer, batch, data mix) are at the top of the script.
+Run the same command again to resume after an interruption. The log is
+`runs/night1.log`.
+
+### Following nights
+
+Worked math solutions take a larger share (OpenMathInstruct-2, MetaMathQA,
+GSM8K train), with the checkpoint from night 1 as the starting point. What
+exactly depends on what night 1 shows; we decide it together each morning.
+CPU-scale experiments and engine work continue on the cloud VM during the
+day.

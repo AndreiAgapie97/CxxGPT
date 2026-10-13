@@ -234,27 +234,14 @@ void append_problem(TokenData& d, const Problem& p, const Tokenizer& tok) {
 // "a.tok,b.tok*3": the files concatenated, b three times (to weight a small
 // dataset up). A file without a mask counts as all trained-on.
 TokenData load_token_list(const std::string& spec) {
-    std::vector<std::pair<TokenData, int>> parts;
-    bool any_mask = false;
+    std::vector<std::pair<std::string, int>> files;
     for (const std::string& item : split(spec, ',')) {
         const size_t star = item.rfind('*');
         const int times = star == std::string::npos ? 1 : std::atoi(item.c_str() + star + 1);
         CHECK(times >= 1, "bad repeat count in '%s'", item.c_str());
-        parts.emplace_back(TokenData::load(item.substr(0, star)), times);
-        any_mask |= !parts.back().first.mask.empty();
+        files.emplace_back(item.substr(0, star), times);
     }
-    if (parts.size() == 1 && parts[0].second == 1) return std::move(parts[0].first);
-    TokenData d;
-    for (auto& [part, times] : parts) {
-        d.vocab = std::max(d.vocab, part.vocab);
-        for (int r = 0; r < times; ++r) {
-            d.tokens.insert(d.tokens.end(), part.tokens.begin(), part.tokens.end());
-            if (!any_mask) continue;
-            if (part.mask.empty()) d.mask.insert(d.mask.end(), part.tokens.size(), 1);
-            else d.mask.insert(d.mask.end(), part.mask.begin(), part.mask.end());
-        }
-    }
-    return d;
+    return TokenData::load_list(files);
 }
 
 // Training data (masked so only answers are learned), a validation slice,
