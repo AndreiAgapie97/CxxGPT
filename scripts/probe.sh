@@ -21,22 +21,33 @@ NIGHT_HOURS=${NIGHT_HOURS:-7.5}
 
 DEFAULT_SIZES="d512-dense:--dim 512 --layers 8 --heads 8
 d512-moe-ternary:--dim 512 --layers 8 --heads 8 --experts 8 --topk 2 --ternary
+d640-moe-ternary:--dim 640 --layers 10 --heads 10 --experts 8 --topk 2 --ternary
 d768-dense:--dim 768 --layers 12 --heads 12
-d768-moe-ternary:--dim 768 --layers 12 --heads 12 --experts 8 --topk 2 --ternary
-d1024-moe-ternary:--dim 1024 --layers 16 --heads 16 --experts 8 --topk 2 --ternary"
+d768-moe-ternary:--dim 768 --layers 12 --heads 12 --experts 8 --topk 2 --ternary"
 SIZES=${SIZES:-$DEFAULT_SIZES}
 
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
-printf "%-20s %10s %10s %9s %9s %8s %12s\n" size params active "ms/step" "tok/s" "GPU MB" "tokens/night"
+printf "%-20s %10s %10s %8s %9s %9s %8s %12s\n" size params active "batch" "ms/step" "tok/s" "GPU MB" "tokens/night"
+# One size at batch b x accumulation a; output in $tmp/log.
+run() {
+  # shellcheck disable=SC2086
+  ./cxxgpt-gpu train --gpu --data data/reason.train.tok --vocab "$VOCAB" --seq "$SEQ" --batch "$1" \
+    --accum "$2" --steps "$STEPS" --warmup 5 --eval-every 0 --log-every 10 --save-every 0 --out "$tmp/probe.ckpt" \
+    $3 $OPT > "$tmp/log" 2>&1
+}
 while IFS= read -r line; do
   [ -n "$line" ] || continue
   name=${line%%:*}
   args=${line#*:}
-  # shellcheck disable=SC2086
-  if ./cxxgpt-gpu train --gpu --data data/reason.train.tok --vocab "$VOCAB" --seq "$SEQ" --batch "$BATCH" \
-      --accum "$ACCUM" --steps "$STEPS" --warmup 5 --eval-every 0 --log-every 10 --save-every 0 --out "$tmp/probe.ckpt" \
-      $args $OPT > "$tmp/log" 2>&1; then
+  # Out of memory: half the batch, twice the accumulation, same tokens per step.
+  b=$BATCH a=$ACCUM ok=0
+  while :; do
+    if run "$b" "$a" "$args"; then ok=1; break; fi
+    grep -qiE "out of memory|ALLOC_FAILED" "$tmp/log" && [ "$b" -gt 1 ] || break
+    b=$((b / 2)) a=$((a * 2))
+  done
+  if [ $ok = 1 ]; then
     params=$(sed -n 's/^params: \([0-9.]* M\) total, \([0-9.]* M\) active.*/\1/p' "$tmp/log")
     active=$(sed -n 's/^params: \([0-9.]* M\) total, \([0-9.]* M\) active.*/\2/p' "$tmp/log")
     # The last log line averages the final 10 steps, after the warm-up ones.
@@ -44,12 +55,13 @@ while IFS= read -r line; do
     toks=$(grep "^step" "$tmp/log" | tail -1 | sed 's/.*| *\([0-9.]*\) tok\/s.*/\1/')
     mb=$(sed -n 's/^gpu memory: \([0-9]*\) MB.*/\1/p' "$tmp/log")
     night=$(awk -v t="$toks" -v h="$NIGHT_HOURS" 'BEGIN { printf "%.2fB", t * h * 3600 / 1e9 }')
-    printf "%-20s %10s %10s %9s %9s %8s %12s\n" "$name" "$params" "$active" "$ms" "$toks" "$mb" "$night"
-  elif grep -q "out of memory" "$tmp/log"; then
-    printf "%-20s out of GPU memory at batch %d x %d (try BATCH=%d)\n" "$name" "$BATCH" "$SEQ" $((BATCH / 2))
+    printf "%-20s %10s %10s %8s %9s %9s %8s %12s\n" "$name" "$params" "$active" "${b}x$a" "$ms" "$toks" "$mb" "$night"
+  elif grep -qiE "out of memory|ALLOC_FAILED" "$tmp/log"; then
+    printf "%-20s does not fit, even at batch 1 x %d\n" "$name" "$SEQ"
   else
     printf "%-20s failed:\n" "$name"
     tail -5 "$tmp/log"
   fi
 done <<< "${SIZES//;/$'\n'}"
-echo "tokens/night: at this speed for $NIGHT_HOURS hours ($((BATCH * SEQ * ACCUM)) tokens per step, optimizer: ${OPT:-AdamW})."
+echo "batch: sequences per micro-batch x accumulation (BATCH and ACCUM for night.sh); $((BATCH * SEQ * ACCUM)) tokens per step."
+echo "tokens/night: at this speed for $NIGHT_HOURS hours; optimizer ${OPT:-AdamW}."
