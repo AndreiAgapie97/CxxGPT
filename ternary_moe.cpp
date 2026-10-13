@@ -48,18 +48,28 @@ constexpr int kMinRowsPerThread = 16;
 // =============================================================================
 // Thread pool — persistent workers, parallel_for over output rows
 // =============================================================================
+// A condition-variable handoff costs tens of microseconds per job (futex
+// wake + scheduler), which is longer than a whole expert-sized GEMV. So the
+// workers spin on an atomic between jobs and only fall back to sleeping
+// after kSpinMicros without work.
+static inline void cpu_relax() {
+#if defined(__x86_64__) || defined(__i386__)
+    __builtin_ia32_pause();
+#elif defined(__aarch64__)
+    asm volatile("yield");
+#endif
+}
+
 class ThreadPool {
 public:
     explicit ThreadPool(int n) : nthreads_(std::max(1, n)) {
-        for (int i = 1; i < nthreads_; ++i)
-            workers_.emplace_back([this, i] { worker(i); });
+        for (int i = 1; i < nthreads_; ++i) workers_.emplace_back([this] { worker(); });
     }
 
     ~ThreadPool() {
         {
             std::lock_guard<std::mutex> lk(m_);
-            stop_ = true;
-            ++generation_;
+            stop_.store(true, std::memory_order_relaxed);
         }
         cv_.notify_all();
         for (auto& t : workers_) t.join();
@@ -67,7 +77,9 @@ public:
 
     int size() const { return nthreads_; }
 
-    // fn(row_begin, row_end) is called once per thread with a disjoint range.
+    // Calls fn(row_begin, row_end) on disjoint ranges that together cover
+    // [0, total), spread across the pool's threads and the caller. Ranges are
+    // claimed dynamically, so a slow or preempted thread just takes fewer.
     // Safe to call from several threads (jobs run one at a time), but not
     // reentrant: fn must not call parallel_for itself.
     void parallel_for(int total, const std::function<void(int, int)>& fn) {
@@ -76,53 +88,112 @@ public:
             return;
         }
         std::lock_guard<std::mutex> one_job(call_m_);
-        {
+        // Close the previous job first. A worker can still hold its exhausted
+        // cursor (gen, old_total); compared against the new total, that would
+        // look like unclaimed rows, and its CAS would succeed until the cursor
+        // changes. total_ is written last with release, so a worker that reads
+        // the new total also sees the close and its claim fails.
+        cursor_.store((uint64_t(gen_) << 32) | kClosed, std::memory_order_relaxed);
+        job_.store(&fn, std::memory_order_relaxed);
+        chunk_.store(std::max(cfg::kMinRowsPerThread, total / (nthreads_ * kChunksPerThread)),
+                     std::memory_order_relaxed);
+        done_.store(0, std::memory_order_relaxed);
+        total_.store(total, std::memory_order_release);
+        const uint32_t gen = ++gen_;
+        bool wake;
+        {   // under m_ so a worker about to sleep sees either this job or the notify
             std::lock_guard<std::mutex> lk(m_);
-            job_ = &fn;
-            total_ = total;
-            pending_ = nthreads_ - 1;
-            ++generation_;
+            cursor_.store(uint64_t(gen) << 32, std::memory_order_release);
+            wake = sleepers_ > 0;
         }
-        cv_.notify_all();
-        run_chunk(0);  // this thread takes chunk 0
-        std::unique_lock<std::mutex> lk(m_);
-        done_.wait(lk, [this] { return pending_ == 0; });
-        job_ = nullptr;
+        if (wake) cv_.notify_all();
+
+        work(gen);
+        for (unsigned spins = 0;; ++spins) {
+            const int done = done_.load(std::memory_order_acquire);
+            assert(done <= total && "a row was claimed twice");
+            if (done == total) break;
+            if (spins < 1u << 20) cpu_relax();
+            else std::this_thread::yield();  // a worker got preempted mid-chunk
+        }
     }
 
 private:
-    void run_chunk(int idx) {
-        const int per = (total_ + nthreads_ - 1) / nthreads_;
-        const int r0 = std::min(idx * per, total_);
-        const int r1 = std::min(r0 + per, total_);
-        if (r0 < r1) (*job_)(r0, r1);
+    static constexpr int kChunksPerThread = 2;  // each claim costs ~0.5 us of cache traffic
+    static constexpr uint32_t kClosed = 0x7FFFFFFF;  // cursor row: no job open
+public:
+    static constexpr int kSpinMicros = 1000;
+
+private:
+
+    // Claim and run chunks of job `gen` until none are left. The cursor packs
+    // (generation << 32 | next row), so a claim made by a worker that woke up
+    // late for an already-finished job fails instead of touching the next one.
+    void work(uint32_t gen) {
+        uint64_t c = cursor_.load(std::memory_order_acquire);
+        for (;;) {
+            if (uint32_t(c >> 32) != gen) return;
+            const int total = total_.load(std::memory_order_acquire);
+            const int r0 = int(uint32_t(c));
+            if (r0 >= total) return;
+            const int r1 = std::min(r0 + chunk_.load(std::memory_order_relaxed), total);
+            if (!cursor_.compare_exchange_weak(c, (uint64_t(gen) << 32) | uint32_t(r1),
+                                               std::memory_order_acquire))
+                continue;
+            // The claim succeeded, so job `gen` is still running and job_ is its.
+            (*job_.load(std::memory_order_relaxed))(r0, r1);
+            done_.fetch_add(r1 - r0, std::memory_order_release);
+        }
     }
 
-    void worker(int idx) {
-        uint64_t seen = 0;
+    uint32_t current_gen() const {
+        return uint32_t(cursor_.load(std::memory_order_acquire) >> 32);
+    }
+
+    // Spin until a job newer than `seen` is posted (or stop), then sleep.
+    uint32_t wait_for_job(uint32_t seen) {
+        const auto deadline =
+            std::chrono::steady_clock::now() + std::chrono::microseconds(kSpinMicros);
+        for (unsigned i = 1;; ++i) {
+            if (current_gen() != seen || stop_.load(std::memory_order_relaxed))
+                return current_gen();
+            cpu_relax();
+            if (i % 256 == 0 && std::chrono::steady_clock::now() > deadline) break;
+        }
+        std::unique_lock<std::mutex> lk(m_);
+        ++sleepers_;
+        cv_.wait(lk, [&] { return current_gen() != seen || stop_.load(std::memory_order_relaxed); });
+        --sleepers_;
+        return current_gen();
+    }
+
+    void worker() {
+        uint32_t seen = 0;
         for (;;) {
-            std::unique_lock<std::mutex> lk(m_);
-            cv_.wait(lk, [this, &seen] { return generation_ != seen; });
-            seen = generation_;
-            if (stop_) return;
-            lk.unlock();
-
-            run_chunk(idx);
-
-            lk.lock();
-            if (--pending_ == 0) done_.notify_one();
+            seen = wait_for_job(seen);
+            if (stop_.load(std::memory_order_relaxed)) return;
+            work(seen);
         }
     }
 
     const int nthreads_;
     std::vector<std::thread> workers_;
-    std::mutex call_m_;  // held for a whole job; m_ guards the job state below
-    std::mutex m_;
-    std::condition_variable cv_, done_;
-    const std::function<void(int, int)>* job_ = nullptr;
-    int total_ = 0, pending_ = 0;
-    uint64_t generation_ = 0;
-    bool stop_ = false;
+    std::mutex call_m_;  // held for a whole job
+    uint32_t gen_ = 0;   // guarded by call_m_
+
+    // Job description: written before the cursor is published, read by
+    // workers after they see it. Atomic only because a late worker may read
+    // them while the next job is being set up (and then discard them).
+    std::atomic<const std::function<void(int, int)>*> job_{nullptr};
+    std::atomic<int> total_{0}, chunk_{1};
+
+    alignas(64) std::atomic<uint64_t> cursor_{0};
+    alignas(64) std::atomic<int> done_{0};  // rows finished in the current job
+
+    alignas(64) std::mutex m_;  // sleeping only
+    std::condition_variable cv_;
+    int sleepers_ = 0;          // guarded by m_
+    std::atomic<bool> stop_{false};
 };
 
 static ThreadPool* g_pool = nullptr;
@@ -864,6 +935,33 @@ static void test_quantizer() {
           "quantizer: all-zero input");
 }
 
+// parallel_for must hand out every index exactly once: across back-to-back
+// jobs (workers still spinning), after an idle gap long enough for workers to
+// fall asleep, and with pools created and destroyed around it.
+static void test_thread_pool() {
+    for (int nt : {2, 3, 4}) {
+        ThreadPool tp(nt);
+        std::mt19937 rng{uint32_t(nt)};
+        std::uniform_int_distribution<int> size(1, 3000);
+        int bad_jobs = 0;
+        for (int job = 0; job < 400; ++job) {
+            if (job == 200)  // let every worker go to sleep, then wake them
+                std::this_thread::sleep_for(std::chrono::microseconds(3 * ThreadPool::kSpinMicros));
+            const int total = size(rng);
+            std::vector<std::atomic<int>> hits(static_cast<size_t>(total));
+            for (auto& h : hits) h.store(0, std::memory_order_relaxed);
+            tp.parallel_for(total, [&](int r0, int r1) {
+                for (int r = r0; r < r1; ++r) hits[size_t(r)].fetch_add(1, std::memory_order_relaxed);
+            });
+            for (auto& h : hits)
+                if (h.load(std::memory_order_relaxed) != 1) { ++bad_jobs; break; }
+        }
+        char buf[96];
+        snprintf(buf, sizeof buf, "thread pool, %d threads: %d of 400 jobs missed or repeated rows", nt, bad_jobs);
+        check(bad_jobs == 0, buf);
+    }
+}
+
 // Two threads calling the kernels at once must each get their own answer:
 // no shared quantization scratch, no clobbered thread pool job.
 static void test_concurrent_callers() {
@@ -1004,6 +1102,7 @@ static void run_tests() {
         run_case(label, random_ternary(Mt, 128, 0.6, 79), random_activations(128, 12), Mt, 128);
     }
 
+    test_thread_pool();
     test_concurrent_callers();
     test_moe();
 
