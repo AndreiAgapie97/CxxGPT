@@ -789,7 +789,15 @@ int cmd_bench_infer(Args& a) {
     ThreadPool tp(threads_arg(a));
     g_pool = &tp;
     const std::string ckpt = a.str("ckpt");
+    if (a.flag("help")) {
+        std::printf("cxxgpt bench-infer [--ckpt FILE | model options]\n"
+                    "    --tokens 128 --reps 7 --warmup 2 --threads N --log FILE.csv\n"
+                    "Alternates fp32/packed run order on the same forced token stream.\n");
+        return 0;
+    }
     const int tokens = int(a.integer("tokens", 128)), reps = int(a.integer("reps", 7));
+    const int warmup = int(a.integer("warmup", 2));
+    const std::string log_path = a.str("log");
     Config cfg = config_from_args(a, 256);
     a.done();
     if (!ckpt.empty()) cfg = peek_checkpoint_config(ckpt);
@@ -801,6 +809,7 @@ int cmd_bench_infer(Args& a) {
     else load_checkpoint(ckpt, model, nullptr, nullptr);
     print_config(cfg, model);
     CHECK(tokens > 0 && tokens <= cfg.seq_len, "--tokens must be in [1, seq_len]");
+    CHECK(reps > 0 && warmup >= 0, "--reps must be positive and --warmup nonnegative");
 
     // fp32 baseline: the quantized weights as plain floats, no activation
     // quantization.
@@ -816,31 +825,59 @@ int cmd_bench_infer(Args& a) {
     std::vector<int> seq(tokens);
     for (int& t : seq) t = int(rng.below(cfg.vocab));
     std::vector<double> t_fp32, t_tern;
-    double agree = 0;
-    for (int r = 0; r < reps; ++r) {
-        double t0 = now_seconds();
-        fp32.decode_begin(1, {0});
-        std::vector<int> top_fp32;
-        for (int pos = 0; pos < tokens; ++pos) {
-            const float* lg = fp32.decode_step(&seq[pos], pos);
-            top_fp32.push_back(pick_token(lg, cfg.vocab, 0.0, nullptr));
-        }
-        t_fp32.push_back(now_seconds() - t0);
-        t0 = now_seconds();
-        engine.reset();
+    std::vector<int> top_fp32(tokens), top_tern(tokens);
+    auto run_pair = [&](bool fp32_first, double& elapsed_fp32, double& elapsed_tern) {
+        auto run_fp32 = [&] {
+            const double t0 = now_seconds();
+            fp32.decode_begin(1, {0});
+            for (int pos = 0; pos < tokens; ++pos)
+                top_fp32[pos] = pick_token(fp32.decode_step(&seq[pos], pos), cfg.vocab, 0.0, nullptr);
+            elapsed_fp32 = now_seconds() - t0;
+        };
+        auto run_tern = [&] {
+            const double t0 = now_seconds();
+            engine.reset();
+            for (int pos = 0; pos < tokens; ++pos)
+                top_tern[pos] = pick_token(engine.step(seq[pos]), cfg.vocab, 0.0, nullptr);
+            elapsed_tern = now_seconds() - t0;
+        };
+        if (fp32_first) { run_fp32(); run_tern(); }
+        else { run_tern(); run_fp32(); }
         int same = 0;
-        for (int pos = 0; pos < tokens; ++pos)
-            same += pick_token(engine.step(seq[pos]), cfg.vocab, 0.0, nullptr) == top_fp32[pos];
-        t_tern.push_back(now_seconds() - t0);
-        agree = double(same) / tokens;
+        for (int pos = 0; pos < tokens; ++pos) same += top_fp32[pos] == top_tern[pos];
+        return double(same) / tokens;
+    };
+    FILE* log = nullptr;
+    if (!log_path.empty()) {
+        CHECK(!std::filesystem::exists(log_path), "benchmark log already exists: %s", log_path.c_str());
+        log = std::fopen(log_path.c_str(), "w");
+        CHECK(log, "cannot write %s", log_path.c_str());
+        std::fprintf(log, "trial,fp32_first,tokens,threads,fp32_ms,ternary_ms,argmax_agreement,fp32_weight_bytes,ternary_weight_bytes\n");
     }
+    double agree = 0;
+    for (int r = 0; r < warmup; ++r) {
+        double f, t;
+        run_pair(r % 2 == 0, f, t);
+    }
+    for (int r = 0; r < reps; ++r) {
+        double f, t;
+        const double same = run_pair(r % 2 == 0, f, t);
+        t_fp32.push_back(f); t_tern.push_back(t);
+        agree += same / reps;
+        if (log) std::fprintf(log, "%d,%d,%d,%d,%.9f,%.9f,%.9f,%zu,%zu\n", r,
+                              int(r % 2 == 0), tokens, tp.size(), f * 1e3, t * 1e3, same,
+                              model.num_params() * sizeof(float), engine.weight_bytes());
+    }
+    if (log) std::fclose(log);
     auto median = [](std::vector<double> v) {
         std::sort(v.begin(), v.end());
-        return v[v.size() / 2];
+        const size_t i = v.size() / 2;
+        return v.size() % 2 ? v[i] : (v[i - 1] + v[i]) / 2;
     };
     const double f = tokens / median(t_fp32), t = tokens / median(t_tern);
     const double fb = double(model.num_params()) * 4, tb = double(engine.weight_bytes());
-    std::printf("decode, 1 sequence, %d tokens, median of %d, %d threads:\n", tokens, reps, tp.size());
+    std::printf("decode, 1 sequence, %d tokens, median of %d, %d threads (%d warmup pairs, alternating order):\n",
+                tokens, reps, tp.size(), warmup);
     std::printf("  fp32     %9.1f tok/s   weights %8.2f MB\n", f, fb / 1e6);
     std::printf("  ternary  %9.1f tok/s   weights %8.2f MB\n", t, tb / 1e6);
     std::printf("  speedup %.2fx, memory %.1fx smaller; same argmax as fp32 on %.0f%% of positions\n",

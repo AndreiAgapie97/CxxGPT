@@ -64,23 +64,28 @@ bench: ternary_moe
 	./ternary_moe
 
 # Sanitizer builds run the tests only.
-asan: ternary_moe.cpp tests/test_engine.cpp experiments/toy_world.cpp $(HEADERS) $(TEST_HEADERS)
+asan: ternary_moe.cpp tests/test_engine.cpp experiments/toy_world.cpp src/cxxgpt.cpp $(HEADERS) $(TEST_HEADERS) test_training_cli
 	$(CXX) $(SANFLAGS) -fsanitize=address,undefined -fno-sanitize-recover=undefined \
 	    ternary_moe.cpp -o ternary_moe_asan
 	$(CXX) $(SANFLAGS) -fsanitize=address,undefined -fno-sanitize-recover=undefined \
 	    tests/test_engine.cpp -o test_engine_asan
 	$(CXX) $(SANFLAGS) -fsanitize=address,undefined -fno-sanitize-recover=undefined \
 	    experiments/toy_world.cpp -o research_experiment_asan
+	$(CXX) $(SANFLAGS) -fsanitize=address,undefined -fno-sanitize-recover=undefined \
+	    src/cxxgpt.cpp -o cxxgpt_asan
 	./ternary_moe_asan --tests
 	./test_engine_asan
+	CXXGPT=./cxxgpt_asan bash tests/test_cli.sh
 	./research_experiment_asan --steps 5 --seeds 1 --threads 2 --continual --rl-steps 5 --out runs/asan-smoke-$$$$.csv
 
-tsan: ternary_moe.cpp tests/test_engine.cpp experiments/toy_world.cpp $(HEADERS) $(TEST_HEADERS)
+tsan: ternary_moe.cpp tests/test_engine.cpp experiments/toy_world.cpp src/cxxgpt.cpp $(HEADERS) $(TEST_HEADERS) test_training_cli
 	$(CXX) $(SANFLAGS) -fsanitize=thread ternary_moe.cpp -o ternary_moe_tsan
 	$(CXX) $(SANFLAGS) -fsanitize=thread tests/test_engine.cpp -o test_engine_tsan
 	$(CXX) $(SANFLAGS) -fsanitize=thread experiments/toy_world.cpp -o research_experiment_tsan
+	$(CXX) $(SANFLAGS) -fsanitize=thread src/cxxgpt.cpp -o cxxgpt_tsan
 	./ternary_moe_tsan --tests
 	./test_engine_tsan
+	CXXGPT=./cxxgpt_tsan bash tests/test_cli.sh
 	./research_experiment_tsan --steps 5 --seeds 1 --threads 2 --continual --rl-steps 5 --out runs/tsan-smoke-$$$$.csv
 
 clean:
