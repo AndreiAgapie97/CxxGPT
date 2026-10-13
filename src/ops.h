@@ -451,8 +451,11 @@ T ternary_quantize(T* wq, const T* w, long n) {
     return gamma;
 }
 
-// int8 activations, one scale per row (token): x_q = round(x * 127 / max|x|)
-// * max|x| / 127. Same symmetric [-127, 127] range as the inference kernels.
+// int8 activations, one scale per row (token): scale = max|x| / 127,
+// x_q = round(x / scale) * scale, with exactly the arithmetic of the
+// inference kernels' quantize_int8 (multiply by 1 / scale, round half to
+// even, clamp to [-127, 127]), so a trained model sees the same int8 levels
+// in training and in deployment.
 template <class T>
 void act_quantize(T* xq, const T* x, int N, int C) {
     PROFILE("act_quant");
@@ -466,8 +469,8 @@ void act_quantize(T* xq, const T* x, int N, int C) {
                 std::fill(q, q + C, T(0));
                 continue;
             }
-            const T s = T(127) / amax, inv = amax / T(127);
-            for (int c = 0; c < C; ++c) q[c] = std::nearbyint(xn[c] * s) * inv;
+            const T scale = amax / T(127), inv = T(1) / scale;
+            for (int c = 0; c < C; ++c) q[c] = std::clamp(std::nearbyint(xn[c] * inv), T(-127), T(127)) * scale;
         }
     });
 }

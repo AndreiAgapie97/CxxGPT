@@ -1,6 +1,7 @@
 // test_model.h — whole-model gradient checks and the BitLinear pieces.
 #pragma once
 
+#include "../src/infer.h"
 #include "../src/model.h"
 #include "test_util.h"
 
@@ -241,7 +242,65 @@ inline void test_decode_matches_forward() {
     }
 }
 
+// A ternary model on the bitplane int8 kernels computes what the training
+// forward pass computes (which fake-quantizes with the same arithmetic).
+inline void test_ternary_engine() {
+    for (int variant = 0; variant < 2; ++variant) {
+        Config cfg;
+        cfg.vocab = 40;
+        cfg.seq_len = 24;
+        cfg.d_model = 64;
+        cfg.n_layers = 2;
+        cfg.n_heads = 4;
+        cfg.ternary = true;
+        if (variant == 1) {
+            cfg.n_experts = 4;
+            cfg.top_k = 2;
+            cfg.n_shared = 1;
+            cfg.expert_hidden = 64;
+        }
+        Model<float> m(cfg);
+        m.init(17);
+        // Larger weights than the init, so activations are far from zero
+        // and the comparison is meaningful.
+        Rng rng(18);
+        for (auto& w : m.params) w = float(rng.normal() * 0.3);
+        m.weights_dirty = true;
+        TernaryEngine eng(m);
+        std::vector<int> toks(cfg.seq_len);
+        for (auto& t : toks) t = int(rng.below(cfg.vocab));
+        m.decode_begin(1, {0});
+        // Training and inference sum in different orders, so an activation
+        // within ~1e-5 of an int8 rounding midpoint can round to the
+        // neighbouring level in one and not the other. That is rare and
+        // small; everything else must agree to float rounding.
+        double worst = 0;
+        std::vector<double> errs;
+        for (int pos = 0; pos < cfg.seq_len; ++pos) {
+            const float* ref = m.decode_step(&toks[pos], pos);
+            const float* got = eng.step(toks[pos]);
+            double mx = 0, diff = 0;
+            for (int v = 0; v < cfg.vocab; ++v) {
+                mx = std::max(mx, std::abs(double(ref[v])));
+                diff = std::max(diff, std::abs(double(ref[v]) - got[v]));
+            }
+            worst = std::max(worst, diff / mx);
+            errs.push_back(diff / mx);
+        }
+        std::sort(errs.begin(), errs.end());
+        const double median = errs[errs.size() / 2];
+        EXPECT(median < 1e-5 && worst < 2e-2, "ternary engine vs training forward (%s): median %g, worst %g",
+               variant ? "MoE" : "dense", median, worst);
+        // Bitplanes: 2 bits per ternary weight, versus 32 in training.
+        size_t ternary_weights = 0;
+        for (const auto& p : m.infos) ternary_weights += p.ternary ? p.size : 0;
+        const size_t float_bytes = (m.num_params() - ternary_weights) * 4;
+        EXPECT(eng.weight_bytes() < float_bytes + ternary_weights / 4 + 4096, "weight bytes %zu", eng.weight_bytes());
+    }
+}
+
 inline void test_model() {
+    test_ternary_engine();
     test_decode_matches_forward();
     test_model_gradients();
     test_model_float_vs_double();

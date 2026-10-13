@@ -38,7 +38,12 @@ struct Config {
     int dense_hidden() const {
         return ffn_hidden ? ffn_hidden : std::max(32, (d_model * 8 / 3 + 31) / 32 * 32);
     }
-    int ehidden() const { return expert_hidden ? expert_hidden : std::max(8, dense_hidden() / top_k); }
+    // Default expert size: the dense FFN split across the top_k experts a
+    // token uses (same active compute), rounded up to a multiple of 32 as
+    // the inference kernels' bitplanes need.
+    int ehidden() const {
+        return expert_hidden ? expert_hidden : std::max(32, (dense_hidden() / top_k + 31) / 32 * 32);
+    }
     bool moe() const { return n_experts > 0; }
     // Hidden size of the always-on FFN part: the dense FFN, or the shared experts.
     int always_hidden() const { return moe() ? n_shared * ehidden() : dense_hidden(); }

@@ -9,7 +9,7 @@ TEST_HEADERS := $(wildcard tests/*.h)
 
 all: ternary_moe test_engine cxxgpt
 
-ternary_moe: ternary_moe.cpp src/thread_pool.h
+ternary_moe: ternary_moe.cpp src/ternary.h src/thread_pool.h
 	$(CXX) $(CXXFLAGS) $< -o $@
 
 test_engine: tests/test_engine.cpp $(HEADERS) $(TEST_HEADERS)
