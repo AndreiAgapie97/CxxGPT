@@ -30,9 +30,11 @@ and can do everything else from there.
 ### In Ubuntu
 
 5. Check that the GPU is visible: `nvidia-smi` should list the RTX 4070.
-6. Get the code, in the Linux home folder (much faster than `/mnt/c`):
+6. Get the code, in the Linux home folder (much faster than `/mnt/c`).
+   `-b main` picks the branch the work is on; without it, git takes the
+   repository's default branch, which may be an older one:
    ```sh
-   git clone https://github.com/AndreiAgapie97/CxxGPT.git ~/CxxGPT
+   git clone -b main https://github.com/AndreiAgapie97/CxxGPT.git ~/CxxGPT
    cd ~/CxxGPT
    ```
 7. Run the setup script. It installs the compilers, the CUDA compiler and
