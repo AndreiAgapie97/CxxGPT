@@ -26,9 +26,9 @@ cxxgpt: src/cxxgpt.cpp $(HEADERS)
 # The CUDA training backend (train --gpu). Needs the CUDA toolkit (nvcc,
 # cuBLAS). CUDA_ARCH=native targets the GPU in this machine; name one (e.g.
 # sm_89 for an RTX 40xx) to build where there is none.
-NVCC      ?= nvcc
-CUDA_ARCH ?= native
 CUDA_HOME ?= /usr/local/cuda
+NVCC      ?= $(CUDA_HOME)/bin/nvcc
+CUDA_ARCH ?= native
 NVCCFLAGS ?= -O3 -std=c++20 -arch=$(CUDA_ARCH) -Xcompiler -Wall,-Wextra $(NVCC_EXTRA)
 CUDA_LIBS ?= -L$(CUDA_HOME)/lib64 -Wl,-rpath,$(CUDA_HOME)/lib64 -lcublas -lcudart
 

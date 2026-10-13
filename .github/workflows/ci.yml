@@ -80,3 +80,11 @@ jobs:
           CUDA_HOME=/usr/local/cuda-$(echo ${{ matrix.cuda }} | tr - .)
           make gpu NVCC=$CUDA_HOME/bin/nvcc CUDA_HOME=$CUDA_HOME CUDA_ARCH=sm_89 EXTRA=-Werror \
             NVCC_EXTRA="-Werror all-warnings -Xcompiler -Werror"
+
+  # The laptop setup script, minus the steps that need a GPU present.
+  setup-script:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - run: NO_GPU=1 scripts/setup_wsl.sh
