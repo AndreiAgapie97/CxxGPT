@@ -2,6 +2,9 @@ ternary_moe
 test_engine
 cxxgpt
 research_experiment
+cxxgpt-gpu
+test_gpu
+gpu.o
 *_asan
 *_tsan
 data/

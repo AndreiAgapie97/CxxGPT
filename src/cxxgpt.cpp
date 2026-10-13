@@ -15,12 +15,16 @@
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <memory>
 #include <set>
 #include <thread>
 
 #include "args.h"
 #include "common.h"
 #include "generate.h"
+#ifdef CXXGPT_CUDA
+#include "gpu.h"
+#endif
 #include "infer.h"
 #include "json.h"
 #include "model.h"
@@ -341,14 +345,94 @@ int cmd_eval_reasoning(Args& a) {
     return 0;
 }
 
-double eval_loss(Model<float>& model, const TokenData& data, size_t lo, size_t hi, int B, int Tn,
-                 int batches) {
+// One training step's operations, on the CPU or the GPU.
+struct Backend {
+    virtual ~Backend() = default;
+    virtual double forward(const int* inp, const int* tgt, int B, int Tn, bool training) = 0;
+    virtual void backward(double loss_scale) = 0;
+    virtual void zero_grad() = 0;
+    // Clips the gradient to max_norm (if > 0), then takes an AdamW step.
+    // Returns the gradient norm before clipping.
+    virtual double step(double lr, double max_norm) = 0;
+    // Updates the router biases from the expert loads since the last call;
+    // returns the busiest expert's load ratio (see Model::max_load_ratio).
+    virtual double balance(double rate) = 0;
+    // Brings the weights and optimizer state into the host Model and AdamW,
+    // for checkpoints and evaluations.
+    virtual void sync() = 0;
+};
+
+struct CpuBackend : Backend {
+    Model<float>& model;
+    AdamW& opt;
+    CpuBackend(Model<float>& m, AdamW& o) : model(m), opt(o) {}
+    double forward(const int* inp, const int* tgt, int B, int Tn, bool training) override {
+        return model.forward(inp, tgt, B, Tn, training);
+    }
+    void backward(double loss_scale) override { model.backward(loss_scale); }
+    void zero_grad() override { model.zero_grad(); }
+    double step(double lr, double max_norm) override {
+        const double norm = clip_grad_norm(model, max_norm);
+        opt.update(model, lr);
+        return norm;
+    }
+    double balance(double rate) override {
+        const double load = model.max_load_ratio();
+        model.update_router_bias(rate);
+        return load;
+    }
+    void sync() override {}
+};
+
+#ifdef CXXGPT_CUDA
+struct GpuBackend : Backend {
+    Model<float>& model;
+    AdamW& opt;
+    GpuTrainer gpu;
+    GpuBackend(Model<float>& m, AdamW& o, bool tf32) : model(m), opt(o), gpu(m.cfg, m.infos, tf32) {
+        gpu.set_params(model.params.data());
+        const bool has_state = opt.m.size() == model.params.size();
+        gpu.set_adam_state(opt.step, has_state ? opt.m.data() : nullptr, has_state ? opt.v.data() : nullptr);
+        gpu.set_router_bias(model.router_bias);
+    }
+    double forward(const int* inp, const int* tgt, int B, int Tn, bool training) override {
+        return gpu.forward(inp, tgt, B, Tn, training);
+    }
+    void backward(double loss_scale) override { gpu.backward(loss_scale); }
+    void zero_grad() override { gpu.zero_grad(); }
+    double step(double lr, double max_norm) override {
+        const double norm = gpu.grad_norm();
+        const double scale = max_norm > 0 && norm > max_norm ? double(float(max_norm / norm)) : 1.0;
+        gpu.adamw_step(lr, opt.beta1, opt.beta2, opt.eps, opt.weight_decay, scale);
+        ++opt.step;
+        return norm;
+    }
+    double balance(double rate) override {
+        const auto loads = gpu.take_expert_load();
+        for (size_t l = 0; l < loads.size(); ++l)
+            for (size_t e = 0; e < loads[l].size(); ++e) model.expert_load[l][e] += loads[l][e];
+        const double load = model.max_load_ratio();
+        model.update_router_bias(rate);
+        gpu.set_router_bias(model.router_bias);
+        return load;
+    }
+    void sync() override {
+        gpu.get_params(model.params.data());
+        model.weights_dirty = true;
+        opt.m.resize(model.params.size());
+        opt.v.resize(model.params.size());
+        gpu.get_adam_state(&opt.step, opt.m.data(), opt.v.data());
+    }
+};
+#endif
+
+double eval_loss(Backend& be, const TokenData& data, size_t lo, size_t hi, int B, int Tn, int batches) {
     Rng rng(12345);  // the same batches every time, so evals are comparable
     std::vector<int> inp(size_t(B) * Tn), tgt(size_t(B) * Tn);
     double total = 0.0;
     for (int i = 0; i < batches; ++i) {
         data.sample_batch(rng, B, Tn, lo, hi, inp.data(), tgt.data());
-        total += model.forward(inp.data(), tgt.data(), B, Tn);
+        total += be.forward(inp.data(), tgt.data(), B, Tn, false);
     }
     return total / batches;
 }
@@ -366,6 +450,7 @@ int cmd_train(Args& a) {
             "output: --out model.ckpt --resume --log FILE.csv --log-every 10\n"
             "        --eval-every 200 --eval-batches 20 --save-every 500\n"
             "        --time-limit MINUTES --threads N --profile\n"
+            "gpu:    --gpu (train on the GPU; needs cxxgpt-gpu, from make gpu) --no-tf32 (exact fp32 matmuls)\n"
             "reason: --reason-test FILE --reason-every STEPS --reason-limit 300\n"
             "Ctrl-C saves a checkpoint and stops; --resume continues from --out.\n");
         return 0;
@@ -396,6 +481,7 @@ int cmd_train(Args& a) {
     const Tokenizer tok = load_tokenizer(a.str("bpe"));
     const int reason_every = int(a.integer("reason-every", 0)), reason_limit = int(a.integer("reason-limit", 300));
     g_profiler.enabled = a.flag("profile");
+    const bool use_gpu = a.flag("gpu"), tf32 = !a.flag("no-tf32");
     AdamW opt;
     opt.weight_decay = a.real("wd", 0.1);
     a.done();
@@ -409,6 +495,19 @@ int cmd_train(Args& a) {
         std::printf("resumed %s at step %ld\n", out.c_str(), opt.step);
     }
     print_config(cfg, model);
+    std::unique_ptr<Backend> backend;
+    if (use_gpu) {
+#ifdef CXXGPT_CUDA
+        backend = std::make_unique<GpuBackend>(model, opt, tf32);
+        std::printf("gpu: %s, %s matmuls\n", GpuTrainer::device_name().c_str(), tf32 ? "TF32" : "fp32");
+#else
+        (void)tf32;
+        CHECK(false, "this cxxgpt was built without CUDA; use cxxgpt-gpu (make gpu)");
+#endif
+    } else {
+        backend = std::make_unique<CpuBackend>(model, opt);
+    }
+    Backend& be = *backend;
 
     // Train on [0, train_end) of data; validate on val_data or the tail.
     size_t train_end = data.tokens.size();
@@ -443,6 +542,7 @@ int cmd_train(Args& a) {
     }
     auto reason_eval = [&](long at_step) {
         if (reason_test.empty()) return;
+        be.sync();
         const double t0 = now_seconds();
         const EvalResult r = eval_reasoning(model, reason_test, tok);
         std::printf("reasoning eval at step %ld (%.1f s):\n", at_step, now_seconds() - t0);
@@ -461,18 +561,16 @@ int cmd_train(Args& a) {
     const long first_step = step;
     for (; step < steps && !g_stop; ++step) {
         const double t0 = now_seconds();
-        model.zero_grad();
+        be.zero_grad();
         double loss = 0.0;
         for (int micro = 0; micro < accum; ++micro) {
             data.sample_batch(data_rng, B, Tn, 0, train_end, inp.data(), tgt.data());
-            loss += model.forward(inp.data(), tgt.data(), B, Tn, true) / accum;
-            model.backward(1.0 / accum);
+            loss += be.forward(inp.data(), tgt.data(), B, Tn, true) / accum;
+            be.backward(1.0 / accum);
         }
-        const double gnorm = clip_grad_norm(model, clip);
         const double lr_now = lr_at(step, warmup, steps, lr, min_frac);
-        opt.update(model, lr_now);
-        const double load = model.max_load_ratio();
-        model.update_router_bias(bias_rate);
+        const double gnorm = be.step(lr_now, clip);
+        const double load = be.balance(bias_rate);
         const double ms = (now_seconds() - t0) * 1e3;
         loss_acc += loss;
         ms_acc += ms;
@@ -481,7 +579,7 @@ int cmd_train(Args& a) {
         const bool last = step + 1 == steps;
         double vloss = -1;
         if (eval_every > 0 && ((step + 1) % eval_every == 0 || last) && val_hi >= val_lo + Tn + 1)
-            vloss = eval_loss(model, *val, val_lo, val_hi, B, Tn, eval_batches);
+            vloss = eval_loss(be, *val, val_lo, val_hi, B, Tn, eval_batches);
         if ((step + 1) % log_every == 0 || last || vloss >= 0) {
             std::printf("step %6ld | loss %.4f", step + 1, loss_acc / n_acc);
             if (vloss >= 0) std::printf(" | val %.4f", vloss);
@@ -498,7 +596,10 @@ int cmd_train(Args& a) {
             loss_acc = ms_acc = 0;
             n_acc = 0;
         }
-        if (save_every > 0 && (step + 1) % save_every == 0) save_checkpoint(out, model, opt, data_rng);
+        if (save_every > 0 && (step + 1) % save_every == 0) {
+            be.sync();
+            save_checkpoint(out, model, opt, data_rng);
+        }
         if (reason_every > 0 && (step + 1) % reason_every == 0 && !last) reason_eval(step + 1);
         if (time_limit > 0 && now_seconds() - t_start > time_limit) {
             std::printf("time limit reached\n");
@@ -508,6 +609,7 @@ int cmd_train(Args& a) {
     }
     if (g_profiler.enabled) g_profiler.report(int(step - first_step));
     reason_eval(step);
+    be.sync();
     save_checkpoint(out, model, opt, data_rng);
     std::printf("saved %s at step %ld%s\n", out.c_str(), opt.step, g_stop ? " (interrupted)" : "");
     if (log) std::fclose(log);
