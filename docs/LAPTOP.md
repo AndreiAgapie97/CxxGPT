@@ -75,8 +75,11 @@ and can do everything else from there.
    ```sh
    scripts/probe.sh
    ```
-   Pick the largest size that fits and trains at a useful speed; note its
-   tokens per second.
+   It ends with the `night.sh` command for each size that fits, its
+   measured speed and batch filled in. Bigger models learn more from each
+   token but see fewer of them in a night: a reasonable pick is the
+   largest size that still trains 0.3B tokens a night or more (the
+   tokens/night column), so a week of nights gives it a couple of billion.
 3. **Data:** downloads the public datasets (GSM8K, TinyStories,
    FineWeb-Edu, OpenMathInstruct-2, MetaMathQA), trains our tokenizer on a
    sample of them, and writes the token files. Safe to rerun if
@@ -90,7 +93,7 @@ and can do everything else from there.
 
 ```sh
 tmux new -s train
-TOKS=<the probe's tokens per second> scripts/night.sh
+TOKS=... BATCH=... ACCUM=... MODEL="..." scripts/night.sh   # the line the probe printed
 ```
 
 `night.sh` sizes the run so its learning-rate schedule ends when the

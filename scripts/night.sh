@@ -2,7 +2,8 @@
 # One night of training on the GPU, on the files scripts/prepare_data.sh made.
 #   TOKS=<tokens per second> scripts/night.sh [extra train args]
 # TOKS is what scripts/probe.sh measured for the chosen MODEL, at the same
-# BATCH and SEQ. The step count follows from it, so that the learning rate
+# BATCH, ACCUM and SEQ; the probe prints the whole command for each size
+# that fits. The step count follows from it, so that the learning rate
 # schedule ends when the night does (HOURS). --time-limit stops the run in
 # time regardless, with a checkpoint; running the script again resumes it.
 #
