@@ -3,6 +3,7 @@
 
 #include "../src/train.h"
 #include "test_util.h"
+#include "test_accumulation.h"
 
 inline Config training_test_config(bool ternary = false) {
     Config c;
@@ -153,6 +154,7 @@ inline void test_ternary_learning_and_resume() {
 }
 
 inline void test_train() {
+    test_masked_accumulation();
     test_clipping_reference();
     test_adamw_reference();
     test_sampling_endpoints();

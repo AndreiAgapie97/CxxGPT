@@ -12,9 +12,9 @@ COMMON=(--data "$TEST_DIR/data.tok" --val "$TEST_DIR/data.tok" --seq 8 --dim 8 -
 ./cxxgpt train "${COMMON[@]}" > "$TEST_DIR/train.log"
 grep -q '9 train tokens, 9 val tokens' "$TEST_DIR/train.log"
 grep -q '| val ' "$TEST_DIR/train.log"
-for option in dim heads experts shared ffn ehidden topk; do
+for option in dim heads experts shared ffn ehidden topk batch accum log-every eval-batches; do
     value=-1
-    if [[ "$option" == dim || "$option" == heads || "$option" == topk ]]; then value=0; fi
+    if [[ "$option" == dim || "$option" == heads || "$option" == topk || "$option" == batch || "$option" == accum || "$option" == log-every || "$option" == eval-batches ]]; then value=0; fi
     status=0
     ./cxxgpt train "${COMMON[@]}" "--$option" "$value" > "$TEST_DIR/invalid.log" 2>&1 || status=$?
     if [[ "$status" != 1 ]] || ! grep -q 'check failed' "$TEST_DIR/invalid.log"; then
@@ -23,4 +23,32 @@ for option in dim heads experts shared ffn ehidden topk; do
         exit 1
     fi
 done
-printf 'CLI: single-window train/validation and seven invalid configurations passed\n'
+printf 'CLI: single-window train/validation and eleven invalid configurations passed\n'
+
+./test_training_cli generate "$TEST_DIR"
+for variant in dense ternary moe ternary-moe; do
+    ARCH=()
+    if [[ "$variant" == *ternary* ]]; then ARCH+=(--ternary); fi
+    if [[ "$variant" == *moe* ]]; then ARCH+=(--experts 4 --topk 2 --ehidden 6 --shared 1); fi
+    for dataset in masked sparse; do
+        TRAIN=(--data "$TEST_DIR/$dataset.tok" --val "$TEST_DIR/$dataset.tok"
+               --seq 8 --dim 8 --heads 2 --ffn 12 --layers 1 --steps 4 --warmup 0
+               --seed 3 --lr 0.001 --clip 0.1 --eval-every 1 --log-every 1 --save-every 0 --threads 2)
+        ./cxxgpt train "${TRAIN[@]}" "${ARCH[@]}" --batch 4 --accum 1 --eval-batches 1 \
+            --out "$TEST_DIR/macro.ckpt" --log "$TEST_DIR/macro.csv" > "$TEST_DIR/macro.log"
+        ./cxxgpt train "${TRAIN[@]}" "${ARCH[@]}" --batch 1 --accum 4 --eval-batches 4 \
+            --out "$TEST_DIR/micro.ckpt" --log "$TEST_DIR/micro.csv" > "$TEST_DIR/micro.log"
+        ./test_training_cli compare "$TEST_DIR/macro.ckpt" "$TEST_DIR/micro.ckpt"
+        # Identical eval samples must give the same token-weighted metric,
+        # including all-ignored eval batches. Ignore timing columns.
+        awk -F, 'NR>1 {print $1 "," $2 "," $3}' "$TEST_DIR/macro.csv" > "$TEST_DIR/macro.loss"
+        awk -F, 'NR>1 {print $1 "," $2 "," $3}' "$TEST_DIR/micro.csv" > "$TEST_DIR/micro.loss"
+        diff -u "$TEST_DIR/macro.loss" "$TEST_DIR/micro.loss"
+        if [[ "$dataset" == sparse ]]; then grep -q 'skipped .* empty sampled groups' "$TEST_DIR/micro.log"; fi
+        rm "$TEST_DIR/macro.csv" "$TEST_DIR/micro.csv"
+    done
+done
+status=0
+./cxxgpt train "${COMMON[@]}" --data "$TEST_DIR/ignored.tok" > "$TEST_DIR/ignored.log" 2>&1 || status=$?
+[[ "$status" == 1 ]] && grep -q 'no predictable targets' "$TEST_DIR/ignored.log"
+printf 'CLI: masked/sparse accumulation, weighted validation, empty-group skips, and fully masked rejection passed\n'

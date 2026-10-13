@@ -18,6 +18,7 @@
 #include "../src/train.h"
 #include "test_util.h"
 #include "extreme_loss_fixture.h"
+#include "test_accumulation.h"
 
 namespace {
 
@@ -86,6 +87,47 @@ void compare(const char* name, const Config& cfg, double tol_loss, double tol_gr
     EXPECT(worst_loss <= tol_loss, "%s: loss differs by %g", name, worst_loss);
     EXPECT(worst_grad <= tol_grad, "%s: gradient of %s differs by %g", name, worst_tensor.c_str(), worst_grad);
     EXPECT(worst_param <= tol_param, "%s: weights after AdamW differ by %g", name, worst_param);
+}
+
+// The production accumulation helper must preserve the CPU macro-batch
+// objective on CUDA too. Runtime validation requires physical GPU hardware.
+void masked_accumulation() {
+    const auto group = masked_accumulation_fixture();
+    for (int variant = 0; variant < 4; ++variant) {
+        Config cfg;
+        cfg.vocab = 13; cfg.seq_len = 8; cfg.d_model = 32;
+        cfg.n_heads = 2; cfg.n_layers = 1; cfg.ffn_hidden = 48;
+        cfg.ternary = variant % 2;
+        if (variant >= 2) { cfg.n_experts = 4; cfg.top_k = 2; cfg.expert_hidden = 24; cfg.n_shared = 1; }
+        Model<float> cpu(cfg);
+        cpu.init(57);
+        GpuTrainer gpu(cfg, cpu.infos, /*tf32=*/false);
+        gpu.set_params(cpu.params.data());
+        cpu.zero_grad();
+        const double lc = cpu.forward(group.inputs.data(), group.targets.data(), 4, 8, true);
+        cpu.backward();
+        const double lg = accumulated_backward(gpu, group);
+        std::vector<float> grad(cpu.num_params());
+        gpu.get_grads(grad.data());
+        for (float g : grad) EXPECT(std::isfinite(g), "non-finite accumulated GPU gradient");
+        const double tol = cfg.ternary ? 3e-2 : 1e-4;
+        EXPECT(std::abs(lc - lg) < (cfg.ternary ? 1e-3 : 1e-5) * std::abs(lc),
+               "variant %d accumulated GPU loss %g vs CPU %g", variant, lg, lc);
+        double worst = 0;
+        for (const auto& p : cpu.infos) {
+            const double d = rel_l2(grad.data() + p.offset, cpu.grads.data() + p.offset, p.size);
+            EXPECT(std::isfinite(d) && d < tol, "variant %d accumulated GPU tensor %s error %g",
+                   variant, p.name.c_str(), d);
+            worst = std::max(worst, d);
+        }
+        std::printf("  variant %d masked GPU accumulation: loss difference %.1e gradient %.1e\n",
+                    variant, std::abs(lc - lg), worst);
+        auto empty = group;
+        std::fill(empty.targets.begin(), empty.targets.end(), -1); empty.refresh_counts();
+        EXPECT(accumulated_backward(gpu, empty) == 0, "empty GPU accumulated loss nonzero");
+        gpu.get_grads(grad.data());
+        for (float g : grad) EXPECT(g == 0, "empty GPU group retained stale gradient");
+    }
 }
 
 // The GPU alone, with TF32, learns a repeating sequence.
@@ -164,6 +206,7 @@ int main() {
     g_pool = &tp;
     std::printf("%s\n", GpuTrainer::device_name().c_str());
     extreme_cross_entropy();
+    masked_accumulation();
 
     Config dense;
     dense.vocab = 61;

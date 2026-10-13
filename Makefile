@@ -12,7 +12,7 @@ SANFLAGS  = -O1 -g -march=$(MARCH) -std=c++20 -pthread $(CLANG_WARN) $(EXTRA)
 HEADERS := $(wildcard src/*.h)
 TEST_HEADERS := $(wildcard tests/*.h)
 
-all: ternary_moe test_engine cxxgpt
+all: ternary_moe test_engine cxxgpt test_training_cli
 
 research_experiment: experiments/toy_world.cpp $(HEADERS)
 	$(CXX) $(CXXFLAGS) $< -o $@
@@ -52,7 +52,10 @@ gpu-test: test_gpu
 
 .PHONY: all test bench asan tsan clean gpu gpu-test
 
-test: ternary_moe test_engine cxxgpt
+test_training_cli: tests/test_training_cli.cpp $(HEADERS) $(TEST_HEADERS)
+	$(CXX) $(CXXFLAGS) $< -o $@
+
+test: ternary_moe test_engine cxxgpt test_training_cli
 	./ternary_moe --tests
 	./test_engine
 	bash tests/test_cli.sh
@@ -81,4 +84,4 @@ tsan: ternary_moe.cpp tests/test_engine.cpp experiments/toy_world.cpp $(HEADERS)
 	./research_experiment_tsan --steps 5 --seeds 1 --threads 2 --continual --rl-steps 5 --out runs/tsan-smoke-$$$$.csv
 
 clean:
-	rm -f ternary_moe test_engine cxxgpt research_experiment *_asan *_tsan gpu.o cxxgpt-gpu test_gpu
+	rm -f ternary_moe test_engine cxxgpt research_experiment test_training_cli *_asan *_tsan gpu.o cxxgpt-gpu test_gpu

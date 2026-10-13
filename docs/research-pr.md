@@ -10,7 +10,10 @@ BitLinear now exposes its identity straight-through gradient contract, tested
 against finite differences of the stated surrogate. Tests cover AdamW against
 double arithmetic, actual ternary MoE learning, identical checkpoint
 continuation, non-finite numerical checks, policy-gradient expectation, invalid
-configurations, and the real single-window CLI path.
+configurations, and the real single-window CLI path. Unequal masked microbatches
+now optimize one global token mean; validation uses the same weighting. Empty
+groups skip optimizer updates. Combined-batch, finite-difference, clipped
+optimizer and CLI checkpoint comparisons cover all four architecture variants.
 
 Native C++ experiments compare dense, ternary, MoE and ternary MoE with recorded
 seeds and matched active FFN width. They demonstrate bounded replay retention
@@ -29,7 +32,7 @@ Validation:
 - Scalar and AVX2 engine checks; reproducible native experiments and checkpoint
   storage audit. Timing results are explicitly marked as noisy.
 - CUDA host/device compile checks for `sm_89` using Clang and CUDA 12.4 headers.
-  The stable-loss port has an analytic CPU/GPU regression fixture; **GPU runtime
+  The stable-loss and masked-accumulation paths have CPU/GPU regression fixtures; **GPU runtime
   assertions remain pending `make gpu-test` on NVIDIA hardware. Keep this PR
   draft until that validation is recorded.**
 

@@ -38,6 +38,46 @@ Tests also compare four AdamW updates, including bias correction, moments,
 matrix-only weight decay, and quantization invalidation, against independent
 double-precision arithmetic. Existing dense and MoE gradient checks remain.
 
+## Masked-token accumulation: 2026-10-13 follow-up
+
+A microbatch returns its mean loss over `n_i` valid targets. Equal weighting
+of these means overweights sparsely masked microbatches and includes empty
+ones in the denominator. Training now uses `L = sum_i(n_i * L_i) / N`, where
+`N = sum_i n_i`, and scales each backward call by `n_i / N`. Each valid token
+therefore contributes `1/N`, as in one combined batch. Validation uses the
+same token-weighted reduction over sampled batches. Training log intervals
+still average optimizer-step means, not all tokens across the interval.
+
+The trainer stages token IDs before forward/backward so it knows `N` without
+accumulating large unnormalized gradients. Host staging holds two int arrays:
+`2 * sizeof(int) * batch * sequence * accumulation` bytes plus counts.
+Activation storage remains at microbatch size. Sampling order and data RNG
+consumption are unchanged for nonempty groups. All-empty groups advance the
+sampler but skip forward, AdamW moments/decay, router balancing and schedule
+updates; an entirely masked training range is rejected. Within a nonempty
+group, empty microbatches still participate in router-load accounting, matching
+a combined batch. No denominator is invented for an empty evaluation: its
+aggregate loss is zero, so callers should not treat that as an accuracy score.
+
+The native fixture has valid counts `[0,1,3,8]`. For dense, ternary, MoE and
+ternary MoE, double gradients differ from one combined batch by less than
+`5e-17`. Dense global-loss central finite differences give relative error
+`1.5e-8`; the negative control using the former equal-micro rule fails the
+objective/gradient comparison. Ternary comparisons validate partition
+invariance of the chosen STE, not derivatives of discrete rounding.
+Three clipped float AdamW updates differ by at most `6e-8` in parameters
+and `7e-10` in moments. CLI tests run four updates on unequal and sparse masks
+for all four variants: macro/micro checkpoints agree within `2e-8`, data RNG
+and router biases match, and token-weighted train/validation CSV fields match
+at their printed precision. Sparse cases exercise whole-group skips; fully
+masked data and invalid accumulation/logging shapes return checked errors.
+
+`tests/test_gpu.cpp` also exercises this production helper against a CPU
+combined batch, including unequal masks and empty groups. Its translation unit
+and the GPU-enabled CLI compile, but these CUDA runtime assertions remain
+pending NVIDIA hardware. Historical experiment scores below retain their
+original batch-mean evaluation semantics and source hashes.
+
 ## Trainability and gradient contracts
 
 `bitlinear_forward` and `bitlinear_backward` expose the same quantized
@@ -246,9 +286,8 @@ remains necessary.
 * Checkpoints save weights, moments, data RNG and router biases; optimizer
   hyperparameters, learning-rate schedule, data identity and CLI settings must
   also be reproduced externally for an identical continuation.
-* The CLI averages microbatch mean losses during gradient accumulation. With
-  unequal numbers of valid masked targets, that differs from a single global
-  token mean. The experiments here use accumulation one; token-weighted
-  accumulation remains a numerical follow-up.
+* Masked accumulation is now token-weighted. Historical experiments used
+  accumulation one and batch-mean validation; reproduce their recorded source
+  rather than silently comparing those scores to the new validation metric.
 * Small synthetic tasks are useful for detecting bugs and measuring forgetting;
   they cannot establish real reasoning ability or reinforcement learning.

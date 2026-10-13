@@ -546,12 +546,12 @@ struct GpuBackend : Backend {
 double eval_loss(Backend& be, const TokenData& data, size_t lo, size_t hi, int B, int Tn, int batches) {
     Rng rng(12345);  // the same batches every time, so evals are comparable
     std::vector<int> inp(size_t(B) * Tn), tgt(size_t(B) * Tn);
-    double total = 0.0;
+    TokenLossMean total;
     for (int i = 0; i < batches; ++i) {
         data.sample_batch(rng, B, Tn, lo, hi, inp.data(), tgt.data());
-        total += be.forward(inp.data(), tgt.data(), B, Tn, false);
+        total.add(be.forward(inp.data(), tgt.data(), B, Tn, false), count_targets(tgt.data(), tgt.size()));
     }
-    return total / batches;
+    return total.value();
 }
 
 int cmd_train(Args& a) {
@@ -603,6 +603,8 @@ int cmd_train(Args& a) {
     opt.weight_decay = a.real("wd", 0.1);
     a.done();
     CHECK(cfg.vocab >= int(data.vocab), "model vocab %d < data vocab %u", cfg.vocab, data.vocab);
+    CHECK(log_every > 0 && eval_batches > 0, "log interval and evaluation batch count must be positive");
+    AccumulationBatch group(B, Tn, accum);
 
     Model<float> model(cfg);
     model.init(uint64_t(seed));
@@ -631,13 +633,20 @@ int cmd_train(Args& a) {
     const TokenData* val = &val_data;
     size_t val_lo = 0, val_hi = val_data.tokens.size();
     if (val_path.empty()) {
+        CHECK(val_frac >= 0 && val_frac < 1, "--val-frac must be in [0, 1)");
         train_end = size_t(double(data.tokens.size()) * (1.0 - val_frac));
         val = &data;
         val_lo = train_end;
         val_hi = data.tokens.size();
     }
-    std::printf("data: %zu train tokens, %zu val tokens; %d x %d x %d = %d tokens per step\n",
-                train_end, val_hi - val_lo, B, Tn, accum, B * Tn * accum);
+    if (steps > opt.step) {
+        CHECK(train_end >= size_t(Tn) + 1, "training range is shorter than a sequence");
+        CHECK(data.mask.empty() || std::any_of(data.mask.begin() + 1, data.mask.begin() + train_end,
+                                              [](uint8_t m) { return m != 0; }),
+              "training range contains no predictable targets");
+    }
+    std::printf("data: %zu train tokens, %zu val tokens; %d x %d x %d = %zu tokens per step\n",
+                train_end, val_hi - val_lo, B, Tn, accum, group.inputs.size());
 
     FILE* log = nullptr;
     if (!log_path.empty()) {
@@ -670,21 +679,24 @@ int cmd_train(Args& a) {
         }
     };
 
-    std::vector<int> inp(size_t(B) * Tn), tgt(size_t(B) * Tn);
     const double t_start = now_seconds();
     double loss_acc = 0, ms_acc = 0;
     int n_acc = 0;
     long step = opt.step;
     const long first_step = step;
-    for (; step < steps && !g_stop; ++step) {
+    size_t empty_groups = 0;
+    for (; step < steps && !g_stop;) {
         const double t0 = now_seconds();
-        be.zero_grad();
-        double loss = 0.0;
-        for (int micro = 0; micro < accum; ++micro) {
-            data.sample_batch(data_rng, B, Tn, 0, train_end, inp.data(), tgt.data());
-            loss += be.forward(inp.data(), tgt.data(), B, Tn, true) / accum;
-            be.backward(1.0 / accum);
+        group.sample(data, data_rng, 0, train_end);
+        if (!group.total_valid) {
+            if (++empty_groups == 1) std::printf("skipping sampled groups with no predictable targets\n");
+            if (time_limit > 0 && now_seconds() - t_start > time_limit) {
+                std::printf("time limit reached\n");
+                break;
+            }
+            continue;  // no Adam moments, decay, balancing, or schedule step
         }
+        const double loss = accumulated_backward(be, group);
         const double lr_now = lr_at(step, warmup, steps, lr, min_frac);
         const double gnorm = be.step(lr_now, clip);
         const double load = be.balance(bias_rate);
@@ -701,7 +713,7 @@ int cmd_train(Args& a) {
             std::printf("step %6ld | loss %.4f", step + 1, loss_acc / n_acc);
             if (vloss >= 0) std::printf(" | val %.4f", vloss);
             std::printf(" | lr %.2e | gnorm %6.3f | %6.1f ms | %7.0f tok/s", lr_now, gnorm,
-                        ms_acc / n_acc, B * Tn * accum / (ms_acc / n_acc) * 1e3);
+                        ms_acc / n_acc, double(group.inputs.size()) / (ms_acc / n_acc) * 1e3);
             if (cfg.moe()) std::printf(" | load %.2f", load);
             std::printf("\n");
             std::fflush(stdout);
@@ -718,13 +730,14 @@ int cmd_train(Args& a) {
             save_checkpoint(out, model, opt, data_rng);
         }
         if (reason_every > 0 && (step + 1) % reason_every == 0 && !last) reason_eval(step + 1);
+        ++step;
         if (time_limit > 0 && now_seconds() - t_start > time_limit) {
             std::printf("time limit reached\n");
-            ++step;
             break;
         }
     }
     if (g_profiler.enabled) g_profiler.report(int(step - first_step));
+    if (empty_groups) std::printf("skipped %zu empty sampled groups\n", empty_groups);
     reason_eval(step);
     be.sync();
     save_checkpoint(out, model, opt, data_rng);

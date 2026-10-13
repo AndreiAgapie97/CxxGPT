@@ -11,3 +11,4 @@ data/
 *.ckpt
 runs/
 .venv/
+test_training_cli
