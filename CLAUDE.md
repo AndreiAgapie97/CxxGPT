@@ -45,7 +45,8 @@ Reasoning is the first capability we go after.
   night.sh command for each), `scripts/prepare_data.sh` (downloads, our
   tokenizer, token files) and `scripts/night.sh` (one night of training,
   validated on the GSM8K test set; `INIT=` starts from an earlier night's
-  weights). `docs/LAPTOP.md` is the runbook.
+  weights); `scripts/report.sh` sums up a night's log. `docs/LAPTOP.md`
+  is the runbook.
 - Overnight safety: a step with a non-finite gradient is skipped, ten in a
   row stop the run without overwriting the last checkpoint, and
   checkpoints are written to a temporary file and renamed.

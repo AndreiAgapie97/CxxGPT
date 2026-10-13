@@ -102,7 +102,9 @@ math, and checks itself on the GSM8K test set, which training never sees:
 validation loss every 500 steps, exact answers every 2000. Its settings
 (model size, optimizer, batch, data mix) are at the top of the script.
 Run the same command again to resume after an interruption. The log is
-`runs/night1.log`.
+`runs/night1.log`; in the morning, `scripts/report.sh night1` sums it up on
+one screen (validation loss and exact answers over the night, speed, how
+it ended, and one answer the model got wrong).
 
 ### Following nights
 
