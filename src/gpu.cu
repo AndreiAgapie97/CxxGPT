@@ -297,11 +297,19 @@ __global__ void add_fwd(float* out, const float* a, const float* b, size_t n) {
 // cross_entropy_forward, one block per row: logits become probabilities.
 __global__ void xent_fwd(float* probs, float* losses, const int* targets, int V) {
     __shared__ float sh[kWarp + 1];
+    __shared__ float target_gap;
     const int n = blockIdx.x;
     float* p = probs + size_t(n) * V;
     float mx = -INFINITY;
     for (int i = threadIdx.x; i < V; i += blockDim.x) mx = fmaxf(mx, p[i]);
     mx = block_reduce(mx, sh, true);
+    // Capture the target logit before any thread replaces logits by exp.
+    // The barrier makes this read safe even when another warp owns p[t].
+    if (threadIdx.x == 0) {
+        const int t = targets[n];
+        target_gap = t < 0 ? 0.0f : mx - p[t];
+    }
+    __syncthreads();
     float sum = 0.0f;
     for (int i = threadIdx.x; i < V; i += blockDim.x) {
         const float e = expf(p[i] - mx);
@@ -311,10 +319,10 @@ __global__ void xent_fwd(float* probs, float* losses, const int* targets, int V)
     sum = block_reduce(sum, sh, false);
     const float inv = 1.0f / sum;
     for (int i = threadIdx.x; i < V; i += blockDim.x) p[i] *= inv;
-    __syncthreads();  // p[target] may have been written by another thread
+    __syncthreads();
     if (threadIdx.x == 0) {
         const int t = targets[n];
-        losses[n] = t < 0 ? 0.0f : -logf(fmaxf(p[t], FLT_MIN));
+        losses[n] = t < 0 ? 0.0f : target_gap + logf(sum);
     }
 }
 

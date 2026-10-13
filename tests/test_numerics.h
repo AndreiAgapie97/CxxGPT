@@ -3,6 +3,7 @@
 
 #include "../src/ops.h"
 #include "test_util.h"
+#include "extreme_loss_fixture.h"
 
 template <class T>
 void test_cross_entropy_extreme() {
@@ -63,6 +64,18 @@ inline void test_numerics() {
            "gradient checker silently accepted NaN loss");
     const float bad = std::numeric_limits<float>::quiet_NaN();
     EXPECT(std::isinf(max_abs_diff(&bad, x.data(), 1)), "comparison silently accepted NaN");
+    ExtremeLossFixture f;
+    auto& m = f.model;
+    m.zero_grad();
+    const double l = m.forward(f.tokens.data(), f.targets.data(), 1, 3);
+    EXPECT(std::isfinite(l) && std::abs(l - f.reference_loss()) < 0.05,
+           "whole-model extreme loss %g vs double reference %g", l, f.reference_loss());
+    m.backward();
+    for (float g : m.grads) EXPECT(std::isfinite(g), "whole-model extreme gradient non-finite");
+    const auto& embedding = *m.find("wte");
+    for (int i = 0; i < m.cfg.d_model; ++i)
+        EXPECT(std::abs(m.grads[embedding.offset + m.cfg.d_model + i] + 0.5f) < 1e-5f,
+               "whole-model underflowed target lost output-weight gradient");
 }
 
 // Sum the reward-weighted score-function gradient over all actions. It must

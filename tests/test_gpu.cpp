@@ -17,6 +17,7 @@
 #include "../src/model.h"
 #include "../src/train.h"
 #include "test_util.h"
+#include "extreme_loss_fixture.h"
 
 namespace {
 
@@ -121,12 +122,48 @@ void learns_pattern() {
     EXPECT(last < 0.1 * first, "GPU training did not learn the pattern: %.3f -> %.3f", first, last);
 }
 
+// Zero block projections make the residual stream equal the embedding.
+// Constant +/-1000 embedding rows produce logits near +/-32000. The two
+// counted losses have a double reference near 64000 and 32000, even though
+// both target probabilities underflow. The middle row is ignored.
+void extreme_cross_entropy() {
+    ExtremeLossFixture fixture;
+    auto& cpu = fixture.model;
+    const auto& cfg = cpu.cfg;
+    const ParamInfo& embedding = *cpu.find("wte");
+    GpuTrainer gpu(cfg, cpu.infos, /*tf32=*/false);
+    gpu.set_params(cpu.params.data());
+    const int* tok = fixture.tokens.data();
+    const int* tgt = fixture.targets.data();
+    cpu.zero_grad(); gpu.zero_grad();
+    const double lc = cpu.forward(tok, tgt, 1, 3), lg = gpu.forward(tok, tgt, 1, 3);
+    const double ref = fixture.reference_loss();
+    EXPECT(std::isfinite(lc) && std::abs(lc - ref) < 0.05, "extreme CPU loss %g vs %g", lc, ref);
+    EXPECT(std::isfinite(lg) && std::abs(lg - ref) < 0.05, "extreme GPU loss %g vs %g", lg, ref);
+    cpu.backward(); gpu.backward(1.0);
+    std::vector<float> grad(cpu.num_params());
+    gpu.get_grads(grad.data());
+    for (float g : grad) EXPECT(std::isfinite(g), "non-finite extreme GPU gradient");
+    for (int i = 0; i < cfg.d_model; ++i)
+        EXPECT(std::abs(grad[embedding.offset + cfg.d_model + i] + 0.5f) < 1e-5f,
+               "underflowed target lost its output-weight gradient");
+    EXPECT(rel_l2(grad.data(), cpu.grads.data(), grad.size()) < 1e-4,
+           "extreme loss gradients disagree between CPU and GPU");
+    const int ignored[] = {-1, -1, -1};
+    gpu.zero_grad();
+    EXPECT(gpu.forward(tok, ignored, 1, 3) == 0, "all-ignored GPU loss nonzero");
+    gpu.backward(1.0); gpu.get_grads(grad.data());
+    for (float g : grad) EXPECT(g == 0, "all-ignored GPU gradient nonzero");
+    std::printf("  extreme cross-entropy: CPU %.1f GPU %.1f reference %.1f\n", lc, lg, ref);
+}
+
 }  // namespace
 
 int main() {
     ThreadPool tp(4);
     g_pool = &tp;
     std::printf("%s\n", GpuTrainer::device_name().c_str());
+    extreme_cross_entropy();
 
     Config dense;
     dense.vocab = 61;
