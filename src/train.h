@@ -23,6 +23,7 @@ struct AdamW {
             m.assign(model.params.size(), 0.0f);
             v.assign(model.params.size(), 0.0f);
         }
+        PROFILE("adamw");
         ++step;
         const float b1 = float(beta1), b2 = float(beta2);
         const float c1 = float(1.0 / (1.0 - std::pow(beta1, double(step))));
@@ -52,12 +53,31 @@ struct AdamW {
 // Global L2 norm of the gradient; scales it down to max_norm if larger.
 // Returns the norm before clipping.
 inline double clip_grad_norm(Model<float>& model, double max_norm) {
+    PROFILE("clip_grad");
+    // Fixed blocks with double partial sums: fast and reproducible.
+    const size_t n = model.grads.size(), kBlock = 16384;
+    const int blocks = int((n + kBlock - 1) / kBlock);
+    std::vector<double> partial(blocks, 0.0);
+    const float* g = model.grads.data();
+    pool().parallel_for(blocks, [&](int b0, int b1) {
+        for (int b = b0; b < b1; ++b) {
+            const size_t i0 = size_t(b) * kBlock, i1 = std::min(n, i0 + kBlock);
+            float acc[8] = {};
+            size_t i = i0;
+            for (; i + 8 <= i1; i += 8)
+                for (int j = 0; j < 8; ++j) acc[j] += g[i + j] * g[i + j];
+            double s = 0.0;
+            for (; i < i1; ++i) s += double(g[i]) * g[i];
+            for (float a : acc) s += a;
+            partial[b] = s;
+        }
+    }, 1);
     double s = 0.0;
-    for (float g : model.grads) s += double(g) * g;
+    for (double p : partial) s += p;
     const double norm = std::sqrt(s);
     if (max_norm > 0 && norm > max_norm) {
         const float k = float(max_norm / norm);
-        for (float& g : model.grads) g *= k;
+        for (float& x : model.grads) x *= k;
     }
     return norm;
 }

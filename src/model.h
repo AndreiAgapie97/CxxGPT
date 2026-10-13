@@ -230,7 +230,7 @@ public:
         embedding_backward(G(wte_), dresid.data(), tokens_.data(), N, C);
     }
 
-    void zero_grad() { std::fill(grads.begin(), grads.end(), T(0)); }
+    void zero_grad() { zero_fill(grads.data(), grads.size()); }
 
     // Nudges each router bias toward an even load: +rate for experts that
     // got fewer than average tokens since the last call, -rate for more.
@@ -331,7 +331,7 @@ private:
     // The weights a projection multiplies by: quantized copies if ternary.
     const T* W(size_t off) const { return cfg.ternary ? &qparams[off] : &params[off]; }
 
-    static void zero(std::vector<T>& v, size_t n) { std::fill(v.begin(), v.begin() + n, T(0)); }
+    static void zero(std::vector<T>& v, size_t n) { zero_fill(v.data(), n); }
 
     // y = x · Wᵀ, or for BitLinear y = q8(x) · ternary(W)ᵀ.
     void proj_forward(T* y, const T* x, size_t woff, int N, int IC, int OC) {
@@ -388,6 +388,7 @@ private:
     void moe_forward(int l, T* out, int N, bool training) {
         auto& a = acts[l];
         const auto& o = layer_[l];
+        PROFILE("moe_fwd_total");
         const int C = cfg.d_model, E = cfg.n_experts, K = cfg.top_k, Fe = cfg.ehidden();
         const T* x = a.ln2.data();
         linear_forward(a.rlogits.data(), x, P(o.router), N, C, E);

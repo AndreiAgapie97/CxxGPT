@@ -12,12 +12,15 @@
 #pragma once
 
 #include <algorithm>
+#include <bit>
 #include <cmath>
+#include <cstdint>
 #include <functional>
 #include <limits>
 #include <vector>
 
 #include "gemm.h"
+#include "profile.h"
 #include "thread_pool.h"
 
 // Runs fn over row ranges of [0, n) on the pool.
@@ -38,17 +41,51 @@ inline T dot(const T* a, const T* b, int n) {
     return s + ((acc[0] + acc[1]) + (acc[2] + acc[3])) + ((acc[4] + acc[5]) + (acc[6] + acc[7]));
 }
 
+// exp() in a form the compiler vectorizes: round x / ln2 to an integer k
+// with the magic-number trick, reduce r = x - k ln2 (Cody-Waite, two
+// constants), evaluate the Cephes polynomial for e^r, then add k to the
+// exponent bits. Within 2 ulp of std::exp; clamps instead of overflowing
+// (e^-87.3 is the smallest normal float). double keeps std::exp, so the
+// gradient checks are unaffected.
+inline float fast_exp(float x) {
+    x = std::min(std::max(x, -87.33654f), 88.37626f);
+    const float k = (x * 1.44269504088896341f + 12582912.0f) - 12582912.0f;
+    float r = x - k * 0.693359375f;
+    r = r - k * -2.12194440e-4f;
+    float p = 1.9875691500e-4f;
+    p = p * r + 1.3981999507e-3f;
+    p = p * r + 8.3334519073e-3f;
+    p = p * r + 4.1665795894e-2f;
+    p = p * r + 1.6666665459e-1f;
+    p = p * r + 5.0000001201e-1f;
+    p = p * r * r + r + 1.0f;
+    return std::bit_cast<float>(std::bit_cast<int32_t>(p) + (static_cast<int32_t>(k) << 23));
+}
+inline double fast_exp(double x) { return std::exp(x); }
+
+// Zeroes n elements, spread over the pool (memory bandwidth scales with cores).
+template <class T>
+void zero_fill(T* p, size_t n) {
+    PROFILE("zero_fill");
+    const int blocks = int((n + 16383) / 16384);
+    pool().parallel_for(blocks, [&](int b0, int b1) {
+        std::fill(p + size_t(b0) * 16384, p + std::min(n, size_t(b1) * 16384), T(0));
+    }, 1);
+}
+
 // ---------------------------------------------------------------------------
 // Linear (no bias): y[N, OC] = x[N, IC] · w[OC, IC]ᵀ
 // ---------------------------------------------------------------------------
 template <class T>
 void linear_forward(T* y, const T* x, const T* w, int N, int IC, int OC) {
+    PROFILE("linear_fwd");
     gemm(N, OC, IC, MatView<T>{x, IC, 1}, MatView<T>{w, 1, IC}, y, OC, false);
 }
 
 // dx += dy · w (skipped if dx is null), dw += dyᵀ · x.
 template <class T>
 void linear_backward(T* dx, T* dw, const T* dy, const T* x, const T* w, int N, int IC, int OC) {
+    PROFILE("linear_bwd");
     if (dx) gemm(N, IC, OC, MatView<T>{dy, OC, 1}, MatView<T>{w, IC, 1}, dx, IC, true);
     gemm(OC, IC, N, MatView<T>{dy, 1, OC}, MatView<T>{x, IC, 1}, dw, IC, true);
 }
@@ -58,6 +95,7 @@ void linear_backward(T* dx, T* dw, const T* dy, const T* x, const T* w, int N, i
 // ---------------------------------------------------------------------------
 template <class T>
 void embedding_forward(T* out, const int* tokens, const T* wte, int N, int C) {
+    PROFILE("embedding_fwd");
     for_rows(N, [&](int n0, int n1) {
         for (int n = n0; n < n1; ++n)
             std::copy(wte + long(tokens[n]) * C, wte + long(tokens[n] + 1) * C, out + long(n) * C);
@@ -67,6 +105,7 @@ void embedding_forward(T* out, const int* tokens, const T* wte, int N, int C) {
 // Serial: two positions with the same token add into the same row.
 template <class T>
 void embedding_backward(T* dwte, const T* dout, const int* tokens, int N, int C) {
+    PROFILE("embedding_bwd");
     for (int n = 0; n < N; ++n) {
         T* d = dwte + long(tokens[n]) * C;
         const T* g = dout + long(n) * C;
@@ -81,6 +120,7 @@ constexpr double kRmsEps = 1e-5;
 
 template <class T>
 void rmsnorm_forward(T* out, T* rstd, const T* x, const T* w, int N, int C) {
+    PROFILE("rmsnorm_fwd");
     for_rows(N, [&](int n0, int n1) {
         for (int n = n0; n < n1; ++n) {
             const T* xn = x + long(n) * C;
@@ -97,6 +137,7 @@ void rmsnorm_forward(T* out, T* rstd, const T* x, const T* w, int N, int C) {
 template <class T>
 void rmsnorm_backward(T* dx, T* dw, const T* dout, const T* x, const T* w, const T* rstd,
                       int N, int C) {
+    PROFILE("rmsnorm_bwd");
     for_rows(N, [&](int n0, int n1) {
         for (int n = n0; n < n1; ++n) {
             const T* xn = x + long(n) * C;
@@ -109,15 +150,29 @@ void rmsnorm_backward(T* dx, T* dw, const T* dout, const T* x, const T* w, const
             for (int c = 0; c < C; ++c) dxn[c] += r * dn[c] * w[c] - k * xn[c];
         }
     });
-    // dw sums over rows, so split the columns instead.
-    pool().parallel_for(C, [&](int c0, int c1) {
-        for (int n = 0; n < N; ++n) {
-            const T* xn = x + long(n) * C;
-            const T* dn = dout + long(n) * C;
-            const T r = rstd[n];
-            for (int c = c0; c < c1; ++c) dw[c] += dn[c] * xn[c] * r;
+    // dw sums over rows: each fixed block of rows sums into its own partial
+    // (same blocks whatever the thread count, so results are reproducible),
+    // then the partials are added up.
+    constexpr int kRowsPerBlock = 64;
+    const int blocks = (N + kRowsPerBlock - 1) / kRowsPerBlock;
+    // thread_local belongs to the calling thread: take the pointer here,
+    // since inside the lambda the name would refer to each worker's copy.
+    static thread_local std::vector<T> partial_buf;
+    partial_buf.assign(size_t(blocks) * C, T(0));
+    T* partial = partial_buf.data();
+    pool().parallel_for(blocks, [&](int b0, int b1) {
+        for (int b = b0; b < b1; ++b) {
+            T* acc = partial + size_t(b) * C;
+            for (int n = b * kRowsPerBlock; n < std::min(N, (b + 1) * kRowsPerBlock); ++n) {
+                const T* xn = x + long(n) * C;
+                const T* dn = dout + long(n) * C;
+                const T r = rstd[n];
+                for (int c = 0; c < C; ++c) acc[c] += dn[c] * xn[c] * r;
+            }
         }
-    }, 16);
+    }, 1);
+    for (int b = 0; b < blocks; ++b)
+        for (int c = 0; c < C; ++c) dw[c] += partial[size_t(b) * C + c];
 }
 
 // ---------------------------------------------------------------------------
@@ -145,6 +200,7 @@ struct RopeTable {
 
 template <class T>
 void rope_apply(T* qkv, const RopeTable<T>& rope, int B, int Tn, int C, int NH, bool inverse) {
+    PROFILE("rope");
     const int HS = C / NH, half = HS / 2;
     for_rows(B * Tn, [&](int n0, int n1) {
         for (int n = n0; n < n1; ++n) {
@@ -188,6 +244,7 @@ void rope_backward(T* dqkv, const RopeTable<T>& rope, int B, int Tn, int C, int 
 // ---------------------------------------------------------------------------
 template <class T>
 void attention_forward(T* out, T* att, const T* qkv, int B, int Tn, int C, int NH) {
+    PROFILE("attention_fwd");
     const int HS = C / NH;
     const T scale = T(1) / std::sqrt(T(HS));
     pool().parallel_for(B * NH, [&](int j0, int j1) {
@@ -205,7 +262,7 @@ void attention_forward(T* out, T* att, const T* qkv, int B, int Tn, int C, int N
                 for (int s = 0; s <= t; ++s) mx = std::max(mx, p[s]);
                 T sum = 0;
                 for (int s = 0; s <= t; ++s) {
-                    p[s] = std::exp((p[s] - mx) * scale);
+                    p[s] = fast_exp((p[s] - mx) * scale);
                     sum += p[s];
                 }
                 const T inv = T(1) / sum;
@@ -224,6 +281,7 @@ void attention_forward(T* out, T* att, const T* qkv, int B, int Tn, int C, int N
 template <class T>
 void attention_backward(T* dqkv, const T* dout, const T* att, const T* qkv, int B, int Tn, int C,
                         int NH) {
+    PROFILE("attention_bwd");
     const int HS = C / NH;
     const T scale = T(1) / std::sqrt(T(HS));
     pool().parallel_for(B * NH, [&](int j0, int j1) {
@@ -267,12 +325,13 @@ void attention_backward(T* dqkv, const T* dout, const T* att, const T* qkv, int 
 // ---------------------------------------------------------------------------
 template <class T>
 void swiglu_forward(T* out, const T* inp, int N, int F) {
+    PROFILE("swiglu_fwd");
     for_rows(N, [&](int n0, int n1) {
         for (int n = n0; n < n1; ++n) {
             const T* g = inp + long(n) * 2 * F;
             const T* u = g + F;
             T* o = out + long(n) * F;
-            for (int i = 0; i < F; ++i) o[i] = g[i] / (T(1) + std::exp(-g[i])) * u[i];
+            for (int i = 0; i < F; ++i) o[i] = g[i] / (T(1) + fast_exp(-g[i])) * u[i];
         }
     });
 }
@@ -280,6 +339,7 @@ void swiglu_forward(T* out, const T* inp, int N, int F) {
 // silu'(g) = sigmoid(g) * (1 + g * (1 - sigmoid(g)))
 template <class T>
 void swiglu_backward(T* dinp, const T* dout, const T* inp, int N, int F) {
+    PROFILE("swiglu_bwd");
     for_rows(N, [&](int n0, int n1) {
         for (int n = n0; n < n1; ++n) {
             const T* g = inp + long(n) * 2 * F;
@@ -288,7 +348,7 @@ void swiglu_backward(T* dinp, const T* dout, const T* inp, int N, int F) {
             T* dg = dinp + long(n) * 2 * F;
             T* du = dg + F;
             for (int i = 0; i < F; ++i) {
-                const T sg = T(1) / (T(1) + std::exp(-g[i]));
+                const T sg = T(1) / (T(1) + fast_exp(-g[i]));
                 dg[i] += d[i] * u[i] * sg * (T(1) + g[i] * (T(1) - sg));
                 du[i] += d[i] * g[i] * sg;
             }
@@ -301,7 +361,12 @@ void swiglu_backward(T* dinp, const T* dout, const T* inp, int N, int F) {
 // ---------------------------------------------------------------------------
 template <class T>
 void add_forward(T* out, const T* a, const T* b, long n) {
-    for (long i = 0; i < n; ++i) out[i] = a[i] + b[i];
+    PROFILE("residual_add");
+    const int blocks = int((n + 16383) / 16384);
+    pool().parallel_for(blocks, [&](int b0, int b1) {
+        const long i1 = std::min(n, long(b1) * 16384);
+        for (long i = long(b0) * 16384; i < i1; ++i) out[i] = a[i] + b[i];
+    }, 1);
 }
 
 template <class T>
@@ -316,6 +381,7 @@ void add_into(T* dst, const T* src, long n) {
 // ---------------------------------------------------------------------------
 template <class T>
 double cross_entropy_forward(T* probs, T* losses, const int* targets, int N, int V) {
+    PROFILE("xent_fwd");
     for_rows(N, [&](int n0, int n1) {
         for (int n = n0; n < n1; ++n) {
             T* p = probs + long(n) * V;
@@ -323,7 +389,7 @@ double cross_entropy_forward(T* probs, T* losses, const int* targets, int N, int
             for (int i = 1; i < V; ++i) mx = std::max(mx, p[i]);
             T sum = 0;
             for (int i = 0; i < V; ++i) {
-                p[i] = std::exp(p[i] - mx);
+                p[i] = fast_exp(p[i] - mx);
                 sum += p[i];
             }
             const T inv = T(1) / sum;
@@ -345,6 +411,7 @@ double cross_entropy_forward(T* probs, T* losses, const int* targets, int N, int
 // ones. Overwrites (not accumulates), and may alias probs.
 template <class T>
 void cross_entropy_backward(T* dlogits, const T* probs, const int* targets, int N, int V, T dloss) {
+    PROFILE("xent_bwd");
     for_rows(N, [&](int n0, int n1) {
         for (int n = n0; n < n1; ++n) {
             const T* p = probs + long(n) * V;
@@ -370,6 +437,7 @@ void cross_entropy_backward(T* dlogits, const T* probs, const int* targets, int 
 // bitplanes and gamma as the matrix scale.
 template <class T>
 T ternary_quantize(T* wq, const T* w, long n) {
+    PROFILE("ternary_quant");
     double s = 0.0;
     for (long i = 0; i < n; ++i) s += std::abs(double(w[i]));
     const T gamma = T(s / double(n)) + T(1e-8);
@@ -384,6 +452,7 @@ T ternary_quantize(T* wq, const T* w, long n) {
 // * max|x| / 127. Same symmetric [-127, 127] range as the inference kernels.
 template <class T>
 void act_quantize(T* xq, const T* x, int N, int C) {
+    PROFILE("act_quant");
     for_rows(N, [&](int n0, int n1) {
         for (int n = n0; n < n1; ++n) {
             const T* xn = x + long(n) * C;

@@ -15,6 +15,7 @@
 #include "args.h"
 #include "common.h"
 #include "model.h"
+#include "profile.h"
 #include "train.h"
 
 namespace {
@@ -99,7 +100,7 @@ int cmd_train(Args& a) {
             "        --warmup 100 --wd 0.1 --clip 1.0 --bias-rate 1e-3 --seed 1\n"
             "output: --out model.ckpt --resume --log FILE.csv --log-every 10\n"
             "        --eval-every 200 --eval-batches 20 --save-every 500\n"
-            "        --time-limit MINUTES --threads N\n"
+            "        --time-limit MINUTES --threads N --profile\n"
             "Ctrl-C saves a checkpoint and stops; --resume continues from --out.\n");
         return 0;
     }
@@ -125,6 +126,7 @@ int cmd_train(Args& a) {
     const int log_every = int(a.integer("log-every", 10)), eval_every = int(a.integer("eval-every", 200));
     const int eval_batches = int(a.integer("eval-batches", 20)), save_every = int(a.integer("save-every", 500));
     const double time_limit = a.real("time-limit", 0) * 60.0;
+    g_profiler.enabled = a.flag("profile");
     AdamW opt;
     opt.weight_decay = a.real("wd", 0.1);
     a.done();
@@ -167,6 +169,7 @@ int cmd_train(Args& a) {
     double loss_acc = 0, ms_acc = 0;
     int n_acc = 0;
     long step = opt.step;
+    const long first_step = step;
     for (; step < steps && !g_stop; ++step) {
         const double t0 = now_seconds();
         model.zero_grad();
@@ -213,6 +216,7 @@ int cmd_train(Args& a) {
             break;
         }
     }
+    if (g_profiler.enabled) g_profiler.report(int(step - first_step));
     save_checkpoint(out, model, opt, data_rng);
     std::printf("saved %s at step %ld%s\n", out.c_str(), opt.step, g_stop ? " (interrupted)" : "");
     if (log) std::fclose(log);

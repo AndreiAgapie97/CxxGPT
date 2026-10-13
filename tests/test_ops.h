@@ -192,7 +192,63 @@ inline void test_attention_float_vs_double() {
     EXPECT(eo < 1e-5 && eg < 1e-5, "attention float vs double: out %g, grad %g", eo, eg);
 }
 
+// Sizes big enough that every row-parallel op actually runs on the pool's
+// workers (small grad-check shapes run on the calling thread only).
+inline void test_ops_threaded_float_vs_double() {
+    Rng rng(9);
+    const int N = 700, C = 96, F = 80;
+    auto xd = random_vec<double>(size_t(N) * C, rng), wd = random_vec<double>(C, rng);
+    auto gd = random_vec<double>(size_t(N) * C, rng);
+    std::vector<float> xf(xd.begin(), xd.end()), wf(wd.begin(), wd.end()), gf(gd.begin(), gd.end());
+    std::vector<double> od(xd.size()), rd(N), dxd(xd.size(), 0.0), dwd(C, 0.0);
+    std::vector<float> of(xd.size()), rf(N), dxf(xd.size(), 0.0f), dwf(C, 0.0f);
+    rmsnorm_forward(od.data(), rd.data(), xd.data(), wd.data(), N, C);
+    rmsnorm_forward(of.data(), rf.data(), xf.data(), wf.data(), N, C);
+    rmsnorm_backward(dxd.data(), dwd.data(), gd.data(), xd.data(), wd.data(), rd.data(), N, C);
+    rmsnorm_backward(dxf.data(), dwf.data(), gf.data(), xf.data(), wf.data(), rf.data(), N, C);
+    auto rel = [](const std::vector<float>& f, const std::vector<double>& d) {
+        return max_abs_diff(f.data(), d.data(), d.size()) / max_abs(d.data(), d.size());
+    };
+    EXPECT(rel(of, od) < 1e-5 && rel(dxf, dxd) < 1e-5 && rel(dwf, dwd) < 1e-5,
+           "threaded rmsnorm: out %g dx %g dw %g", rel(of, od), rel(dxf, dxd), rel(dwf, dwd));
+
+    auto id = random_vec<double>(size_t(N) * 2 * F, rng, 3.0), sd = random_vec<double>(size_t(N) * F, rng);
+    std::vector<float> iff(id.begin(), id.end()), sf(sd.begin(), sd.end());
+    std::vector<double> sod(size_t(N) * F), sdd(id.size(), 0.0);
+    std::vector<float> sof(size_t(N) * F), sdf(id.size(), 0.0f);
+    swiglu_forward(sod.data(), id.data(), N, F);
+    swiglu_forward(sof.data(), iff.data(), N, F);
+    swiglu_backward(sdd.data(), sd.data(), id.data(), N, F);
+    swiglu_backward(sdf.data(), sf.data(), iff.data(), N, F);
+    EXPECT(rel(sof, sod) < 1e-5 && rel(sdf, sdd) < 1e-5, "threaded swiglu: out %g d %g",
+           rel(sof, sod), rel(sdf, sdd));
+
+    std::vector<double> ad(xd.size());
+    std::vector<float> af(xd.size());
+    add_forward(ad.data(), xd.data(), gd.data(), long(xd.size()));
+    add_forward(af.data(), xf.data(), gf.data(), long(xd.size()));
+    EXPECT(rel(af, ad) < 1e-6, "threaded add");
+    zero_fill(af.data(), af.size());
+    EXPECT(*std::max_element(af.begin(), af.end()) == 0.0f && *std::min_element(af.begin(), af.end()) == 0.0f,
+           "zero_fill left nonzeros");
+}
+
+// fast_exp against std::exp over the whole float range it supports.
+inline void test_fast_exp() {
+    double worst = 0.0;
+    for (float x = -87.0f; x <= 88.0f; x += 0.0137f) {
+        const double ref = std::exp(double(x));
+        worst = std::max(worst, std::abs(double(fast_exp(x)) - ref) / ref);
+    }
+    EXPECT(worst < 3e-7, "fast_exp relative error %g", worst);
+    EXPECT(fast_exp(-1000.0f) >= 0.0f && fast_exp(-1000.0f) < 1e-37f, "fast_exp(-1000) = %g", fast_exp(-1000.0f));
+    EXPECT(std::isfinite(fast_exp(1000.0f)), "fast_exp(1000) overflowed");
+    EXPECT(fast_exp(0.0f) == 1.0f, "fast_exp(0) = %.9g", fast_exp(0.0f));
+}
+
 inline void test_ops() {
+    test_fast_exp();
+    test_ops_threaded_float_vs_double();
     test_gemm();
     test_linear_grad();
     test_embedding_grad();
