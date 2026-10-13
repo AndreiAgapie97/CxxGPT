@@ -340,7 +340,7 @@ inline std::string unescape_field(const std::string& s) {
 }
 
 inline void save_problems(const std::string& path, const std::vector<Problem>& ps) {
-    FILE* f = std::fopen(path.c_str(), "w");
+    FILE* f = create_file(path, "w");
     CHECK(f, "cannot write %s", path.c_str());
     for (const auto& p : ps)
         std::fprintf(f, "%s\t%d\t%s\t%s\t%s\n", escape_field(p.task).c_str(), p.difficulty,

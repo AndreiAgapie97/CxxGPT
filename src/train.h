@@ -195,7 +195,7 @@ struct TokenData {
     std::vector<uint8_t> mask;  // empty = train on every token
 
     void save(const std::string& path) const {
-        FILE* f = std::fopen(path.c_str(), "wb");
+        FILE* f = create_file(path, "wb");
         CHECK(f, "cannot write %s", path.c_str());
         const uint32_t has_mask = mask.empty() ? 0 : 1;
         const uint64_t n = tokens.size();
@@ -305,7 +305,7 @@ public:
 class TokenWriter {
 public:
     TokenWriter(const std::string& path, uint32_t vocab) : path_(path) {
-        f_ = std::fopen(path.c_str(), "wb");
+        f_ = create_file(path, "wb");
         CHECK(f_, "cannot write %s", path.c_str());
         const uint32_t has_mask = 0;
         const uint64_t n = 0;
@@ -368,7 +368,7 @@ inline Config read_config(FILE* f) {
 inline void save_checkpoint(const std::string& path, const Model<float>& model, const AdamW& opt,
                             const Rng& data_rng) {
     const std::string tmp = path + ".tmp";
-    FILE* f = std::fopen(tmp.c_str(), "wb");
+    FILE* f = create_file(tmp, "wb");
     CHECK(f, "cannot write %s", tmp.c_str());
     std::fwrite(kCkptMagic, 1, 8, f);
     write_config(f, model.cfg);

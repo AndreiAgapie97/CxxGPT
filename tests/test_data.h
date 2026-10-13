@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <filesystem>
 
 #include "../src/json.h"
 #include "../src/reasoning.h"
@@ -40,10 +41,13 @@ inline void test_problem_file() {
     std::vector<Problem> ps(2);
     ps[0] = {"gsm8k", 1, "a\tb \\ c", "line 1\nline 2\\n is literal", "42"};
     ps[1] = {"chain", 3, "x=1", "x is 1", "1"};
-    const std::string path = "/tmp/cxxgpt_test_problems.txt";
+    // Into folders that do not exist yet: writing creates them.
+    const std::string dir = "/tmp/cxxgpt_test_new_dir";
+    const std::string path = dir + "/a/b/problems.txt";
+    std::filesystem::remove_all(dir);
     save_problems(path, ps);
     const std::vector<Problem> got = load_problems(path);
-    std::remove(path.c_str());
+    std::filesystem::remove_all(dir);
     EXPECT(got.size() == 2, "read %zu problems", got.size());
     for (size_t i = 0; i < got.size() && i < 2; ++i)
         EXPECT(got[i].task == ps[i].task && got[i].difficulty == ps[i].difficulty &&

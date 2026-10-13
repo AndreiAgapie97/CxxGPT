@@ -655,7 +655,7 @@ int cmd_train(Args& a) {
     FILE* log = nullptr;
     if (!log_path.empty()) {
         const bool fresh = !std::filesystem::exists(log_path);
-        log = std::fopen(log_path.c_str(), "a");
+        log = create_file(log_path, "a");
         CHECK(log, "cannot open %s", log_path.c_str());
         if (fresh) std::fprintf(log, "step,loss,val_loss,lr,grad_norm,ms_per_step,load_ratio\n");
     }
