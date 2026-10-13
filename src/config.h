@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <cstring>
 #include <string>
 
 #include "common.h"
@@ -54,3 +55,18 @@ struct ParamInfo {
     bool ternary;      // quantized in the forward pass
     int count = 1;     // stacked copies (experts); each copy quantized separately
 };
+
+// The matrices Muon updates: every weight matrix inside the blocks.
+// Embeddings, norms and routers stay on AdamW.
+inline bool muon_matrix(const ParamInfo& p) {
+    return p.rows > 1 && p.cols > 1 && p.decay && p.name != "wte";
+}
+
+// Fused projections are orthogonalized part by part: [q | k | v] and [gate | up].
+inline int muon_parts(const ParamInfo& p) {
+    auto ends = [&](const char* s) {
+        const size_t n = std::strlen(s);
+        return p.name.size() >= n && p.name.compare(p.name.size() - n, n, s) == 0;
+    };
+    return ends("wqkv") ? 3 : ends("wfc") || ends("efc") ? 2 : 1;
+}

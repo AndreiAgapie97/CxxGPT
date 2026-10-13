@@ -477,6 +477,8 @@ struct Backend {
     // Brings the weights and optimizer state into the host Model and AdamW,
     // for checkpoints and evaluations.
     virtual void sync() = 0;
+    // Device memory held, for the GPU; 0 on the CPU.
+    virtual size_t device_bytes() const { return 0; }
 };
 
 struct CpuBackend : Backend {
@@ -511,6 +513,7 @@ struct GpuBackend : Backend {
         const bool has_state = opt.m.size() == model.params.size();
         gpu.set_adam_state(opt.step, has_state ? opt.m.data() : nullptr, has_state ? opt.v.data() : nullptr);
         gpu.set_router_bias(model.router_bias);
+        gpu.set_muon(opt.muon, opt.muon_momentum, opt.muon_steps);
     }
     double forward(const int* inp, const int* tgt, int B, int Tn, bool training) override {
         return gpu.forward(inp, tgt, B, Tn, training);
@@ -540,6 +543,7 @@ struct GpuBackend : Backend {
         opt.v.resize(model.params.size());
         gpu.get_adam_state(&opt.step, opt.m.data(), opt.v.data());
     }
+    size_t device_bytes() const override { return gpu.device_bytes(); }
 };
 #endif
 
@@ -564,6 +568,7 @@ int cmd_train(Args& a) {
             "        --experts 0 --topk 2 --ehidden 0(auto) --shared 0 --ternary\n"
             "train:  --batch 16 --accum 1 --steps 2000 --lr 1e-3 --min-lr-frac 0.1\n"
             "        --warmup 100 --wd 0.1 --clip 1.0 --bias-rate 1e-3 --seed 1\n"
+            "        --muon (Muon instead of AdamW for the matrices in the blocks)\n"
             "output: --out model.ckpt --resume --log FILE.csv --log-every 10\n"
             "        --eval-every 200 --eval-batches 20 --save-every 500\n"
             "        --time-limit MINUTES --threads N --profile\n"
@@ -601,6 +606,7 @@ int cmd_train(Args& a) {
     const bool use_gpu = a.flag("gpu"), tf32 = !a.flag("no-tf32");
     AdamW opt;
     opt.weight_decay = a.real("wd", 0.1);
+    opt.muon = a.flag("muon");
     a.done();
     CHECK(cfg.vocab >= int(data.vocab), "model vocab %d < data vocab %u", cfg.vocab, data.vocab);
 
@@ -689,6 +695,8 @@ int cmd_train(Args& a) {
         const double gnorm = be.step(lr_now, clip);
         const double load = be.balance(bias_rate);
         const double ms = (now_seconds() - t0) * 1e3;
+        if (step == first_step && be.device_bytes() > 0)
+            std::printf("gpu memory: %.0f MB after the first step\n", double(be.device_bytes()) / (1 << 20));
         loss_acc += loss;
         ms_acc += ms;
         ++n_acc;

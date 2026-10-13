@@ -378,6 +378,47 @@ __global__ void adamw(float* p, const float* g, float* m, float* v, size_t n, fl
     }
 }
 
+// Muon (AdamW::muon_update), for `batch` blocks of r x c at stride r * c:
+// Nesterov momentum into mom, and the update copied to X in the
+// orientation Newton–Schulz works on (transposed when r > c).
+__global__ void muon_momentum(float* X, float* mom, const float* g, int batch, int r, int c, float mu,
+                              float gscale) {
+    const size_t rc = size_t(r) * c, n = rc * batch;
+    for (size_t i = size_t(blockIdx.x) * blockDim.x + threadIdx.x; i < n; i += size_t(gridDim.x) * blockDim.x) {
+        const float gi = g[i] * gscale;
+        mom[i] = mu * mom[i] + (1.0f - mu) * gi;
+        const size_t k = i % rc, row = k / c, col = k % c;
+        X[i - k + (r > c ? col * r + row : k)] = (1.0f - mu) * gi + mu * mom[i];
+    }
+}
+
+// newton_schulz's first step: each len-long matrix of X divided by its
+// Frobenius norm (+ 1e-7). One thread block per matrix.
+__global__ void frobenius_normalize(float* X, size_t len) {
+    __shared__ double sh[kWarp + 1];
+    float* x = X + blockIdx.x * len;
+    double s = 0.0;
+    for (size_t i = threadIdx.x; i < len; i += blockDim.x) s += double(x[i]) * double(x[i]);
+    s = block_reduce(s, sh, false);
+    const float inv = float(1.0 / (sqrt(s) + 1e-7));
+    for (size_t i = threadIdx.x; i < len; i += blockDim.x) x[i] *= inv;
+}
+
+// out = a x + b y, elementwise; out may be x or y.
+__global__ void axpby(float* out, float a, const float* x, float b, const float* y, size_t n) {
+    for (size_t i = size_t(blockIdx.x) * blockDim.x + threadIdx.x; i < n; i += size_t(gridDim.x) * blockDim.x)
+        out[i] = a * x[i] + b * y[i];
+}
+
+// The Muon step itself: p -= lr (scale X + wd p), X read back in p's layout.
+__global__ void muon_apply(float* p, const float* X, int batch, int r, int c, float lr, float scale, float wd) {
+    const size_t rc = size_t(r) * c, n = rc * batch;
+    for (size_t i = size_t(blockIdx.x) * blockDim.x + threadIdx.x; i < n; i += size_t(gridDim.x) * blockDim.x) {
+        const size_t k = i % rc, row = k / c, col = k % c;
+        p[i] -= lr * (scale * X[i - k + (r > c ? col * r + row : k)] + wd * p[i]);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Mixture-of-Experts kernels (Model::moe_forward / moe_backward)
 // ---------------------------------------------------------------------------
@@ -514,6 +555,11 @@ struct GpuTrainer::Impl {
 
     DevBuf<float> params, grads, qparams, m, v;
     long adam_step = 0;
+    // Muon (set_muon): settings and Newton–Schulz work space.
+    bool muon = false;
+    float muon_mu = 0.95f;
+    int muon_ns = 5;
+    DevBuf<float> ns_x, ns_y, ns_a, ns_b;
     bool weights_dirty = true;
 
     // Ternary tensors, one segment per (tensor, expert copy).
@@ -1014,6 +1060,10 @@ struct GpuTrainer::Impl {
         const float c2 = float(1.0 / (1.0 - std::pow(beta2, double(adam_step))));
         for (const auto& info : infos) {
             const float wd = info.decay ? float(weight_decay) : 0.0f;
+            if (muon && muon_matrix(info)) {
+                muon_step(info, float(lr), wd, float(grad_scale));
+                continue;
+            }
             const int grid = std::min(blocks_for(info.size), 4096);
             adamw<<<grid, kBlock>>>(params.p + info.offset, grads.p + info.offset, m.p + info.offset,
                                     v.p + info.offset, info.size, float(lr), float(beta1), float(beta2), c1, c2,
@@ -1021,6 +1071,59 @@ struct GpuTrainer::Impl {
             LAUNCH_CHECK();
         }
         weights_dirty = true;
+    }
+
+    // Muon blocks of one tensor: every (expert copy, fused part), each r x c.
+    struct MuonShape {
+        int batch, r, c;
+        int mrows() const { return std::min(r, c); }  // Newton–Schulz runs on the wide orientation
+        int ncols() const { return std::max(r, c); }
+    };
+    static MuonShape muon_shape(const ParamInfo& info) {
+        const int parts = muon_parts(info);
+        return {info.count * parts, info.rows / parts, info.cols};
+    }
+
+    void set_muon(bool on, double momentum, int ns_steps) {
+        muon = on;
+        muon_mu = float(momentum);
+        muon_ns = ns_steps;
+        if (!on) return;
+        for (const auto& info : infos) {
+            if (!muon_matrix(info)) continue;
+            const MuonShape sh = muon_shape(info);
+            const size_t mm = size_t(sh.mrows()) * sh.mrows();
+            ns_x.resize(info.size);
+            ns_y.resize(info.size);
+            ns_a.resize(mm * sh.batch);
+            ns_b.resize(mm * sh.batch);
+        }
+    }
+
+    // AdamW::muon_update for one tensor, all its blocks batched through
+    // cuBLAS; newton_schulz (train.h) step for step.
+    void muon_step(const ParamInfo& info, float lr, float wd, float gscale) {
+        const MuonShape sh = muon_shape(info);
+        const int mr = sh.mrows(), nc = sh.ncols(), batch = sh.batch;
+        const long long mn = (long long)mr * nc, mm = (long long)mr * mr;
+        const int grid = std::min(blocks_for(info.size), 4096);
+        float *X = ns_x.p, *Y = ns_y.p, *A = ns_a.p, *B = ns_b.p;
+        muon_momentum<<<grid, kBlock>>>(X, m.p + info.offset, grads.p + info.offset, batch, sh.r, sh.c, muon_mu,
+                                        gscale);
+        frobenius_normalize<<<batch, kBlock>>>(X, size_t(mn));
+        LAUNCH_CHECK();
+        const float a = 3.4445f, b = -4.7750f, c = 2.0315f;
+        for (int s = 0; s < muon_ns; ++s) {
+            gemm_batched(false, true, mr, mr, nc, X, nc, mn, X, nc, mn, A, mr, mm, 0.0f, batch);   // A = X Xᵀ
+            gemm_batched(false, false, mr, mr, mr, A, mr, mm, A, mr, mm, B, mr, mm, 0.0f, batch);  // B = A²
+            axpby<<<std::min(blocks_for(size_t(mm) * batch), 4096), kBlock>>>(B, b, A, c, B, size_t(mm) * batch);
+            gemm_batched(false, false, mr, nc, mr, B, mr, mm, X, nc, mn, Y, nc, mn, 0.0f, batch);  // Y = B X
+            axpby<<<grid, kBlock>>>(X, a, X, 1.0f, Y, info.size);
+            LAUNCH_CHECK();
+        }
+        muon_apply<<<grid, kBlock>>>(params.p + info.offset, X, batch, sh.r, sh.c, lr,
+                                     0.2f * std::sqrt(float(nc)), wd);
+        LAUNCH_CHECK();
     }
 };
 
@@ -1070,6 +1173,8 @@ void GpuTrainer::adamw_step(double lr, double beta1, double beta2, double eps, d
                             double grad_scale) {
     impl_->adamw_step(lr, beta1, beta2, eps, weight_decay, grad_scale);
 }
+
+void GpuTrainer::set_muon(bool on, double momentum, int ns_steps) { impl_->set_muon(on, momentum, ns_steps); }
 
 std::vector<std::vector<double>> GpuTrainer::take_expert_load() {
     std::vector<std::vector<double>> out = impl_->expert_load;

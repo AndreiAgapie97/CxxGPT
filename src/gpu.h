@@ -49,6 +49,10 @@ public:
     // gradient multiplied by grad_scale first (gradient clipping).
     void adamw_step(double lr, double beta1, double beta2, double eps, double weight_decay,
                     double grad_scale);
+    // With Muon on, adamw_step gives the Muon matrices (muon_matrix in
+    // config.h) Muon steps instead, as AdamW::update with muon = true; their
+    // momentum lives in the AdamW m. Off by default.
+    void set_muon(bool on, double momentum = 0.95, int ns_steps = 5);
     // Tokens routed to each expert since the last call, [layer][expert].
     std::vector<std::vector<double>> take_expert_load();
 
