@@ -78,4 +78,5 @@ jobs:
       - name: Build
         run: |
           CUDA_HOME=/usr/local/cuda-$(echo ${{ matrix.cuda }} | tr - .)
-          make gpu NVCC=$CUDA_HOME/bin/nvcc CUDA_HOME=$CUDA_HOME CUDA_ARCH=sm_89 EXTRA=-Werror
+          make gpu NVCC=$CUDA_HOME/bin/nvcc CUDA_HOME=$CUDA_HOME CUDA_ARCH=sm_89 EXTRA=-Werror \
+            NVCC_EXTRA="-Werror all-warnings -Xcompiler -Werror"

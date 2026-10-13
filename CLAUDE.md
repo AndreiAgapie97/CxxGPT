@@ -33,6 +33,11 @@ Reasoning is the first capability we go after.
   `tests/test_gpu.cpp` compares it with the CPU engine. Build with
   `make gpu`, giving `cxxgpt-gpu` (`train --gpu`) and `test_gpu`.
 - `src/cxxgpt.cpp`: the CLI (train, sample, eval, data prep, benchmarks).
+- `scripts/get_data.py`: downloads public datasets (GSM8K, TinyStories,
+  FineWeb-Edu, OpenMathInstruct-2, MetaMathQA) into `data/`, as text with
+  `<|endoftext|>` between documents (for `text2tok --doc-sep`) or as
+  GSM8K-style JSON Lines (for `prep-qa`). Tested against a local fake of
+  the Hugging Face endpoints, since huggingface.co is blocked here.
 - `ternary_moe.cpp`: kernel tests and the kernel benchmark.
 
 ## Plan

@@ -63,6 +63,22 @@ inline void test_tokenizer() {
     std::remove(path.c_str());
     EXPECT(tok2.vocab_size() == tok.vocab_size() && tok2.encode(corpus) == enc, "reloaded tokenizer differs");
 
+    // Text cut at next_safe_split points encodes exactly as the whole, even
+    // when the text is mostly whitespace, newlines, digits and symbols.
+    const char alphabet[] = "  \n\n\t\r\rab9,. ";
+    for (int t = 0; t < 300; ++t) {
+        std::string r(rng.below(80), '\0');
+        for (auto& ch : r) ch = alphabet[rng.below(sizeof alphabet - 1)];
+        if (t % 3 == 0) r = corpus.substr(rng.below(corpus.size() - 200), 200);
+        std::vector<int> pieces;
+        for (size_t b = 0; b < r.size();) {
+            const size_t e = Tokenizer::next_safe_split(r, b + 1 + rng.below(8));
+            for (int id : tok.encode(r.substr(b, e - b))) pieces.push_back(id);
+            b = e;
+        }
+        EXPECT(pieces == tok.encode(r), "encoding in pieces differs from encoding the whole");
+    }
+
     // Training is deterministic.
     Tokenizer tok3;
     tok3.train(corpus, 300);

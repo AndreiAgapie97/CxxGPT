@@ -1085,8 +1085,7 @@ std::string GpuTrainer::device_name() {
     CUDA_CHECK(cudaGetDevice(&dev));
     cudaDeviceProp prop{};
     CUDA_CHECK(cudaGetDeviceProperties(&prop, dev));
-    char buf[256];
-    std::snprintf(buf, sizeof buf, "%s (%.1f GB, compute %d.%d)", prop.name, prop.totalGlobalMem / 1e9, prop.major,
-                  prop.minor);
-    return buf;
+    const unsigned long long tenths = prop.totalGlobalMem / 100000000ull;  // in units of 0.1 GB
+    return std::string(prop.name) + " (" + std::to_string(tenths / 10) + "." + std::to_string(tenths % 10) +
+           " GB, compute " + std::to_string(prop.major) + "." + std::to_string(prop.minor) + ")";
 }
