@@ -38,7 +38,8 @@ Reasoning is the first capability we go after.
   FineWeb-Edu, OpenMathInstruct-2, MetaMathQA) into `data/`, as text with
   `<|endoftext|>` between documents (for `text2tok --doc-sep`) or as
   GSM8K-style JSON Lines (for `prep-qa`). Tested against a local fake of
-  the Hugging Face endpoints, since huggingface.co is blocked here.
+  the Hugging Face endpoints, since huggingface.co is blocked here; CI's
+  `data-sources` job checks the real files and columns (`--check`).
 - `scripts/compare.sh`: the architecture comparison on the curriculum.
 - For the laptop: `scripts/setup_wsl.sh` (toolchain, build, all tests),
   `scripts/probe.sh` (GPU speed and memory per model size; prints the

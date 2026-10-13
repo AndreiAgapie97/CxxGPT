@@ -6,6 +6,7 @@
     python3 scripts/get_data.py fineweb-edu --files 2  # educational web text
     python3 scripts/get_data.py openmath2 --split train_1M
     python3 scripts/get_data.py metamath
+    python3 scripts/get_data.py --check openmath2      # only check the source
 
 Everything lands in data/<name>/ in one of two formats:
   - text (*.txt): documents separated by "<|endoftext|>" lines, for
@@ -14,11 +15,16 @@ Everything lands in data/<name>/ in one of two formats:
     line, the answer being the worked solution, then "\\n#### " and the
     final answer (GSM8K's format), for `cxxgpt prep-qa`.
 
+--check fetches only a few bytes of each file (and a Parquet file's footer,
+for its column names): it confirms that the files are where this script
+expects them, with the columns it reads, without downloading them.
+
 Downloads resume where they stopped. Needs only the standard library, plus
 pyarrow for Parquet files (pip install pyarrow). For gated datasets, set
 HF_TOKEN to a Hugging Face access token.
 """
 import argparse
+import io
 import json
 import os
 import sys
@@ -93,6 +99,83 @@ def download(url, dest, retries=6):
     sys.exit(f"giving up on {url}")
 
 
+def fetch_range(url, start, end):
+    """Bytes start..end (inclusive) of url, and the size of the whole file."""
+    req = urllib.request.Request(url, headers=headers({"Range": f"bytes={start}-{end}"}))
+    try:
+        with urllib.request.urlopen(req, timeout=60) as r:
+            if r.status != 206 and start > 0:
+                sys.exit(f"{url}: the server ignored the byte range")
+            # "bytes 0-0/12345" on a 206; a 200 sends the whole file.
+            size = r.headers.get("Content-Range", "").rpartition("/")[2]
+            size = int(size) if size.isdigit() else int(r.headers.get("Content-Length") or 0)
+            return r.read(end - start + 1), size
+    except urllib.error.HTTPError as e:
+        sys.exit(f"{url}: HTTP {e.code}")
+    except (urllib.error.URLError, TimeoutError) as e:
+        sys.exit(f"{url}: {e}")
+
+
+def check_url(url, n=1):
+    """Checks that url can be downloaded; returns its first n bytes."""
+    data, size = fetch_range(url, 0, n - 1)
+    log(f"  ok {url} ({size / 1e6:.1f} MB)")
+    return data
+
+
+def check_text(url, n, *needles):
+    """Checks that the first n bytes of url contain each needle."""
+    head = check_url(url, n).decode("utf-8", "replace")
+    for s in needles:
+        if s not in head:
+            sys.exit(f"{url}: no {s!r} in its first {n} bytes")
+
+
+class RemoteFile(io.RawIOBase):
+    """A file read through HTTP range requests, so that pyarrow can read a
+    Parquet file's column names from its footer without the whole file."""
+
+    def __init__(self, url):
+        self.url, self.pos = url, 0
+        _, self.size = fetch_range(url, 0, 0)
+
+    def readable(self):
+        return True
+
+    def seekable(self):
+        return True
+
+    def tell(self):
+        return self.pos
+
+    def seek(self, offset, whence=io.SEEK_SET):
+        self.pos = {io.SEEK_SET: 0, io.SEEK_CUR: self.pos, io.SEEK_END: self.size}[whence] + offset
+        return self.pos
+
+    def readinto(self, b):
+        n = min(len(b), self.size - self.pos)
+        if n <= 0:
+            return 0
+        data, _ = fetch_range(self.url, self.pos, self.pos + n - 1)
+        b[: len(data)] = data
+        self.pos += len(data)
+        return len(data)
+
+
+def check_parquet(url, columns):
+    """Checks that the Parquet file at url has the given columns."""
+    try:
+        import pyarrow.parquet as pq
+    except ImportError:
+        sys.exit("reading Parquet needs pyarrow: pip install pyarrow")
+    f = RemoteFile(url)
+    names = pq.read_schema(f).names
+    missing = [c for c in columns if c not in names]
+    if missing:
+        sys.exit(f"{url}: no column {', '.join(missing)}; its columns: {', '.join(names)}")
+    log(f"  ok {url} ({f.size / 1e6:.1f} MB): has {', '.join(columns)}")
+
+
 def hf_files(repo, path=""):
     """Paths of the files in a Hugging Face dataset repo under path (recursive)."""
     url = f"{HF}/api/datasets/{repo}/tree/main/{path}?recursive=true"
@@ -100,8 +183,12 @@ def hf_files(repo, path=""):
         return sorted(e["path"] for e in json.load(r) if e.get("type") == "file")
 
 
+def hf_url(repo, path):
+    return f"{HF}/datasets/{repo}/resolve/main/{path}"
+
+
 def hf_download(repo, path, dest):
-    return download(f"{HF}/datasets/{repo}/resolve/main/{path}", dest)
+    return download(hf_url(repo, path), dest)
 
 
 def parquet_rows(path, columns, batch=8192):
@@ -158,13 +245,20 @@ def write_docs(docs, dest):
 def get_gsm8k(out, args):
     base = "https://raw.githubusercontent.com/openai/grade-school-math/master/grade_school_math/data"
     for split in ("train", "test"):
-        download(f"{base}/{split}.jsonl", os.path.join(out, f"{split}.jsonl"))
+        if args.check:
+            check_text(f"{base}/{split}.jsonl", 4096, '"question"', '"answer"', "####")
+        else:
+            download(f"{base}/{split}.jsonl", os.path.join(out, f"{split}.jsonl"))
 
 
 def get_tinystories(out, args):
     # The V2 files (stories by GPT-4 only) already separate stories with DOC_SEP.
     for split in ("train", "valid"):
-        hf_download("roneneldan/TinyStories", f"TinyStoriesV2-GPT4-{split}.txt", os.path.join(out, f"{split}.txt"))
+        name = f"TinyStoriesV2-GPT4-{split}.txt"
+        if args.check:
+            check_text(hf_url("roneneldan/TinyStories", name), 65536, DOC_SEP)
+        else:
+            hf_download("roneneldan/TinyStories", name, os.path.join(out, f"{split}.txt"))
 
 
 def get_fineweb_edu(out, args):
@@ -172,6 +266,10 @@ def get_fineweb_edu(out, args):
     files = [p for p in hf_files(repo, f"sample/{args.sample}") if p.endswith(".parquet")]
     if not files:
         sys.exit(f"no Parquet files under sample/{args.sample} in {repo}")
+    if args.check:
+        log(f"  {len(files)} files in sample/{args.sample}")
+        check_parquet(hf_url(repo, files[0]), ["text"])
+        return
     log(f"  {len(files)} files in sample/{args.sample}; taking {min(args.files, len(files))}")
     for i, p in enumerate(files[: args.files]):
         txt = os.path.join(out, f"{i:03d}.txt")
@@ -193,9 +291,13 @@ def get_openmath2(out, args):
     if not files:
         splits = sorted({os.path.basename(p).split("-")[0] for p in listed})
         sys.exit(f"no files for split {args.split} in {repo}/data; the splits there: {', '.join(splits) or 'none'}")
+    cols = ["problem", "generated_solution", "expected_answer", "problem_source"]
+    if args.check:
+        log(f"  {len(files)} files for split {args.split}")
+        check_parquet(hf_url(repo, files[0]), cols)
+        return
     sources = set(args.sources.split(",")) if args.sources else None
     paths = [hf_download(repo, p, os.path.join(out, "parquet", os.path.basename(p))) for p in files]
-    cols = ["problem", "generated_solution", "expected_answer", "problem_source"]
 
     def rows():
         for path in paths:
@@ -209,6 +311,9 @@ def get_openmath2(out, args):
 def get_metamath(out, args):
     # MetaMathQA: GSM8K and MATH training problems, rephrased and augmented;
     # each response ends with "The answer is: X".
+    if args.check:
+        check_text(hf_url("meta-math/MetaMathQA", "MetaMathQA-395K.json"), 4096, '"query"', '"response"')
+        return
     path = hf_download("meta-math/MetaMathQA", "MetaMathQA-395K.json", os.path.join(out, "MetaMathQA-395K.json"))
     with open(path, encoding="utf-8") as f:
         data = json.load(f)
@@ -243,6 +348,8 @@ def main():
     ap.add_argument("--keep-parquet", action="store_true", help="fineweb-edu: keep the Parquet files")
     ap.add_argument("--split", default="train_1M", help="openmath2: train_1M, train_2M, train_5M or train")
     ap.add_argument("--sources", default="", help="openmath2: only these problem_source values (comma list)")
+    ap.add_argument("--check", action="store_true",
+                    help="only check that the files exist, with the columns read here (downloads a few MB)")
     args = ap.parse_args()
     for name in args.names:
         log(f"== {name}")
