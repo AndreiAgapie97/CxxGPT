@@ -1,0 +1,57 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    name: ${{ matrix.cxx }} -march=${{ matrix.march }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        cxx: [g++, clang++]
+        march: [x86-64, haswell, native]
+    steps:
+      - uses: actions/checkout@v4
+      - name: CPU features
+        run: grep -o -w -E 'avx2|fma|avx512f|avx512bw|avx512vl|avx512_vnni|avx_vnni' /proc/cpuinfo | sort -u | tr '\n' ' '
+      - name: Build
+        run: ${{ matrix.cxx }} -O3 -march=${{ matrix.march }} -std=c++17 -pthread -Wall -Wextra -Werror ternary_moe.cpp -o ternary_moe
+      - name: Test
+        run: ./ternary_moe --tests
+
+  # ISA paths the runner may not be able to execute still have to compile.
+  compile-only:
+    name: compile ${{ matrix.cxx }} -march=${{ matrix.march }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        cxx: [g++, clang++]
+        march: [alderlake, skylake-avx512, icelake-server]
+    steps:
+      - uses: actions/checkout@v4
+      - run: ${{ matrix.cxx }} -O3 -march=${{ matrix.march }} -std=c++17 -pthread -Wall -Wextra -Werror ternary_moe.cpp -o ternary_moe
+
+  sanitizers:
+    name: ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [asan, tsan]
+    steps:
+      - uses: actions/checkout@v4
+      - run: make ${{ matrix.target }}
+
+  benchmark:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - run: make bench

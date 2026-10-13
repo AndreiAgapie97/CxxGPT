@@ -9,6 +9,7 @@
 // Run:
 //   ./ternary_moe          # tests + benchmark
 //   ./ternary_moe -t N     # force N threads
+//   ./ternary_moe --tests  # tests only; exit status 0 iff all passed
 
 #include <algorithm>
 #include <atomic>
@@ -1370,14 +1371,22 @@ Stats bench(F&& f, int iters) {
 
 int main(int argc, char** argv) {
     int nthreads = int(std::thread::hardware_concurrency());
-    for (int i = 1; i + 1 < argc; ++i)
-        if (std::strcmp(argv[i], "-t") == 0) nthreads = std::atoi(argv[i + 1]);
+    bool tests_only = false;
+    for (int i = 1; i < argc; ++i) {
+        if (std::strcmp(argv[i], "-t") == 0 && i + 1 < argc) nthreads = std::atoi(argv[++i]);
+        else if (std::strcmp(argv[i], "--tests") == 0) tests_only = true;
+        else {
+            fprintf(stderr, "usage: %s [-t threads] [--tests]\n", argv[0]);
+            return 2;
+        }
+    }
     if (nthreads < 1) nthreads = 1;
 
     ThreadPool p(nthreads);
     g_pool = &p;
 
     run_tests();
+    if (tests_only) return g_failures == 0 ? 0 : 1;
 
     constexpr int M = 4096, K = 4096;
     constexpr float kScale = 0.05f;
