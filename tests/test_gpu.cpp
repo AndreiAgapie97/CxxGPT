@@ -6,7 +6,8 @@
 // gradient, the gradient norm and the updated weights must agree. With
 // exact fp32 matmuls the only differences are summation order; ternary
 // models also see rare int8 rounding flips, so their tolerance is looser.
-// Muon runs the same comparison on the dense and MoE models. A last check
+// Muon runs the same comparison on the dense and MoE models. Some runs clip
+// the gradient (to half its norm), as training with --clip does. A last check
 // trains on the GPU alone, with TF32, until a toy pattern is learned.
 #include <cmath>
 #include <cstdio>
@@ -39,8 +40,10 @@ void random_batch(Rng& rng, int V, int N, std::vector<int>& tok, std::vector<int
     }
 }
 
+// clip > 0: clip the gradient to that fraction of its norm, scaling it on the
+// GPU the way GpuBackend does.
 void compare(const char* name, const Config& cfg, double tol_loss, double tol_grad, double tol_param,
-             bool muon = false) {
+             bool muon = false, double clip = 0) {
     Model<float> cpu(cfg);
     cpu.init(5);
     Rng rng(6);
@@ -75,8 +78,13 @@ void compare(const char* name, const Config& cfg, double tol_loss, double tol_gr
         }
         const double nc = clip_grad_norm(cpu, 0.0), ng = gpu.grad_norm();
         EXPECT(std::abs(nc - ng) <= tol_grad * nc, "%s: grad norm %g (gpu) vs %g (cpu)", name, ng, nc);
+        double scale = 1.0;
+        if (clip > 0) {
+            clip_grad_norm(cpu, clip * nc);
+            scale = double(float(clip * nc / ng));
+        }
         opt.update(cpu, 1e-2);
-        gpu.adamw_step(1e-2, opt.beta1, opt.beta2, opt.eps, opt.weight_decay, 1.0);
+        gpu.adamw_step(1e-2, opt.beta1, opt.beta2, opt.eps, opt.weight_decay, scale);
         gpu.get_params(p.data());
         worst_param = std::max(worst_param, rel_l2(p.data(), cpu.params.data(), p.size()));
     }
@@ -170,7 +178,7 @@ int main() {
     Config moe1 = moe;
     moe1.top_k = 1;
     moe1.n_shared = 0;
-    compare("moe top-1", moe1, 1e-5, 1e-4, 1e-4);
+    compare("moe top-1", moe1, 1e-5, 1e-4, 1e-4, false, 0.5);
 
     Config ours = moe;
     ours.ternary = true;
@@ -179,7 +187,7 @@ int main() {
     // Muon moves the weights about as much as the gradients differ, ten
     // times more than AdamW does, hence the looser weight tolerance.
     compare("dense muon", dense, 1e-5, 1e-4, 1e-3, true);
-    compare("moe muon", moe, 1e-5, 1e-4, 1e-3, true);
+    compare("moe muon", moe, 1e-5, 1e-4, 1e-3, true, 0.5);
 
     learns_pattern(false);
     learns_pattern(true);

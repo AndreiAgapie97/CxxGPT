@@ -12,6 +12,8 @@
 #   OPT=--muon (or "" for AdamW everywhere)   LR=1.5e-3
 #   SEQ=512 BATCH=8 ACCUM=16 (tokens per step: SEQ x BATCH x ACCUM)
 #   HOURS=7.5   RUN=night1 (outputs runs/$RUN.*)   DATA=data
+#   INIT: a checkpoint to start from (for example runs/night1.ckpt), with a
+#         fresh optimizer and schedule; its model replaces MODEL.
 #   MIX: the training files, comma-separated, "*N" repeats one N times;
 #        by default web text, stories, OpenMath, MetaMath and GSM8K train x4.
 # Validation is on the GSM8K test set, which training never sees: the loss
@@ -42,6 +44,8 @@ minutes=$(awk -v h="$HOURS" 'BEGIN { printf "%d", h * 60 + 0.5 }')
 mkdir -p runs
 resume=()
 [ -f "runs/$RUN.ckpt" ] && resume=(--resume)
+# Once runs/$RUN.ckpt exists, --resume wins over --init.
+[ -n "${INIT:-}" ] && resume+=(--init "$INIT")
 echo "$RUN: $steps steps of $per_step tokens; stops after $minutes minutes at the latest" | tee -a "runs/$RUN.log"
 # tee -i: Ctrl-C reaches only the trainer, which saves before it stops.
 # shellcheck disable=SC2086

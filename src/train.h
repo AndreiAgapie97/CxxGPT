@@ -422,14 +422,14 @@ inline void load_checkpoint(const std::string& path, Model<float>& model, AdamW*
     if (has_opt && opt)
         CHECK((has_opt == 2) == opt->muon, "%s was trained %s Muon; resume it %s --muon", path.c_str(),
               has_opt == 2 ? "with" : "without", has_opt == 2 ? "with" : "without");
-    if (has_opt) {
+    if (has_opt && opt) {
         std::vector<float> m(n), v(n);
         CHECK(std::fread(m.data(), 4, n, f) == n && std::fread(v.data(), 4, n, f) == n,
               "truncated optimizer state");
-        if (opt) {
-            opt->m = std::move(m);
-            opt->v = std::move(v);
-        }
+        opt->m = std::move(m);
+        opt->v = std::move(v);
+    } else if (has_opt) {
+        CHECK(std::fseek(f, long(2 * n * 4), SEEK_CUR) == 0, "truncated optimizer state");
     }
     for (auto& b : model.router_bias)
         CHECK(std::fread(b.data(), 4, b.size(), f) == b.size(), "truncated router bias");

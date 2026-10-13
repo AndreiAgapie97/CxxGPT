@@ -566,18 +566,20 @@ int cmd_train(Args& a) {
             "train:  --batch 16 --accum 1 --steps 2000 --lr 1e-3 --min-lr-frac 0.1\n"
             "        --warmup 100 --wd 0.1 --clip 1.0 --bias-rate 1e-3 --seed 1\n"
             "        --muon (Muon instead of AdamW for the matrices in the blocks)\n"
+            "start:  --init FILE (FILE's weights and model; new optimizer, schedule and data order)\n"
             "output: --out model.ckpt --resume --log FILE.csv --log-every 10\n"
             "        --eval-every 200 --eval-batches 20 --save-every 500\n"
             "        --time-limit MINUTES --threads N --profile\n"
             "gpu:    --gpu (train on the GPU; needs cxxgpt-gpu, from make gpu) --no-tf32 (exact fp32 matmuls)\n"
             "reason: --reason-test FILE --reason-every STEPS --reason-limit 300\n"
-            "Ctrl-C saves a checkpoint and stops; --resume continues from --out.\n");
+            "Ctrl-C saves a checkpoint and stops; --resume continues from --out, and\n"
+            "takes precedence over --init once --out exists.\n");
         return 0;
     }
     ThreadPool tp(threads_arg(a));
     g_pool = &tp;
     const std::string data_path = a.str("data"), val_path = a.str("val");
-    const std::string out = a.str("out", "model.ckpt"), log_path = a.str("log");
+    const std::string out = a.str("out", "model.ckpt"), log_path = a.str("log"), init = a.str("init");
     CHECK(!data_path.empty(), "--data is required (see cxxgpt train --help)");
     const TokenData data = load_token_list(data_path);
     TokenData val_data;
@@ -586,7 +588,10 @@ int cmd_train(Args& a) {
     const bool resume = a.flag("resume") && std::filesystem::exists(out);
 
     Config cfg = config_from_args(a, int(data.vocab));
-    if (resume) cfg = peek_checkpoint_config(out);
+    if (resume)
+        cfg = peek_checkpoint_config(out);
+    else if (!init.empty())
+        cfg = peek_checkpoint_config(init);
     const int B = int(a.integer("batch", 16)), accum = int(a.integer("accum", 1));
     const int Tn = std::min(cfg.seq_len, int(a.integer("seq", cfg.seq_len)));
     const long steps = a.integer("steps", 2000), warmup = a.integer("warmup", 100);
@@ -613,6 +618,9 @@ int cmd_train(Args& a) {
     if (resume) {
         load_checkpoint(out, model, &opt, &data_rng);
         std::printf("resumed %s at step %ld\n", out.c_str(), opt.step);
+    } else if (!init.empty()) {
+        load_checkpoint(init, model, nullptr, nullptr);
+        std::printf("starting from the weights in %s\n", init.c_str());
     }
     print_config(cfg, model);
     std::unique_ptr<Backend> backend;

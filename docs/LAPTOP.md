@@ -109,5 +109,10 @@ Run the same command again to resume after an interruption. The log is
 Worked math solutions take a larger share (OpenMathInstruct-2, MetaMathQA,
 GSM8K train), with the checkpoint from night 1 as the starting point. What
 exactly depends on what night 1 shows; we decide it together each morning.
+Starting from night 1 looks like this (the model comes from the
+checkpoint; the learning-rate schedule starts over):
+```sh
+RUN=night2 INIT=runs/night1.ckpt MIX="..." TOKS=... BATCH=... ACCUM=... scripts/night.sh
+```
 CPU-scale experiments and engine work continue on the cloud VM during the
 day.
