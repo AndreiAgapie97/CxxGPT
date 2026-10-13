@@ -1,9 +1,11 @@
 // train.h — optimizer, learning-rate schedule, token data and checkpoints.
 #pragma once
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <limits>
 #include <string>
 #include <vector>
@@ -12,10 +14,48 @@
 #include "model.h"
 
 // ---------------------------------------------------------------------------
-// AdamW with decoupled weight decay on the tensors flagged `decay`.
+// Muon's orthogonalization. Muon updates a weight matrix with its momentum
+// made orthogonal: G = U S Vᵀ (the SVD) becomes about U Vᵀ, so every
+// direction of the update moves by the same amount instead of a few large
+// ones dominating. Newton–Schulz iterations get there with matrix products
+// only.
+// ---------------------------------------------------------------------------
+
+// X [m, n] (row-major, m <= n) becomes approximately its orthogonal factor:
+// five steps of the quintic X <- aX + (b XXᵀ + c (XXᵀ)²) X, from Keller
+// Jordan's Muon, leave its singular values in about [0.7, 1.2] (it is tuned
+// to raise small ones fast, not to converge exactly). scratch holds
+// 2m² + mn values. The double version is the tests' reference.
+template <class T>
+void newton_schulz(T* X, int m, int n, int steps, T* scratch, bool threaded) {
+    const T a = T(3.4445), b = T(-4.7750), c = T(2.0315);
+    const size_t mn = size_t(m) * n, mm = size_t(m) * m;
+    double ss = 0.0;
+    for (size_t i = 0; i < mn; ++i) ss += double(X[i]) * double(X[i]);
+    const T inv = T(1.0 / (std::sqrt(ss) + 1e-7));  // singular values now <= 1
+    for (size_t i = 0; i < mn; ++i) X[i] *= inv;
+    T *A = scratch, *B = scratch + mm, *Y = scratch + 2 * mm;
+    for (int s = 0; s < steps; ++s) {
+        gemm(m, m, n, MatView<T>{X, n, 1}, MatView<T>{X, 1, n}, A, m, false, threaded);  // A = X Xᵀ
+        gemm(m, m, m, MatView<T>{A, m, 1}, MatView<T>{A, m, 1}, B, m, false, threaded);  // B = A²
+        for (size_t i = 0; i < mm; ++i) B[i] = b * A[i] + c * B[i];
+        gemm(m, n, m, MatView<T>{B, m, 1}, MatView<T>{X, n, 1}, Y, n, false, threaded);  // Y = B X
+        for (size_t i = 0; i < mn; ++i) X[i] = a * X[i] + Y[i];
+    }
+}
+
+// ---------------------------------------------------------------------------
+// AdamW with decoupled weight decay on the tensors flagged `decay`. With
+// muon = true, the block matrices take Muon steps instead (Nesterov
+// momentum in m, then orthogonalized), scaled by 0.2·sqrt(max(rows, cols))
+// so their size matches a typical AdamW step and both share one learning
+// rate and weight decay (Moonlight's recipe).
 // ---------------------------------------------------------------------------
 struct AdamW {
     double beta1 = 0.9, beta2 = 0.95, eps = 1e-8, weight_decay = 0.1;
+    bool muon = false;
+    double muon_momentum = 0.95;
+    int muon_steps = 5;
     long step = 0;
     std::vector<float> m, v;
 
@@ -30,7 +70,12 @@ struct AdamW {
         const float c1 = float(1.0 / (1.0 - std::pow(beta1, double(step))));
         const float c2 = float(1.0 / (1.0 - std::pow(beta2, double(step))));
         const float lr_f = float(lr), eps_f = float(eps);
+        std::vector<const ParamInfo*> muon_infos;
         for (const auto& info : model.infos) {
+            if (muon && muon_matrix(info)) {
+                muon_infos.push_back(&info);
+                continue;
+            }
             const float wd = info.decay ? float(weight_decay) : 0.0f;
             float* p = &model.params[info.offset];
             const float* g = &model.grads[info.offset];
@@ -47,7 +92,54 @@ struct AdamW {
                 }
             }, 1);
         }
+        if (!muon_infos.empty()) muon_update(model, muon_infos, lr_f);
         model.weights_dirty = true;
+    }
+
+private:
+    void muon_update(Model<float>& model, const std::vector<const ParamInfo*>& infos, float lr) {
+        PROFILE("muon");
+        struct Block {
+            size_t off;
+            int rows, cols;
+        };
+        std::vector<Block> blocks;  // one per (tensor, expert copy, fused part)
+        for (const ParamInfo* p : infos) {
+            const int parts = muon_parts(*p), rows = p->rows / parts;
+            const size_t per_copy = p->size / p->count;
+            for (int c = 0; c < p->count; ++c)
+                for (int k = 0; k < parts; ++k)
+                    blocks.push_back({p->offset + c * per_copy + size_t(k) * rows * p->cols, rows, p->cols});
+        }
+        const float mu = float(muon_momentum), wd = float(weight_decay);
+        pool().parallel_for(int(blocks.size()), [&](int b0, int b1_) {
+            static thread_local std::vector<float> X, scratch;
+            for (int bi = b0; bi < b1_; ++bi) {
+                const Block& bl = blocks[bi];
+                const int r = bl.rows, c = bl.cols;
+                const bool tr = r > c;  // orthogonalize the wide orientation
+                const int mrows = tr ? c : r, ncols = tr ? r : c;
+                X.resize(size_t(r) * c);
+                scratch.resize(2 * size_t(mrows) * mrows + size_t(mrows) * ncols);
+                float* p = &model.params[bl.off];
+                const float* g = &model.grads[bl.off];
+                float* mom = &m[bl.off];
+                for (int i = 0; i < r; ++i)
+                    for (int j = 0; j < c; ++j) {
+                        const size_t k = size_t(i) * c + j;
+                        mom[k] = mu * mom[k] + (1 - mu) * g[k];
+                        const float u = (1 - mu) * g[k] + mu * mom[k];  // Nesterov
+                        X[tr ? size_t(j) * r + i : k] = u;
+                    }
+                newton_schulz(X.data(), mrows, ncols, muon_steps, scratch.data(), false);
+                const float scale = 0.2f * std::sqrt(float(std::max(r, c)));
+                for (int i = 0; i < r; ++i)
+                    for (int j = 0; j < c; ++j) {
+                        const size_t k = size_t(i) * c + j;
+                        p[k] -= lr * (scale * X[tr ? size_t(j) * r + i : k] + wd * p[k]);
+                    }
+            }
+        }, 1);
     }
 };
 
@@ -312,7 +404,7 @@ inline void save_checkpoint(const std::string& path, const Model<float>& model, 
     std::fwrite(data_rng.state(), 8, 4, f);
     std::fwrite(&n, 8, 1, f);
     std::fwrite(model.params.data(), 4, n, f);
-    const uint32_t has_opt = opt.m.size() == n;
+    const uint32_t has_opt = opt.m.size() != n ? 0 : opt.muon ? 2 : 1;  // 2: m holds Muon momentum too
     std::fwrite(&has_opt, 4, 1, f);
     if (has_opt) {
         std::fwrite(opt.m.data(), 4, n, f);
@@ -352,6 +444,9 @@ inline void load_checkpoint(const std::string& path, Model<float>& model, AdamW*
           (unsigned long long)n, model.params.size());
     CHECK(std::fread(model.params.data(), 4, n, f) == n, "truncated params");
     CHECK(std::fread(&has_opt, 4, 1, f) == 1, "truncated checkpoint");
+    if (has_opt && opt)
+        CHECK((has_opt == 2) == opt->muon, "%s was trained %s Muon; resume it %s --muon", path.c_str(),
+              has_opt == 2 ? "with" : "without", has_opt == 2 ? "with" : "without");
     if (has_opt) {
         std::vector<float> m(n), v(n);
         CHECK(std::fread(m.data(), 4, n, f) == n && std::fread(v.data(), 4, n, f) == n,

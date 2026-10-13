@@ -17,9 +17,10 @@ int main(int argc, char** argv) {
         data.save((dir / "ignored.tok").string());
         return 0;
     }
-    if (argc == 4 && std::string(argv[1]) == "compare") {
+    if ((argc == 4 || argc == 5) && std::string(argv[1]) == "compare") {
         Model<float> a(peek_checkpoint_config(argv[2])), b(peek_checkpoint_config(argv[3]));
         AdamW oa, ob;
+        oa.muon = ob.muon = argc == 5 && std::string(argv[4]) == "--muon";
         Rng ra(0), rb(0);
         load_checkpoint(argv[2], a, &oa, &ra); load_checkpoint(argv[3], b, &ob, &rb);
         EXPECT(oa.step == 4 && ob.step == 4, "CLI did not complete four optimizer updates");
@@ -31,6 +32,6 @@ int main(int argc, char** argv) {
         std::printf("  CLI checkpoint partition: params %.1e moments %.1e; four updates, RNG matched\n", param, moment);
         return g_failures ? 1 : 0;
     }
-    std::fprintf(stderr, "usage: test_training_cli generate DIR | compare MACRO MICRO\n");
+    std::fprintf(stderr, "usage: test_training_cli generate DIR | compare MACRO MICRO [--muon]\n");
     return 1;
 }

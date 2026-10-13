@@ -30,15 +30,18 @@ for variant in dense ternary moe ternary-moe; do
     ARCH=()
     if [[ "$variant" == *ternary* ]]; then ARCH+=(--ternary); fi
     if [[ "$variant" == *moe* ]]; then ARCH+=(--experts 4 --topk 2 --ehidden 6 --shared 1); fi
-    for dataset in masked sparse; do
+    for optimizer in adamw muon; do
+      OPT=()
+      if [[ "$optimizer" == muon ]]; then OPT+=(--muon); fi
+      for dataset in masked sparse; do
         TRAIN=(--data "$TEST_DIR/$dataset.tok" --val "$TEST_DIR/$dataset.tok"
                --seq 8 --dim 8 --heads 2 --ffn 12 --layers 1 --steps 4 --warmup 0
                --seed 3 --lr 0.001 --clip 0.1 --eval-every 1 --log-every 1 --save-every 0 --threads 2)
-        ./cxxgpt train "${TRAIN[@]}" "${ARCH[@]}" --batch 4 --accum 1 --eval-batches 1 \
+        ./cxxgpt train "${TRAIN[@]}" "${ARCH[@]}" "${OPT[@]}" --batch 4 --accum 1 --eval-batches 1 \
             --out "$TEST_DIR/macro.ckpt" --log "$TEST_DIR/macro.csv" > "$TEST_DIR/macro.log"
-        ./cxxgpt train "${TRAIN[@]}" "${ARCH[@]}" --batch 1 --accum 4 --eval-batches 4 \
+        ./cxxgpt train "${TRAIN[@]}" "${ARCH[@]}" "${OPT[@]}" --batch 1 --accum 4 --eval-batches 4 \
             --out "$TEST_DIR/micro.ckpt" --log "$TEST_DIR/micro.csv" > "$TEST_DIR/micro.log"
-        ./test_training_cli compare "$TEST_DIR/macro.ckpt" "$TEST_DIR/micro.ckpt"
+        ./test_training_cli compare "$TEST_DIR/macro.ckpt" "$TEST_DIR/micro.ckpt" "${OPT[@]}"
         # Identical eval samples must give the same token-weighted metric,
         # including all-ignored eval batches. Ignore timing columns.
         awk -F, 'NR>1 {print $1 "," $2 "," $3}' "$TEST_DIR/macro.csv" > "$TEST_DIR/macro.loss"
@@ -46,9 +49,10 @@ for variant in dense ternary moe ternary-moe; do
         diff -u "$TEST_DIR/macro.loss" "$TEST_DIR/micro.loss"
         if [[ "$dataset" == sparse ]]; then grep -q 'skipped .* empty sampled groups' "$TEST_DIR/micro.log"; fi
         rm "$TEST_DIR/macro.csv" "$TEST_DIR/micro.csv"
+      done
     done
 done
 status=0
 ./cxxgpt train "${COMMON[@]}" --data "$TEST_DIR/ignored.tok" > "$TEST_DIR/ignored.log" 2>&1 || status=$?
 [[ "$status" == 1 ]] && grep -q 'no predictable targets' "$TEST_DIR/ignored.log"
-printf 'CLI: masked/sparse accumulation, weighted validation, empty-group skips, and fully masked rejection passed\n'
+printf 'CLI: AdamW/Muon masked/sparse accumulation, weighted validation, empty-group skips, and fully masked rejection passed\n'

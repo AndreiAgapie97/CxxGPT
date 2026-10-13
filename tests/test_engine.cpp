@@ -11,6 +11,7 @@
 #include "test_data.h"
 #include "test_numerics.h"
 #include "test_train.h"
+#include "test_optim.h"
 
 int main(int argc, char** argv) {
     int threads = int(std::thread::hardware_concurrency());
@@ -28,6 +29,7 @@ int main(int argc, char** argv) {
         {"numerics", test_numerics},
         {"policy gradient", test_policy_gradient_expectation},
         {"train", test_train},
+        {"optim", test_optim},
     };
     for (auto& s : suites) {
         const int before = g_failures;

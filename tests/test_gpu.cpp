@@ -6,8 +6,8 @@
 // gradient, the gradient norm and the updated weights must agree. With
 // exact fp32 matmuls the only differences are summation order; ternary
 // models also see rare int8 rounding flips, so their tolerance is looser.
-// A last check trains on the GPU alone, with TF32, until a toy pattern is
-// learned.
+// Muon runs the same comparison on the dense and MoE models. A last check
+// trains on the GPU alone, with TF32, until a toy pattern is learned.
 #include <cmath>
 #include <cstdio>
 #include <string>
@@ -41,17 +41,20 @@ void random_batch(Rng& rng, int V, int N, std::vector<int>& tok, std::vector<int
     }
 }
 
-void compare(const char* name, const Config& cfg, double tol_loss, double tol_grad, double tol_param) {
+void compare(const char* name, const Config& cfg, double tol_loss, double tol_grad, double tol_param,
+             bool muon = false) {
     Model<float> cpu(cfg);
     cpu.init(5);
     Rng rng(6);
     for (auto& layer : cpu.router_bias)
         for (auto& b : layer) b = float(0.01 * rng.normal());
     AdamW opt;
+    opt.muon = muon;
     GpuTrainer gpu(cfg, cpu.infos, /*tf32=*/false);
     gpu.set_params(cpu.params.data());
     gpu.set_adam_state(0, nullptr, nullptr);
     gpu.set_router_bias(cpu.router_bias);
+    gpu.set_muon(muon, opt.muon_momentum, opt.muon_steps);
 
     const int B = 3, Tn = cfg.seq_len, N = B * Tn;
     std::vector<int> tok, tgt;
@@ -86,7 +89,7 @@ void compare(const char* name, const Config& cfg, double tol_loss, double tol_gr
                 worst_tensor.c_str(), worst_param);
     EXPECT(worst_loss <= tol_loss, "%s: loss differs by %g", name, worst_loss);
     EXPECT(worst_grad <= tol_grad, "%s: gradient of %s differs by %g", name, worst_tensor.c_str(), worst_grad);
-    EXPECT(worst_param <= tol_param, "%s: weights after AdamW differ by %g", name, worst_param);
+    EXPECT(worst_param <= tol_param, "%s: weights after the optimizer step differ by %g", name, worst_param);
 }
 
 // The production accumulation helper must preserve the CPU macro-batch
@@ -131,7 +134,7 @@ void masked_accumulation() {
 }
 
 // The GPU alone, with TF32, learns a repeating sequence.
-void learns_pattern() {
+void learns_pattern(bool muon) {
     Config cfg;
     cfg.vocab = 64;
     cfg.seq_len = 32;
@@ -145,6 +148,7 @@ void learns_pattern() {
     host.init(7);
     GpuTrainer gpu(cfg, host.infos, /*tf32=*/true);
     gpu.set_params(host.params.data());
+    gpu.set_muon(muon);
     const int B = 8, N = B * cfg.seq_len;
     std::vector<int> tok(N), tgt(N);
     for (int n = 0; n < N; ++n) {
@@ -160,8 +164,9 @@ void learns_pattern() {
         const double norm = gpu.grad_norm();
         gpu.adamw_step(3e-3, 0.9, 0.95, 1e-8, 0.0, norm > 1.0 ? 1.0 / norm : 1.0);
     }
-    std::printf("  learns pattern: loss %.3f -> %.3f\n", first, last);
-    EXPECT(last < 0.1 * first, "GPU training did not learn the pattern: %.3f -> %.3f", first, last);
+    const char* opt = muon ? "Muon" : "AdamW";
+    std::printf("  learns pattern (%s): loss %.3f -> %.3f\n", opt, first, last);
+    EXPECT(last < 0.1 * first, "GPU training with %s did not learn the pattern: %.3f -> %.3f", opt, first, last);
 }
 
 // Zero block projections make the residual stream equal the embedding.
@@ -236,7 +241,13 @@ int main() {
     ours.ternary = true;
     compare("ternary moe", ours, 1e-3, 3e-2, 1e-2);
 
-    learns_pattern();
+    // Muon moves the weights about as much as the gradients differ, ten
+    // times more than AdamW does, hence the looser weight tolerance.
+    compare("dense muon", dense, 1e-5, 1e-4, 1e-3, true);
+    compare("moe muon", moe, 1e-5, 1e-4, 1e-3, true);
+
+    learns_pattern(false);
+    learns_pattern(true);
     if (g_failures) return 1;
     std::printf("all passed\n");
     return 0;

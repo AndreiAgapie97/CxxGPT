@@ -1,154 +1,202 @@
 # CxxGPT
 
-CxxGPT is a native C++20 transformer research engine with dense or
-Mixture-of-Experts feed-forward layers, trainable ternary projections,
-AdamW, a byte/BPE tokenizer, checkpoints, and CPU bitplane inference.
-CPU training and experiments use the standard library and our own kernels;
-no Python ML framework is required.
+A native C++20 language-model research engine, aiming at strong reasoning
+and more efficient training and inference:
 
-Every weight is −1, 0 or +1, with one fp32 scale per matrix. A 4096×4096
-matrix takes 4 MB instead of 64 MB in fp32.
+- **ternary weights** (each projection weight is −1, 0 or +1) with int8
+  activations, as in BitNet b1.58;
+- **sparse Mixture-of-Experts**: many expert FFNs, each token uses a few;
+- **hand-written kernels**, CPU (AVX2, AVX-512, VNNI) and CUDA, with no
+  Python framework anywhere in training or inference.
 
-This describes a ternary projection's packed inference storage. Embeddings,
-norms, and the router retain fp32 weights, and training retains fp32 master
-weights, gradients, quantized copies, and optimizer moments.
+Everything is ours except the training data: the model, the training
+engine and optimizers, the BPE tokenizer, the data pipeline, the reasoning
+curriculum and the inference engine. Python appears only in one small
+script that downloads public datasets.
 
-## Build and run
+Ternary projection inference stores two bitplanes (two bits per weight) plus
+scales; `log2(3)` is the information bound. Embeddings, norms and routers retain
+fp32 weights. Training retains fp32 master weights, gradients, quantized
+copies and optimizer moments, so packed inference storage does not describe
+training memory.
+
+## Where things stand
+
+| part | state |
+|---|---|
+| training engine (CPU) | transformer with RoPE, RMSNorm, SwiGLU, tied embeddings; ternary BitLinear; top-k MoE with shared experts and bias-based load balancing; AdamW and Muon; checkpoints and resume |
+| training engine (GPU) | the same model in CUDA + cuBLAS, op for op; CPU parity suite; research CUDA changes await NVIDIA runtime validation |
+| tokenizer | byte-level BPE, trained by our own code; parallel streaming encoder |
+| data | synthetic reasoning curriculum; GSM8K and other public math and text sets (`scripts/get_data.py`) |
+| evaluation | exact-answer accuracy on held-out problems, per task and difficulty |
+| inference | ternary models packed into bitplanes, run on the int8 kernels with a KV cache |
+
+The models trained so far are tiny (3–10 M parameters, CPU only). The
+laptop's GPU is next: see [docs/LAPTOP.md](docs/LAPTOP.md).
+
+## Build and test
 
 ```sh
-make            # g++ -O3 -march=native ...
-make test       # correctness tests only (exit status 0 iff all pass)
-make bench      # tests, then GEMV and MoE benchmarks
-make asan tsan  # tests under AddressSanitizer+UBSan / ThreadSanitizer
+make            # ternary_moe, test_engine, cxxgpt, test_training_cli (g++ -O3 -march=native)
+make test       # every CPU test
+make asan tsan  # the same under AddressSanitizer+UBSan and ThreadSanitizer
+make gpu        # cxxgpt-gpu and test_gpu (needs the CUDA toolkit)
+make gpu-test   # GPU against CPU (needs an NVIDIA GPU)
 ```
 
-Or directly: `g++ -O3 -march=native -std=c++20 -pthread ternary_moe.cpp -o ternary_moe`,
-then `./ternary_moe [-t threads] [--tests]`.
+C++20; builds warning-free under g++ and clang++. CI builds with both
+compilers on several `-march` targets, runs every test under the
+sanitizers, and compiles the CUDA backend with nvcc 12.8 and 13.0.
 
-`-march` picks the kernels: scalar (`x86-64`), AVX2 (`haswell`), AVX2 +
-AVX-VNNI (`alderlake`), AVX-512 (`skylake-avx512`), AVX-512 + VNNI
-(`icelake-server`; Zen 4 gets it with `native`).
+## Quick start
 
-## Training and research
+Train a small model on the reasoning curriculum, then test it on held-out
+problems:
 
 ```sh
-mkdir -p data
-./cxxgpt gen-reasoning --out data/reason --train 2000 --val 500
+./cxxgpt gen-reasoning --out data/reason          # train/val tokens and a test set
 ./cxxgpt train --data data/reason.train.tok --val data/reason.val.tok \
-    --seq 256 --dim 64 --layers 1 --heads 4 --ffn 128 \
-    --experts 4 --topk 2 --ehidden 64 --ternary --batch 2 --steps 200 \
-    --out model.ckpt
-./cxxgpt eval-reasoning --ckpt model.ckpt --test data/reason.test.txt
+    --experts 8 --topk 2 --ternary --steps 2500 --lr 1.5e-3 --out runs/model.ckpt
+./cxxgpt eval-reasoning --ckpt runs/model.ckpt --test data/reason.test.txt
+./cxxgpt sample --ckpt runs/model.ckpt --prompt $'Q: 47+85\nA: '
 ```
 
-For comparisons with recorded seeds, source hashes, compiler flags, budgets,
-and raw results:
+`cxxgpt train --help` lists every option. Useful ones: `--muon` (the Muon
+optimizer), `--gpu` (with `cxxgpt-gpu`), `--time-limit MINUTES` (stop and
+save in time), `--resume`, `--reason-test FILE --reason-every N` (accuracy
+during training).
+
+### Commands
+
+| command | does |
+|---|---|
+| `gen-reasoning` | writes the synthetic curriculum: problems with step-by-step solutions, train/val token files and a test set one difficulty level beyond training |
+| `bpe-train` | trains a BPE tokenizer on a text file |
+| `text2tok` | encodes text into a token file (parallel, streaming; `--doc-sep` splits documents) |
+| `prep-qa` | turns question/answer JSONL (GSM8K and the like) into token files with a loss mask and a test set |
+| `train` | trains or resumes a model (CPU, or GPU with `cxxgpt-gpu --gpu`) |
+| `eval-reasoning` | exact-answer accuracy per task and difficulty |
+| `sample` | generates text from a prompt |
+| `bench-infer` | times the ternary inference engine against an fp32 baseline |
+
+### Real data
+
+```sh
+python3 scripts/get_data.py gsm8k tinystories fineweb-edu openmath2 metamath
+./cxxgpt bpe-train --in data/fineweb-edu/train.txt --vocab 8192 --out data/tok.bpe
+./cxxgpt text2tok --in data/fineweb-edu/train.txt --out data/web.tok --bpe data/tok.bpe \
+    --doc-sep '<|endoftext|>'
+./cxxgpt prep-qa --in data/gsm8k/train.jsonl --out data/gsm8k/train --bpe data/tok.bpe
+```
+
+`get_data.py` needs only `pyarrow`; it resumes interrupted downloads.
+
+## Reproducible research
 
 ```sh
 scripts/research.sh runs/toy-01 200 3 3 500
 scripts/reasoning-baseline.sh runs/reason-01 200 3 3
 ```
 
-The first runs all four variants on a tiny transition environment, a continual
-task switch with a bounded replay buffer, and a contextual bandit that learns
-from rewards. The second uses the existing CLI to train on addition and
-comparison problems, then evaluates held-out questions. Run directories must
-be new; the scripts preserve previous results.
+The first compares four variants on a tiny transition environment, a continual
+task switch with bounded replay, and a contextual bandit. The second trains
+and evaluates the reasoning curriculum. Run directories must be new; seeds,
+source hashes, flags and raw results are preserved. See [the research log](docs/research.md)
+for gradient contracts, numerical corrections, measured results and limits.
+The research CUDA stable-loss and masked-accumulation tests require
+`make gpu-test` on NVIDIA hardware before the research PR leaves draft.
 
-These are small research probes. See [the research log](docs/research.md) for
-gradient definitions, numerical regressions, measured results, and limitations.
+## Code
 
-Claude's CUDA backend uses cuBLAS and our CUDA kernels. See
-[laptop setup](docs/LAPTOP.md) for the NVIDIA toolkit, `make gpu`, and
-`make gpu-test`. The stable-loss CUDA update on the research branch still
-needs its regression tests run on GPU hardware.
+| file | contents |
+|---|---|
+| `src/model.h` | the model: layout, init, forward, backward, KV-cache decoding |
+| `src/ops.h` | every layer op, forward and backward |
+| `src/gemm.h` | packed, threaded fp32 matrix multiply |
+| `src/train.h` | AdamW, Muon (Newton–Schulz), clipping, schedule, token data, checkpoints |
+| `src/config.h` | model shape and parameter layout, shared with the GPU code |
+| `src/gpu.cu`, `src/gpu.h` | the CUDA trainer |
+| `src/tokenizer.h` | byte-level BPE |
+| `src/reasoning.h` | the reasoning curriculum and its evaluation |
+| `src/ternary.h`, `src/infer.h` | bitplane int8 kernels and the ternary inference engine |
+| `src/thread_pool.h` | the thread pool everything runs on |
+| `src/cxxgpt.cpp` | the command-line tool |
+| `ternary_moe.cpp` | kernel tests and benchmarks for one ternary MoE layer |
+| `tests/` | tests for all of the above |
 
-## How it works
+## Results so far
 
-**Weights: two bitplanes.** Each row is stored as two bitmasks, `pos`
-(weight is +1) and `neg` (weight is −1), with 32 weights per `uint32_t` word.
+### Architecture comparison
 
-**Activations: int8.** The input vector is quantized symmetrically to
-[−127, 127] with one scale per vector. −128 is excluded because it can't be
-negated in int8.
+The following larger-model results are reported by Claude's `main` at
+`9130fbe`; this research run has not reproduced them. Our smaller, independently
+recorded multi-seed probes are in [docs/research.md](docs/research.md).
 
-**int8 kernels (B4–B6b).** These apply the masks to the activations, giving
-`x`, `−x` or `0` per byte, then sum. The AVX2 kernel uses
-`maddubs` + `madd`; the VNNI kernels use one `vpdpbusd`. `vpdpbusd`
-sits on the accumulator's dependency chain, so the sum is split across 2
-(256-bit) or 4 (512-bit) accumulators. With a single accumulator the 512-bit
-kernel loses about half its gain.
+Four variants with the same width (dim 256, 4 layers, 4 heads), data,
+steps and learning rate: 2500 steps of 4096 tokens on the reasoning
+curriculum, CPU. The MoE variants have 8 experts (top-2) with the same
+active parameters per token as the dense ones. Accuracy is exact-answer on
+960 held-out problems: 6 tasks × difficulties 1–4, where 4 is one level
+harder than anything in training.
 
-**Threading.** A persistent pool with spin-then-sleep workers. Threads claim
-row chunks from an atomic cursor that packs `(generation << 32 | next row)`.
-A worker that wakes up late for a finished job fails its claim instead of
-touching the next job. An empty `parallel_for` costs about 3 µs on 4 threads;
-the earlier condition-variable handoff cost about 47 µs.
+| variant | params (active) | val loss | accuracy | d = 1–3 | d = 4 |
+|---|---:|---:|---:|---:|---:|
+| dense | 3.3 M | 0.1136 | 59.4% | 78.5% | 2.1% |
+| dense, ternary | 3.3 M | 0.1152 | 57.0% | 74.2% | 5.4% |
+| MoE | 9.8 M (3.3 M) | **0.0986** | **62.0%** | **81.0%** | 5.0% |
+| MoE, ternary | 9.8 M (3.3 M) | 0.1116 | 55.2% | 72.4% | 3.8% |
 
-**MoE layer.** A top-k router with softmax over the selected experts, and
-SwiGLU experts with hidden size 4·d_model. Kernels compute row ranges, so a
-token runs as two pool jobs:
-1. gate, up and SiLU for every routed expert at once;
-2. every routed expert's down projection and the weighted sum.
+One seed each. A binomial standard error of about 1.6 points assumes
+independent problems; it does not measure seed variance or correlations
+between related synthetic problems.
 
-The token's activations are quantized once and shared by all its experts.
+- **MoE helps:** at the same compute per token, its validation loss is
+  13% lower than dense.
+- **Ternary costs dense little** (0.1136 → 0.1152) but costs MoE much
+  more (0.0986 → 0.1116), which erases most of MoE's gain. A likely cause:
+  each expert sees only a quarter of the tokens, so its full-precision
+  latent weights move slowly and rarely cross the thresholds that change
+  their ternary values. Higher learning rates for ternary weights and
+  Muon are the next experiments.
+- **Nobody generalizes to longer problems (d = 4).** Small transformers
+  are known to struggle with this on arithmetic; it is on the list.
 
-## Performance
+### Inference kernels
 
-One run on a 4-vCPU Xeon VM with AVX-512 + VNNI. These shared VMs are noisy;
-expect ±20% between runs.
-
-GEMV, M = K = 4096, 60% zero weights. Times are medians in ms. The fp32
-baseline is a vectorized dense dot product, not a scalar loop.
+`ternary_moe.cpp`, on a 4-vCPU Xeon VM with AVX-512 + VNNI (these shared
+VMs are noisy; expect ±20% between runs). GEMV, M = K = 4096, 60% zero
+weights; medians in ms. The baseline is a vectorized fp32 dot product.
 
 | kernel | 1 thread | vs fp32 | 4 threads | vs fp32 |
 |---|---:|---:|---:|---:|
 | fp32 dense | 2.62 | 1.0× | 0.88 | 1.0× |
-| B3: bitplane AVX2, fp32 act. | 2.85 | 0.9× | 1.06 | 0.8× |
-| B3b: bitplane AVX-512, fp32 act. | 1.23 | 2.1× | 0.36 | 2.4× |
-| B5: int8 AVX2 | 0.85 | 3.1× | 0.28 | 3.1× |
-| B5b: int8 AVX-512 | 0.57 | 4.6× | 0.13 | 6.7× |
-| B6: int8 VNNI 256-bit | 0.75 | 3.5× | 0.23 | 3.8× |
-| B6b: int8 VNNI 512-bit | 0.32 | 8.3× | 0.12 | 7.6× |
+| int8 AVX2 | 0.85 | 3.1× | 0.28 | 3.1× |
+| int8 AVX-512 | 0.57 | 4.6× | 0.13 | 6.7× |
+| int8 VNNI 512-bit | 0.32 | 8.3× | 0.12 | 7.6× |
 
-The int8 kernels have ~0.8% relative error against fp32. That comes from
-quantizing the activations; the fp32-activation kernels are exact to
-rounding.
+A 4096×4096 ternary matrix takes 4 MB instead of 64 MB in fp32. One MoE
+layer (d_model 512, 8 experts, top-2) decodes a token in about 56 µs on 4
+threads.
 
-MoE layer (d_model 512, 8 experts, top-2, int8 VNNI 512-bit), on 4 threads:
-- about **50 µs per token** with one token repeated, so the same two
-  experts stay hot in cache;
-- about **56 µs per token** with a stream of different tokens, which
-  spreads routing over all eight experts, as decoding does.
+## How the kernels work
 
-With one thread, both take roughly 140–220 µs; single-thread runs on this VM vary a lot. Before the pool rewrite and job
-fusion, the repeated-token case took about 360 µs on 4 threads.
+- **Weights: two bitplanes.** Each row is stored as two bitmasks, `pos`
+  (weight +1) and `neg` (weight −1), 32 weights per `uint32_t`, plus one
+  scale per matrix.
+- **Activations: int8,** quantized symmetrically to [−127, 127] with one
+  scale per token.
+- **Dot products.** The masks select `x`, `−x` or `0` per byte, then a sum:
+  `maddubs` + `madd` on AVX2, one `vpdpbusd` with VNNI, spread over 2–4
+  accumulators to break the dependency chain.
+- **Threading.** A persistent pool with spin-then-sleep workers claiming
+  row chunks from one atomic cursor. An empty `parallel_for` costs about
+  3 µs on 4 threads.
 
-## Tests
+## Next
 
-`--tests` checks the following:
-- **Kernels:** every kernel against a double-precision reference.
-  Edge cases: all-zero, all ±1, word boundaries, every SIMD tail length,
-  and row counts large enough to use the pool.
-- **Full MoE layer:** routing, softmax weights and both pool jobs,
-  against a double-precision reference.
-- **Quantizer:** ±amax maps to ±127, nothing maps to −128, and the SIMD and
-  scalar paths agree bit for bit.
-- **Math helpers:** `silu_mul` within 1e-6 of double; `dot_f32`.
-- **Thread pool:** every index handed out exactly once, including after the
-  workers fall asleep.
-- **Concurrency:** two threads calling every kernel at once.
-
-CI runs these with GCC and clang on several `-march` targets, plus ASan/UBSan
-and TSan.
-
-## Current research priorities
-
-- Numerical and surrogate-gradient validation, followed by larger reproducible
-  training runs on reasoning data.
-- Batched int8/bitplane prefill kernels and runtime validation of the CUDA
-  backend checked against CPU.
-- Continual learning beyond the toy replay experiment, and reinforcement
-  learning with multiple steps and delayed rewards.
-- Peak process memory and benchmarks at useful model sizes. Tiny-model weight
-  compression and throughput do not establish large-model performance.
+- Train on the laptop GPU: language first, then worked math solutions,
+  checked on the GSM8K test set ([docs/LAPTOP.md](docs/LAPTOP.md)).
+- Length generalization on the curriculum.
+- Faster GPU training: fused attention, bf16.
+- Run an existing open ternary model (BitNet b1.58 2B4T) on our inference
+  engine and compare speed with bitnet.cpp.

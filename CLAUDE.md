@@ -21,7 +21,8 @@ Reasoning is the first capability we go after.
 
 - `src/`: the training engine (`model.h`, `ops.h`, `gemm.h`, `train.h`),
   tested against double-precision gradients. Dense or MoE FFN, optional
-  ternary BitLinear projections, aux-loss-free MoE balancing.
+  ternary BitLinear projections, aux-loss-free MoE balancing. AdamW, or
+  Muon (`--muon`) for the matrices inside the blocks.
 - `src/ternary.h` and `src/infer.h`: inference on bitplane int8 kernels
   (AVX2, AVX-512, VNNI). A trained ternary checkpoint runs on them.
 - `src/tokenizer.h`: byte-level BPE; digits are never merged.
@@ -38,6 +39,8 @@ Reasoning is the first capability we go after.
   `<|endoftext|>` between documents (for `text2tok --doc-sep`) or as
   GSM8K-style JSON Lines (for `prep-qa`). Tested against a local fake of
   the Hugging Face endpoints, since huggingface.co is blocked here.
+- `scripts/compare.sh`: the architecture comparison on the curriculum;
+  `scripts/probe.sh`: GPU speed and memory per model size, for the laptop.
 - `ternary_moe.cpp`: kernel tests and the kernel benchmark.
 
 ## Plan
