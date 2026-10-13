@@ -1,0 +1,1 @@
+g++ -O3 -march=native -std=c++20 -pthread -Wall -Wextra  -Werror experiments/toy_world.cpp -o research_experiment

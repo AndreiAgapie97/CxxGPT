@@ -71,6 +71,166 @@ sums over all actions and compares this expectation against finite differences
 of `-sum_a pi(a) r(a)` for four baselines. This caught and corrected a sign error
 in the new bandit experiment before its successful results were accepted.
 
+## Integration and validation
+
+Claude's `6707e8b` (CUDA training backend) was fetched during this run and merged
+as `653d20d`. Three conflicts were resolved by preserving both changes:
+
+* `.gitignore`: keep both research and CUDA build outputs excluded.
+* `Makefile`: clean both output sets, preserve CUDA targets and research
+  sanitizer smoke runs.
+* CLI: retain the new `Backend` evaluation dispatch and the corrected inclusive
+  validation-range check.
+
+CPU validation after integration: GCC 14.2 and Clang 19.1 builds with
+`-Wall -Wextra -Werror`; kernel/engine tests; ASan/UBSan; TSan; and the native
+experiment smoke under both sanitizers. A CLI smoke trains and validates on
+exactly nine tokens for an eight-token sequence. Scalar and AVX2 engine tests
+also passed before the configuration extraction (which moves declarations
+without changing calculations).
+
+The CUDA backend was compile-checked in Clang's device and host modes for
+`sm_89` using CUDA 12.4 toolkit headers and libdevice from NVIDIA wheels.
+Clang warns that CUDA 12.4 is only partially supported. The GPU-enabled CLI and
+GPU test translation units also compile with GCC warnings treated as errors.
+This VM has no NVIDIA GPU; `make gpu-test` and CUDA runtime behavior remain
+unvalidated here. The CI nvcc jobs for CUDA 12.8 and 13.0 remain present.
+
+The CUDA kernel was subsequently ported to the stable loss. Thread zero saves
+the target gap in shared memory, then every thread synchronizes before logits
+are overwritten. Both device and host modes compile with warnings treated as
+errors (the known CUDA-version warning is explicitly suppressed). An analytic
+whole-model fixture produces logits near `[32000,-32000,0]`: the counted mean
+loss is 48000 and a losing output-weight gradient is -0.5. This fixture passes
+on CPU; `tests/test_gpu.cpp` now checks the same loss, gradients and an all-ignored
+batch on GPU. **The new GPU assertions have not run here. Run `make gpu-test`
+on NVIDIA hardware before relying on the CUDA change.** GPU norm reduction
+already squares and accumulates in double.
+
+Claude's `ef38470` (streaming tokenization and public-data downloader) was also
+merged as `90b4f1a`. The merge was automatic and retained our loss and sampling
+fixes. The integrated CPU suite, including Claude's added data/tokenizer tests,
+passes under both compilers and sanitizers. The downloader's help command runs;
+no external corpus was downloaded during these experiments.
+
+Configuration checks now reject nonpositive model/head dimensions, negative
+hidden sizes or expert counts, and zero top-k before division or allocation.
+The CLI integration test checks seven invalid configurations return a checked
+error, and that single-window training actually includes a validation result.
+
+## Reproducible experiments
+
+Raw CSVs, evaluation transcripts, compiler flags, budgets, CPU information and
+source hashes are in [results/2026-10-13](results/2026-10-13). The main toy and
+2,000-step reasoning runs use source commit `653d20d`; the 200-step reasoning
+run uses `66d66c6`. Later commits add validation and integration changes. Use
+the recorded commit and hashes when reproducing a run exactly.
+
+### Transition environment and bounded replay
+
+The environment has eight states, with task A incrementing by one and task B
+by three modulo eight. Each context begins with a task marker. All eight
+starting states are evaluated exhaustively; this is a fit test, not held-out
+generalization. Dense FFN width is 64; MoE has four width-32 experts, top-2,
+and no shared expert, matching active FFN width. The router adds 128 active
+parameters. Dimension is 32, one layer, four heads, batch two, sequence 16,
+learning rate 0.003, AdamW defaults, clip 1.0 and balancing rate 0.001.
+
+Each variant trains on A for 200 updates. Two copies then train for another
+200 updates: B alone, or B with a 50% chance of replacing a trajectory with
+one from the first 64 observed A trajectories. The buffer holds 8,192 bytes
+of sample arrays; B never regenerates old trajectories from the A environment.
+Runs use seeds 1, 2 and 3, with variant order rotated across seeds.
+
+| Variant | A after learning | A after B, no replay | A after B, replay | B after replay |
+| --- | ---: | ---: | ---: | ---: |
+| Dense | 100% | 0% | 98.3–100% | 98.3–100% |
+| Dense ternary | 100% | 0% | 99.2–100% | 99.2–100% |
+| MoE | 100% | 0% | 99.2–100% | 98.3–100% |
+| MoE ternary | 100% | 0% | 99.2–100% | 100% |
+
+Without replay, B reaches 100% in every run, while A is forgotten. With
+replay, B sees fewer new-task trajectories at the same update budget. This
+comparison measures that retention/plasticity tradeoff; it is not equal
+new-task exposure. Replaying the first 64 observations may be unrepresentative
+in a larger environment. Two runs of the same binary and seeds reproduced
+every recorded non-timing field exactly before integration.
+
+### Reward-based contextual bandit
+
+The policy observes a random state, samples an action, and receives reward one
+for the correct successor and zero otherwise. Backward receives the sampled
+action and reward advantage, without a correct-action training label. A running
+baseline is updated after the reward and eight interactions accumulate per
+optimizer step. Each variant starts afresh and runs 500 updates (4,000 actions).
+
+Final greedy accuracy is 100% for all seeds of dense, dense ternary and MoE;
+ternary MoE reaches 87.5%, 100%, 100%. Learning with scalar rewards is therefore
+possible in this tiny setting, with a seed-dependent shortfall. This is a
+single-decision bandit, not multi-step reinforcement learning, exploration in
+an open environment, or a continual reward task. The policy-gradient estimator
+is checked independently in expectation; that does not prove convergence.
+
+### Reasoning through the existing CLI
+
+`scripts/reasoning-baseline.sh` generates 2,000 training and 500 validation
+problems (80,102 / 20,009 byte tokens) with seed 20261013. Tasks are addition
+and comparison, train difficulties 1–2, with 60 held-out test questions across
+difficulties 1–3. Test questions are excluded from both token sets; the
+generator does not deduplicate training against validation. Model dimension
+is 64, one layer, four heads, sequence 128, batch two. Dense FFN width 128
+matches top-2 width-64 MoE compute, with four experts and no shared expert.
+There are three initialization/data seeds at each budget. Every variant at a
+given budget uses the same schedule, data samples and five validation batches.
+
+| Variant | Median validation loss, 200 steps | Median validation loss, 2,000 steps | Exact answers at 2,000 steps (seeds 1/2/3, out of 60) |
+| --- | ---: | ---: | --- |
+| Dense | 0.991 | 0.551 | 1 / 1 / 1 |
+| Dense ternary | 1.161 | 0.658 | 0 / 2 / 2 |
+| MoE | 1.001 | 0.565 | 1 / 1 / 2 |
+| MoE ternary | 1.158 | 0.608 | 0 / 1 / 1 |
+
+Validation losses are means of sampled batch means, not a full-corpus score.
+The longer budget improves teacher-forced token loss, but exact answers remain
+0–3.3%. Transcripts show incorrect carries, copied digits and inconsistent
+final answers even when some intermediate steps are correct. Low token loss
+on repetitive answer formatting does not establish arithmetic ability. These
+tiny models and runs do not establish a ranking of architectures.
+
+### Memory and computation
+
+Training-array bytes count master weights, gradients, full-sized quantized
+copies and Adam moments. They exclude activations, caches, routing buffers,
+allocator capacity and replay. Inference bytes count the actual packed weight
+arrays and scales plus the unquantized weights; they exclude KV caches and
+work buffers. They are not peak process memory.
+
+| Toy variant | Total / active parameters | Training arrays (bytes) | Inference weights (bytes) |
+| --- | ---: | ---: | ---: |
+| Dense | 10,656 / 10,656 | 213,120 | 42,624 |
+| Dense ternary | 10,656 / 10,656 | 213,120 | 4,240 |
+| MoE | 16,928 / 10,784 | 338,560 | 67,712 |
+| MoE ternary | 16,928 / 10,784 | 338,560 | 6,312 |
+
+Training memory is not reduced by ternary storage in this implementation.
+The small ten-token vocabulary makes the toy weight compression look strong:
+roughly 10–11x. Auditing the 256-token reasoning checkpoints with the native
+[storage audit](results/2026-10-13/storage-audit.cpp) gives 230,144 to 76,560
+bytes for dense (3.0x), and 329,472 to 83,752 bytes for MoE (3.9x). A much
+larger vocabulary can make unquantized embeddings dominate further.
+
+Step and decode timing medians are retained in the raw toy CSV. The existing
+CLI decode benchmark was also run for 128 forced input tokens and eleven
+interleaved fp32/packed trials, on three threads, using the trained ternary
+checkpoints. Its fp32 baseline holds the *same ternary weights* in float and
+does not quantize activations. Argmax agrees on 98% of positions, which measures
+activation quantization on that stream, not reasoning accuracy. Observed
+speedups were 1.15x for MoE and 2.34x for dense, but concurrent compilation and
+VM scheduling contaminate these timings. **Treat them as instrumentation
+checks, not controlled performance evidence.** A dedicated quiet benchmark
+with varied vocabulary, batch sizes, cache states and repeated A/B ordering
+remains necessary.
+
 ## Limits and next work
 
 * Ternary training retains fp32 master weights and AdamW moments. The inference
@@ -86,5 +246,9 @@ in the new bandit experiment before its successful results were accepted.
 * Checkpoints save weights, moments, data RNG and router biases; optimizer
   hyperparameters, learning-rate schedule, data identity and CLI settings must
   also be reproduced externally for an identical continuation.
+* The CLI averages microbatch mean losses during gradient accumulation. With
+  unequal numbers of valid masked targets, that differs from a single global
+  token mean. The experiments here use accumulation one; token-weighted
+  accumulation remains a numerical follow-up.
 * Small synthetic tasks are useful for detecting bugs and measuring forgetting;
   they cannot establish real reasoning ability or reinforcement learning.

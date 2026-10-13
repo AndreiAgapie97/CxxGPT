@@ -1,0 +1,3 @@
+checkpoint,params,active_params,training_array_bytes,fp32_weight_bytes,inference_weight_bytes
+runs/reasoning-2000-20261013/dense-ternary-seed1.ckpt,57536,57536,1150720,230144,76560
+runs/reasoning-2000-20261013/moe-ternary-seed1.ckpt,82368,57792,1647360,329472,83752

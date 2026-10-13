@@ -3,7 +3,7 @@
 CxxGPT is a native C++20 transformer research engine with dense or
 Mixture-of-Experts feed-forward layers, trainable ternary projections,
 AdamW, a byte/BPE tokenizer, checkpoints, and CPU bitplane inference.
-Training and experiments use the standard library and our own kernels;
+CPU training and experiments use the standard library and our own kernels;
 no Python ML framework is required.
 
 Every weight is −1, 0 or +1, with one fp32 scale per matrix. A 4096×4096
@@ -57,6 +57,11 @@ be new; the scripts preserve previous results.
 
 These are small research probes. See [the research log](docs/research.md) for
 gradient definitions, numerical regressions, measured results, and limitations.
+
+Claude's CUDA backend uses cuBLAS and our CUDA kernels. See
+[laptop setup](docs/LAPTOP.md) for the NVIDIA toolkit, `make gpu`, and
+`make gpu-test`. The stable-loss CUDA update on the research branch still
+needs its regression tests run on GPU hardware.
 
 ## How it works
 
@@ -141,7 +146,8 @@ and TSan.
 
 - Numerical and surrogate-gradient validation, followed by larger reproducible
   training runs on reasoning data.
-- Batched int8/bitplane prefill kernels and a CUDA backend checked against CPU.
+- Batched int8/bitplane prefill kernels and runtime validation of the CUDA
+  backend checked against CPU.
 - Continual learning beyond the toy replay experiment, and reinforcement
   learning with multiple steps and delayed rewards.
 - Peak process memory and benchmarks at useful model sizes. Tiny-model weight
