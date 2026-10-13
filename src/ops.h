@@ -198,13 +198,16 @@ struct RopeTable {
     }
 };
 
+// Row n of qkv sits at position n % Tn, or at `fixed_pos` for every row if
+// that is >= 0 (decoding one token per sequence).
 template <class T>
-void rope_apply(T* qkv, const RopeTable<T>& rope, int B, int Tn, int C, int NH, bool inverse) {
+void rope_apply(T* qkv, const RopeTable<T>& rope, int B, int Tn, int C, int NH, bool inverse,
+                int fixed_pos = -1) {
     PROFILE("rope");
     const int HS = C / NH, half = HS / 2;
     for_rows(B * Tn, [&](int n0, int n1) {
         for (int n = n0; n < n1; ++n) {
-            const int t = n % Tn;
+            const int t = fixed_pos >= 0 ? fixed_pos : n % Tn;
             const T* cs = &rope.cos[size_t(t) * half];
             const T* sn = &rope.sin[size_t(t) * half];
             for (int part = 0; part < 2; ++part)  // q, then k

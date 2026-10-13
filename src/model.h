@@ -268,6 +268,86 @@ public:
     // Probabilities (after a forward with targets) or logits (without).
     const T* output_row(int n) const { return &logits[size_t(n) * cfg.vocab]; }
 
+    // ---- Incremental decoding with a KV cache ----
+    //
+    // Generates for B sequences at once, one token per sequence per step,
+    // all at the same position. Sequences of different lengths are padded
+    // on the left; start[b] is the first real position of sequence b, and
+    // attention never looks before it. RoPE scores depend only on relative
+    // positions, so a left-padded sequence computes exactly what it would
+    // unpadded.
+    void decode_begin(int B, const std::vector<int>& start) {
+        CHECK(int(start.size()) == B, "decode_begin: %zu starts for %d sequences", start.size(), B);
+        allocate(B, 1);
+        has_targets_ = false;
+        kv_B_ = B;
+        kv_start_ = start;
+        const size_t per_layer = size_t(B) * cfg.seq_len * cfg.d_model;
+        kcache_.resize(cfg.n_layers);
+        vcache_.resize(cfg.n_layers);
+        for (int l = 0; l < cfg.n_layers; ++l) {
+            kcache_[l].resize(per_layer);
+            vcache_[l].resize(per_layer);
+        }
+    }
+
+    // Feeds tokens[b] at position pos (0, 1, 2, ... in order) and returns the
+    // logits for the next token, [B, vocab].
+    const T* decode_step(const int* tokens, int pos) {
+        CHECK(pos < cfg.seq_len, "decode position %d >= seq_len %d", pos, cfg.seq_len);
+        const int B = kv_B_, N = B, C = cfg.d_model, V = cfg.vocab, NH = cfg.n_heads;
+        const int HS = C / NH, S = cfg.seq_len;
+        if (weights_dirty) quantize_weights();
+        for (int n = 0; n < N; ++n) CHECK(tokens[n] >= 0 && tokens[n] < V, "token %d out of range", tokens[n]);
+        embedding_forward(x0.data(), tokens, P(wte_), N, C);
+        T* x = x0.data();  // the residual stream, updated in place
+        const T scale = T(1) / std::sqrt(T(HS));
+        for (int l = 0; l < cfg.n_layers; ++l) {
+            auto& a = acts[l];
+            const auto& o = layer_[l];
+            rmsnorm_forward(a.ln1.data(), a.rstd1.data(), x, P(o.ln1), N, C);
+            proj_forward(a.qkv.data(), a.ln1.data(), o.wqkv, N, C, 3 * C);
+            rope_apply(a.qkv.data(), rope, B, 1, C, NH, false, pos);
+            T* kc = kcache_[l].data();
+            T* vc = vcache_[l].data();
+            for (int b = 0; b < B; ++b) {
+                const T* row = &a.qkv[size_t(b) * 3 * C];
+                std::copy(row + C, row + 2 * C, kc + (size_t(b) * S + pos) * C);
+                std::copy(row + 2 * C, row + 3 * C, vc + (size_t(b) * S + pos) * C);
+            }
+            pool().parallel_for(B * NH, [&](int j0, int j1) {
+                static thread_local std::vector<T> p;
+                p.resize(size_t(S));
+                for (int j = j0; j < j1; ++j) {
+                    const int b = j / NH, h = j % NH, s0 = kv_start_[b];
+                    const T* q = &a.qkv[size_t(b) * 3 * C + h * HS];
+                    T mx = -std::numeric_limits<T>::infinity();
+                    for (int s = s0; s <= pos; ++s) {
+                        p[s] = dot(q, kc + (size_t(b) * S + s) * C + h * HS, HS) * scale;
+                        mx = std::max(mx, p[s]);
+                    }
+                    T sum = 0;
+                    for (int s = s0; s <= pos; ++s) sum += p[s] = fast_exp(p[s] - mx);
+                    T* y = &a.atty[size_t(b) * C + h * HS];
+                    std::fill(y, y + HS, T(0));
+                    for (int s = s0; s <= pos; ++s) {
+                        const T w = p[s] / sum;
+                        const T* v = vc + (size_t(b) * S + s) * C + h * HS;
+                        for (int i = 0; i < HS; ++i) y[i] += w * v[i];
+                    }
+                }
+            }, 1);
+            proj_forward(out_tmp.data(), a.atty.data(), o.wo, N, C, C);
+            add_into(x, out_tmp.data(), long(N) * C);
+            rmsnorm_forward(a.ln2.data(), a.rstd2.data(), x, P(o.ln2), N, C);
+            ffn_forward(l, out_tmp.data(), N, false);
+            add_into(x, out_tmp.data(), long(N) * C);
+        }
+        rmsnorm_forward(lnf.data(), rstdf.data(), x, P(lnf_), N, C);
+        linear_forward(logits.data(), lnf.data(), P(wte_), N, C, V);
+        return logits.data();
+    }
+
     // Re-quantize after the weights changed (the optimizer sets the flag).
     void quantize_weights() {
         for (const auto& p : infos) {
@@ -523,4 +603,7 @@ private:
     std::vector<T> dresid, dC, dqkv, datty, dfc, dsw, dey, dxg, drl, dffn;
     std::vector<int> count_scratch_, fill_scratch_;
     std::vector<T> dgate_scratch_;
+    int kv_B_ = 0;
+    std::vector<int> kv_start_;
+    std::vector<std::vector<T>> kcache_, vcache_;  // [layer][B, seq_len, C]
 };

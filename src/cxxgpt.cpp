@@ -3,6 +3,8 @@
 //   cxxgpt text2tok --in text.txt --out data.tok          bytes -> token file
 //   cxxgpt train --data data.tok [options]                train (or resume)
 //   cxxgpt sample --ckpt model.ckpt [--prompt TEXT]       generate text
+//   cxxgpt gen-reasoning --out data/reason                 synthetic reasoning data
+//   cxxgpt eval-reasoning --ckpt model.ckpt --test FILE    exact-answer accuracy
 //
 // Run a subcommand with --help for its options.
 #include <csignal>
@@ -10,11 +12,14 @@
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <set>
 #include <thread>
 
 #include "args.h"
 #include "common.h"
+#include "generate.h"
 #include "model.h"
+#include "reasoning.h"
 #include "profile.h"
 #include "train.h"
 
@@ -77,6 +82,125 @@ int cmd_text2tok(Args& a) {
     return 0;
 }
 
+std::vector<std::string> split(const std::string& s, char sep) {
+    std::vector<std::string> out;
+    size_t pos = 0;
+    for (size_t i; (i = s.find(sep, pos)) != std::string::npos; pos = i + 1) out.push_back(s.substr(pos, i - pos));
+    out.push_back(s.substr(pos));
+    return out;
+}
+
+// Training data (masked so only answers are learned), a validation slice,
+// and a held-out test set that the training data never contains.
+int cmd_gen_reasoning(Args& a) {
+    const std::string out = a.str("out", "data/reason");
+    const long n_train = a.integer("train", 200000), n_val = a.integer("val", 2000);
+    const int per_cell = int(a.integer("test-per-cell", 40));
+    const int min_d = int(a.integer("min-diff", 1)), max_d = int(a.integer("max-diff", 3));
+    const int test_max_d = int(a.integer("test-max-diff", max_d + 1));
+    const std::vector<std::string> tasks = split(a.str("tasks", "chain,add,mul,expr,eq,cmp"), ',');
+    Rng rng(uint64_t(a.integer("seed", 1)));
+    a.done();
+    for (const auto& t : tasks) make_problem(t, 1, rng);  // rejects unknown names
+
+    // Test set first: every (task, difficulty) cell, including one level
+    // harder than training, to measure generalization beyond it.
+    std::vector<Problem> test;
+    std::set<std::string> held_out;
+    for (const auto& t : tasks)
+        for (int d = min_d; d <= test_max_d; ++d)
+            for (int i = 0; i < per_cell;) {
+                Problem p = make_problem(t, d, rng);
+                if (!held_out.insert(p.question).second) continue;  // no duplicates
+                test.push_back(std::move(p));
+                ++i;
+            }
+    save_problems(out + ".test.txt", test);
+
+    auto make_tokens = [&](long n, const std::string& path) {
+        TokenData d;
+        d.vocab = 256;
+        long skipped = 0;
+        for (long i = 0; i < n;) {
+            const std::string& t = tasks[rng.below(tasks.size())];
+            const Problem p = make_problem(t, min_d + int(rng.below(uint64_t(max_d - min_d + 1))), rng);
+            if (held_out.count(p.question)) {
+                ++skipped;
+                continue;
+            }
+            d.tokens.push_back(kBos);
+            d.mask.push_back(0);
+            for (unsigned char ch : p.prompt()) d.tokens.push_back(ch), d.mask.push_back(0);
+            for (unsigned char ch : p.completion()) d.tokens.push_back(ch), d.mask.push_back(1);
+            ++i;
+        }
+        d.save(path);
+        std::printf("%s: %ld problems, %zu tokens (%ld test duplicates skipped)\n", path.c_str(), n,
+                    d.tokens.size(), skipped);
+    };
+    make_tokens(n_train, out + ".train.tok");
+    make_tokens(n_val, out + ".val.tok");
+    std::printf("%s.test.txt: %zu problems (%zu tasks x difficulty %d..%d x %d)\n", out.c_str(),
+                test.size(), tasks.size(), min_d, test_max_d, per_cell);
+    return 0;
+}
+
+void print_eval(const EvalResult& r, bool show_failures) {
+    std::map<std::string, std::map<int, std::pair<int, int>>> table;
+    int max_d = 0;
+    for (const auto& [key, cell] : r.by_task) {
+        table[key.first][key.second] = cell;
+        max_d = std::max(max_d, key.second);
+    }
+    std::printf("%-6s", "task");
+    for (int d = 1; d <= max_d; ++d) std::printf("   d=%d", d);
+    std::printf("   all\n");
+    for (const auto& [task, row] : table) {
+        std::printf("%-6s", task.c_str());
+        int c = 0, n = 0;
+        for (int d = 1; d <= max_d; ++d) {
+            auto it = row.find(d);
+            if (it == row.end()) {
+                std::printf("      -");
+                continue;
+            }
+            std::printf(" %5.1f%%", 100.0 * it->second.first / it->second.second);
+            c += it->second.first;
+            n += it->second.second;
+        }
+        std::printf(" %5.1f%%\n", 100.0 * c / std::max(1, n));
+    }
+    std::printf("overall %.1f%% (%d / %d)\n", 100.0 * r.correct / std::max(1, r.total), r.correct, r.total);
+    if (show_failures)
+        for (const auto& [p, text] : r.failures)
+            std::printf("--- wrong (%s d=%d): %s\n    expected: %s\n    got:      %s\n", p.task.c_str(),
+                        p.difficulty, p.question.c_str(), (p.steps + " #### " + p.answer).c_str(),
+                        text.c_str());
+}
+
+int cmd_eval_reasoning(Args& a) {
+    ThreadPool tp(threads_arg(a));
+    g_pool = &tp;
+    const std::string ckpt = a.str("ckpt", "model.ckpt"), test_path = a.str("test", "data/reason.test.txt");
+    const int batch = int(a.integer("batch", 64)), limit = int(a.integer("limit", 0));
+    const bool show = a.flag("show-failures");
+    a.done();
+    Model<float> model(peek_checkpoint_config(ckpt));
+    load_checkpoint(ckpt, model, nullptr, nullptr);
+    std::vector<Problem> test = load_problems(test_path);
+    if (limit > 0 && size_t(limit) < test.size()) {
+        // An even sample across the file, which is ordered by task.
+        std::vector<Problem> sub;
+        for (int i = 0; i < limit; ++i) sub.push_back(test[size_t(i) * test.size() / limit]);
+        test = std::move(sub);
+    }
+    const double t0 = now_seconds();
+    const EvalResult r = eval_reasoning(model, test, batch);
+    print_eval(r, show);
+    std::printf("(%.1f s)\n", now_seconds() - t0);
+    return 0;
+}
+
 double eval_loss(Model<float>& model, const TokenData& data, size_t lo, size_t hi, int B, int Tn,
                  int batches) {
     Rng rng(12345);  // the same batches every time, so evals are comparable
@@ -101,6 +225,7 @@ int cmd_train(Args& a) {
             "output: --out model.ckpt --resume --log FILE.csv --log-every 10\n"
             "        --eval-every 200 --eval-batches 20 --save-every 500\n"
             "        --time-limit MINUTES --threads N --profile\n"
+            "reason: --reason-test FILE --reason-every STEPS --reason-limit 300\n"
             "Ctrl-C saves a checkpoint and stops; --resume continues from --out.\n");
         return 0;
     }
@@ -126,6 +251,8 @@ int cmd_train(Args& a) {
     const int log_every = int(a.integer("log-every", 10)), eval_every = int(a.integer("eval-every", 200));
     const int eval_batches = int(a.integer("eval-batches", 20)), save_every = int(a.integer("save-every", 500));
     const double time_limit = a.real("time-limit", 0) * 60.0;
+    const std::string reason_path = a.str("reason-test");
+    const int reason_every = int(a.integer("reason-every", 0)), reason_limit = int(a.integer("reason-limit", 300));
     g_profiler.enabled = a.flag("profile");
     AdamW opt;
     opt.weight_decay = a.real("wd", 0.1);
@@ -163,6 +290,26 @@ int cmd_train(Args& a) {
     }
     std::signal(SIGINT, on_signal);
     std::signal(SIGTERM, on_signal);
+
+    // Optional exact-answer reasoning eval during training, on an even
+    // sample of the test set.
+    std::vector<Problem> reason_test;
+    if (!reason_path.empty()) {
+        const std::vector<Problem> all = load_problems(reason_path);
+        const size_t n = std::min(all.size(), size_t(std::max(1, reason_limit)));
+        for (size_t i = 0; i < n; ++i) reason_test.push_back(all[i * all.size() / n]);
+    }
+    auto reason_eval = [&](long at_step) {
+        if (reason_test.empty()) return;
+        const double t0 = now_seconds();
+        const EvalResult r = eval_reasoning(model, reason_test);
+        std::printf("reasoning eval at step %ld (%.1f s):\n", at_step, now_seconds() - t0);
+        print_eval(r, false);
+        if (log) {
+            std::fprintf(log, "# reasoning step %ld: %d/%d\n", at_step, r.correct, r.total);
+            std::fflush(log);
+        }
+    };
 
     std::vector<int> inp(size_t(B) * Tn), tgt(size_t(B) * Tn);
     const double t_start = now_seconds();
@@ -210,6 +357,7 @@ int cmd_train(Args& a) {
             n_acc = 0;
         }
         if (save_every > 0 && (step + 1) % save_every == 0) save_checkpoint(out, model, opt, data_rng);
+        if (reason_every > 0 && (step + 1) % reason_every == 0 && !last) reason_eval(step + 1);
         if (time_limit > 0 && now_seconds() - t_start > time_limit) {
             std::printf("time limit reached\n");
             ++step;
@@ -217,27 +365,11 @@ int cmd_train(Args& a) {
         }
     }
     if (g_profiler.enabled) g_profiler.report(int(step - first_step));
+    reason_eval(step);
     save_checkpoint(out, model, opt, data_rng);
     std::printf("saved %s at step %ld%s\n", out.c_str(), opt.step, g_stop ? " (interrupted)" : "");
     if (log) std::fclose(log);
     return 0;
-}
-
-// Samples the next token from row `row` of the model's raw logits.
-int sample_token(const Model<float>& model, int row, double temperature, Rng& rng) {
-    const float* lg = model.output_row(row);
-    const int V = model.cfg.vocab;
-    int best = 0;
-    for (int i = 1; i < V; ++i)
-        if (lg[i] > lg[best]) best = i;
-    if (temperature <= 0) return best;
-    std::vector<double> p(V);
-    double sum = 0;
-    for (int i = 0; i < V; ++i) sum += p[i] = std::exp((lg[i] - lg[best]) / temperature);
-    double u = rng.uniform() * sum;
-    for (int i = 0; i < V; ++i)
-        if ((u -= p[i]) <= 0) return i;
-    return best;
 }
 
 int cmd_sample(Args& a) {
@@ -251,18 +383,13 @@ int cmd_sample(Args& a) {
     Model<float> model(peek_checkpoint_config(ckpt));
     load_checkpoint(ckpt, model, nullptr, nullptr);
     CHECK(model.cfg.vocab == 256, "sample: only byte-level models for now");
-    std::vector<int> toks;
-    for (unsigned char ch : prompt) toks.push_back(ch);
     std::fwrite(prompt.data(), 1, prompt.size(), stdout);
-    const int S = model.cfg.seq_len;
-    for (int i = 0; i < n; ++i) {
-        const int len = std::min(int(toks.size()), S);
-        model.forward(&toks[toks.size() - len], nullptr, 1, len);
-        const int t = sample_token(model, len - 1, temp, rng);
-        toks.push_back(t);
-        std::fputc(t, stdout);
-        std::fflush(stdout);
-    }
+    const int room = model.cfg.seq_len - int(prompt.size());
+    CHECK(room > 0, "prompt longer than the model's seq_len");
+    const auto out = generate(model, {bytes_to_tokens(prompt)}, std::min(n, room),
+                              [](const std::vector<int>&) { return false; }, temp, &rng);
+    const std::string text = tokens_to_bytes(out[0]);
+    std::fwrite(text.data(), 1, text.size(), stdout);
     std::printf("\n");
     return 0;
 }
@@ -275,6 +402,8 @@ int main(int argc, char** argv) {
     if (cmd == "text2tok") return cmd_text2tok(a);
     if (cmd == "train") return cmd_train(a);
     if (cmd == "sample") return cmd_sample(a);
-    std::printf("usage: cxxgpt <text2tok|train|sample> [--options]   (--help per command)\n");
+    if (cmd == "gen-reasoning") return cmd_gen_reasoning(a);
+    if (cmd == "eval-reasoning") return cmd_eval_reasoning(a);
+    std::printf("usage: cxxgpt <text2tok|train|sample|gen-reasoning|eval-reasoning> [--options]\n");
     return cmd.empty() || cmd == "help" ? 0 : 1;
 }

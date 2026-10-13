@@ -183,7 +183,66 @@ inline void test_bitlinear() {
     EXPECT(gnorm > 0 && std::isfinite(gnorm), "ternary model has no gradient");
 }
 
+// KV-cache decoding of left-padded sequences must give the logits the full
+// forward pass gives each sequence on its own.
+inline void test_decode_matches_forward() {
+    for (int variant = 0; variant < 2; ++variant) {
+        Config cfg;
+        cfg.vocab = 29;
+        cfg.seq_len = 16;
+        cfg.d_model = 32;
+        cfg.n_layers = 2;
+        cfg.n_heads = 4;
+        if (variant == 1) {  // our architecture: ternary MoE with a shared expert
+            cfg.n_experts = 4;
+            cfg.top_k = 2;
+            cfg.n_shared = 1;
+            cfg.expert_hidden = 24;
+            cfg.ternary = true;
+        }
+        Model<float> m(cfg);
+        m.init(3);
+        Rng rng(4);
+        const std::vector<int> lens = {5, 9, 1};
+        const int B = 3, L = 9, extra = 4;
+        std::vector<std::vector<int>> seqs(B);
+        std::vector<int> start(B);
+        for (int b = 0; b < B; ++b) {
+            for (int i = 0; i < lens[b] + extra; ++i) seqs[b].push_back(int(rng.below(cfg.vocab)));
+            start[b] = L - lens[b];
+        }
+        // decoded[b][t]: logits after feeding token t of sequence b
+        std::vector<std::vector<std::vector<float>>> decoded(B);
+        m.decode_begin(B, start);
+        for (int pos = 0; pos < L + extra; ++pos) {
+            std::vector<int> cur(B);
+            for (int b = 0; b < B; ++b) cur[b] = pos < start[b] ? 0 : seqs[b][pos - start[b]];
+            const float* lg = m.decode_step(cur.data(), pos);
+            for (int b = 0; b < B; ++b)
+                if (pos >= start[b])
+                    decoded[b].emplace_back(lg + size_t(b) * cfg.vocab, lg + size_t(b + 1) * cfg.vocab);
+        }
+        double worst = 0;
+        for (int b = 0; b < B; ++b) {
+            const int len = int(seqs[b].size());
+            m.forward(seqs[b].data(), nullptr, 1, len);
+            for (int t = 0; t < len; ++t) {
+                const float* ref = m.output_row(t);
+                double mx = 0, diff = 0;
+                for (int v = 0; v < cfg.vocab; ++v) {
+                    mx = std::max(mx, std::abs(double(ref[v])));
+                    diff = std::max(diff, std::abs(double(ref[v]) - decoded[b][t][v]));
+                }
+                worst = std::max(worst, diff / mx);
+            }
+        }
+        EXPECT(worst < 1e-4, "decode vs forward (%s): relative difference %g",
+               variant ? "ternary MoE" : "dense", worst);
+    }
+}
+
 inline void test_model() {
+    test_decode_matches_forward();
     test_model_gradients();
     test_model_float_vs_double();
     test_bitlinear();
