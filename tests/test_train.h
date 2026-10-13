@@ -91,8 +91,70 @@ inline void test_sampling_endpoints() {
            "single-window range not sampled correctly");
 }
 
+inline double toy_training_step(Model<float>& model, AdamW& opt, Rng& rng) {
+    constexpr int B = 2, Tn = 8;
+    int inp[B * Tn], tgt[B * Tn];
+    for (int b = 0; b < B; ++b) {
+        const int start = int(rng.below(model.cfg.vocab));
+        for (int t = 0; t < Tn; ++t) {
+            inp[b * Tn + t] = (start + t) % model.cfg.vocab;
+            tgt[b * Tn + t] = (start + t + 1) % model.cfg.vocab;
+        }
+    }
+    model.zero_grad();
+    const double loss = model.forward(inp, tgt, B, Tn, true);
+    model.backward();
+    const double norm = clip_grad_norm(model, 1.0);
+    EXPECT(std::isfinite(loss) && std::isfinite(norm), "training produced non-finite loss/norm");
+    opt.update(model, 0.01);
+    model.update_router_bias(0.001);
+    return loss;
+}
+
+inline void test_ternary_learning_and_resume() {
+    Config cfg = training_test_config(true);
+    cfg.n_experts = 4; cfg.top_k = 2; cfg.expert_hidden = 6; cfg.n_shared = 1;
+    Model<float> model(cfg);
+    model.init(18);
+    AdamW opt;
+    Rng rng(19);
+    const double initial = toy_training_step(model, opt, rng);
+    for (int i = 1; i < 30; ++i) toy_training_step(model, opt, rng);
+    const double final = toy_training_step(model, opt, rng);
+    EXPECT(final < 0.8 * initial, "ternary MoE did not learn: initial %g final %g", initial, final);
+    model.quantize_weights();
+    const auto quantized_before = model.qparams;
+    const auto master_before = model.params;
+
+    // Same model/optimizer settings: save moments, RNG and balancing biases,
+    // continue, reload into a fresh model, and take exactly the same step.
+    const std::string path = "/tmp/cxxgpt_test_train_" +
+                             std::to_string(uint64_t(now_seconds() * 1e9)) + ".ckpt";
+    save_checkpoint(path, model, opt, rng);
+    const Config loaded_cfg = peek_checkpoint_config(path);
+    Model<float> restored(loaded_cfg);
+    AdamW restored_opt;
+    Rng restored_rng(0);
+    load_checkpoint(path, restored, &restored_opt, &restored_rng);
+    std::remove(path.c_str());
+    EXPECT(restored.params == model.params && restored.router_bias == model.router_bias &&
+           restored_opt.m == opt.m && restored_opt.v == opt.v && restored_opt.step == opt.step,
+           "checkpoint did not restore training state");
+    for (int i = 0; i < 4; ++i) EXPECT(restored_rng.state()[i] == rng.state()[i], "RNG state changed");
+    const double la = toy_training_step(model, opt, rng);
+    const double lb = toy_training_step(restored, restored_opt, restored_rng);
+    EXPECT(la == lb && restored.params == model.params && restored_opt.m == opt.m &&
+           restored_opt.v == opt.v && restored.router_bias == model.router_bias,
+           "resumed training differs from uninterrupted training");
+    model.quantize_weights();
+    EXPECT(model.params != master_before && model.qparams != quantized_before,
+           "optimizer did not update master weights and their quantized copies");
+    std::printf("  ternary MoE learned: %.3f -> %.3f; checkpoint continuation identical\n", initial, final);
+}
+
 inline void test_train() {
     test_clipping_reference();
     test_adamw_reference();
     test_sampling_endpoints();
+    test_ternary_learning_and_resume();
 }

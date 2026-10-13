@@ -421,10 +421,10 @@ private:
     // y = x · Wᵀ, or for BitLinear y = q8(x) · ternary(W)ᵀ.
     void proj_forward(T* y, const T* x, size_t woff, int N, int IC, int OC) {
         if (cfg.ternary) {
-            act_quantize(xq.data(), x, N, IC);
-            x = xq.data();
+            bitlinear_forward(y, x, W(woff), xq.data(), N, IC, OC);
+        } else {
+            linear_forward(y, x, W(woff), N, IC, OC);
         }
-        linear_forward(y, x, W(woff), N, IC, OC);
     }
 
     // dx += dy · W, dW += dyᵀ · x. For BitLinear, the straight-through
@@ -433,10 +433,10 @@ private:
     // the full-precision master weights and on x unchanged.
     void proj_backward(T* dx, const T* dy, const T* x, size_t woff, int N, int IC, int OC) {
         if (cfg.ternary) {
-            act_quantize(xq.data(), x, N, IC);
-            x = xq.data();
+            bitlinear_backward(dx, G(woff), dy, x, W(woff), xq.data(), N, IC, OC);
+        } else {
+            linear_backward(dx, G(woff), dy, x, W(woff), N, IC, OC);
         }
-        linear_backward(dx, G(woff), dy, x, W(woff), N, IC, OC);
     }
 
     // out[N, C] = FFN(ln2) for layer l.

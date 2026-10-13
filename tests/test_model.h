@@ -4,6 +4,7 @@
 #include "../src/infer.h"
 #include "../src/model.h"
 #include "test_util.h"
+#include "test_ste.h"
 
 // Random parameters with enough spread that the loss is far from flat and
 // MoE routing decisions are far from ties (a tie flipping under a 1e-5
@@ -300,6 +301,7 @@ inline void test_ternary_engine() {
 }
 
 inline void test_model() {
+    test_bitlinear_ste();
     test_ternary_engine();
     test_decode_matches_forward();
     test_model_gradients();

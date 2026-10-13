@@ -38,6 +38,39 @@ Tests also compare four AdamW updates, including bias correction, moments,
 matrix-only weight decay, and quantization invalidation, against independent
 double-precision arithmetic. Existing dense and MoE gradient checks remain.
 
+## Trainability and gradient contracts
+
+`bitlinear_forward` and `bitlinear_backward` expose the same quantized
+projection used inside the model. Let `Xq` and `Wq` be quantized at the current
+master weights and activations. The chosen identity straight-through estimator
+uses `dX = dY Wq` and `dW_master = dY^T Xq`, accumulating into existing buffers.
+It treats the quantizer Jacobians as identity and detaches scales and rounding
+decisions. There is no gradient-based scale optimization in this version.
+
+The test freezes quantized base values, defines local surrogates
+`Qx(X) = Xq + (X-Xbase)` and `Qw(W) = Wq + (W-Wbase)`, then checks every input
+and weight derivative of the resulting double-precision scalar loss. It also
+checks output against independent nested sums and checks gradient accumulation.
+This validates the stated surrogate; finite differences of the original
+quantizer would answer a different mathematical question.
+
+A native ternary MoE test (four routed experts, top-2, one shared expert)
+learns a cyclic next-token task in 31 updates: loss 2.588 to 1.285 with seed 18.
+It verifies master-weight updates, refreshed quantized copies, saved moments,
+RNG and router biases, and a bit-identical next update after checkpoint reload
+under the same optimizer settings and build.
+
+The numerical test helpers now reject non-finite gradients and losses explicitly.
+Previously, `std::max(current_error, NaN)` could silently leave an error at zero.
+
+For a policy `pi(a|s)` with reward `r(a)` and action-independent baseline `b`,
+descent on `(r-b) * cross_entropy(a)` is descent on `-(r-b) log pi(a|s)`.
+Taking the expectation over actions gives the gradient of `-E[r]`: the baseline
+term vanishes because `sum_a pi(a) grad log pi(a) = 0`. The policy-gradient test
+sums over all actions and compares this expectation against finite differences
+of `-sum_a pi(a) r(a)` for four baselines. This caught and corrected a sign error
+in the new bandit experiment before its successful results were accepted.
+
 ## Limits and next work
 
 * Ternary training retains fp32 master weights and AdamW moments. The inference

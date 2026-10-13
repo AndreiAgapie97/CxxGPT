@@ -26,6 +26,7 @@ int main(int argc, char** argv) {
         {"tokenizer", test_tokenizer},
         {"data", test_data},
         {"numerics", test_numerics},
+        {"policy gradient", test_policy_gradient_expectation},
         {"train", test_train},
     };
     for (auto& s : suites) {

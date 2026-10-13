@@ -476,3 +476,22 @@ void act_quantize(T* xq, const T* x, int N, int C) {
         }
     });
 }
+
+// BitLinear with already-quantized weights. Caller owns xq[N, IC] scratch;
+// master weights are quantized once per optimizer update by the model.
+template <class T>
+void bitlinear_forward(T* y, const T* x, const T* wq, T* xq, int N, int IC, int OC) {
+    act_quantize(xq, x, N, IC);
+    linear_forward(y, xq, wq, N, IC, OC);
+}
+
+// Identity straight-through estimator (STE): dx += dy Wq and
+// dW_master += dy^T xq. Scales and rounding decisions are detached.
+// This is the derivative of a local surrogate with quantizer Jacobians I,
+// not the exact derivative of the discrete forward function.
+template <class T>
+void bitlinear_backward(T* dx, T* dw, const T* dy, const T* x, const T* wq, T* xq,
+                        int N, int IC, int OC) {
+    act_quantize(xq, x, N, IC);
+    linear_backward(dx, dw, dy, xq, wq, N, IC, OC);
+}

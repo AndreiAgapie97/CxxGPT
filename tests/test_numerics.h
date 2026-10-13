@@ -54,4 +54,45 @@ void test_cross_entropy_extreme() {
 inline void test_numerics() {
     test_cross_entropy_extreme<float>();
     test_cross_entropy_extreme<double>();
+    Rng rng(75);
+    std::vector<double> x = {1}, gradient = {std::numeric_limits<double>::quiet_NaN()};
+    EXPECT(std::isinf(grad_error(x, gradient, [&] { return x[0]; }, rng)),
+           "gradient checker silently accepted NaN analytic gradient");
+    gradient[0] = 1;
+    EXPECT(std::isinf(grad_error(x, gradient, [] { return std::numeric_limits<double>::quiet_NaN(); }, rng)),
+           "gradient checker silently accepted NaN loss");
+    const float bad = std::numeric_limits<float>::quiet_NaN();
+    EXPECT(std::isinf(max_abs_diff(&bad, x.data(), 1)), "comparison silently accepted NaN");
+}
+
+// Sum the reward-weighted score-function gradient over all actions. It must
+// equal the finite-difference gradient of -E[reward], independently of an
+// action-independent baseline. This validates the sign and weighting used
+// by the contextual-bandit experiment, without stochastic tolerances.
+inline void test_policy_gradient_expectation() {
+    Rng rng(74);
+    std::vector<double> logits = {-4, -1, 2, 0};
+    const std::vector<double> reward = {0, 0.3, 1, -0.2};
+    auto expected_loss = [&] {
+        const double mx = *std::max_element(logits.begin(), logits.end());
+        double sum = 0, weighted = 0;
+        for (size_t i = 0; i < logits.size(); ++i) {
+            const double e = std::exp(logits[i] - mx);
+            sum += e; weighted += e * reward[i];
+        }
+        return -weighted / sum;
+    };
+    for (double baseline : {-2.0, 0.0, 0.4, 10.0}) {
+        std::vector<double> expected_grad(logits.size(), 0), grad(logits.size());
+        for (int action = 0; action < int(logits.size()); ++action) {
+            auto p = logits;
+            double loss;
+            cross_entropy_forward(p.data(), &loss, &action, 1, int(p.size()));
+            cross_entropy_backward(grad.data(), p.data(), &action, 1, int(p.size()),
+                                   reward[action] - baseline);
+            for (size_t i = 0; i < grad.size(); ++i) expected_grad[i] += p[action] * grad[i];
+        }
+        const double error = grad_error(logits, expected_grad, expected_loss, rng);
+        EXPECT(error < 1e-7, "policy gradient expectation with baseline %g: error %g", baseline, error);
+    }
 }
