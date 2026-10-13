@@ -89,7 +89,10 @@ and can do everything else from there.
    ```sh
    scripts/prepare_data.sh
    ```
-   About 10 GB of downloads; everything fits well under 50 GB.
+   About 5.5 GB of downloads (each extra FineWeb-Edu file, `FINEWEB_FILES=2`
+   and up, adds 2.2 GB); everything fits well under 50 GB. CI checks on
+   every push that these files are still where the script expects them
+   (`get_data.py --check`).
 
 ### Night 1
 
