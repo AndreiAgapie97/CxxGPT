@@ -208,20 +208,30 @@ struct TokenData {
         CHECK(std::fclose(f) == 0, "error writing %s", path.c_str());
     }
 
+    struct Header {
+        uint32_t vocab = 0, has_mask = 0;
+        uint64_t n = 0;
+    };
+
+    // Only the header: vocabulary, whether there is a mask, token count.
+    [[nodiscard]] static Header peek(const std::string& path) {
+        FILE* f = std::fopen(path.c_str(), "rb");
+        CHECK(f, "cannot open %s", path.c_str());
+        const Header h = read_header(f, path);
+        std::fclose(f);
+        return h;
+    }
+
     [[nodiscard]] static TokenData load(const std::string& path) {
         FILE* f = std::fopen(path.c_str(), "rb");
         CHECK(f, "cannot open %s", path.c_str());
-        char magic[8];
+        const Header h = read_header(f, path);
+        const size_t n = h.n;
         TokenData d;
-        uint32_t has_mask = 0;
-        uint64_t n = 0;
-        CHECK(std::fread(magic, 1, 8, f) == 8 && !std::memcmp(magic, "CXTOKEN1", 8),
-              "%s is not a token file", path.c_str());
-        CHECK(std::fread(&d.vocab, 4, 1, f) == 1 && std::fread(&has_mask, 4, 1, f) == 1 &&
-              std::fread(&n, 8, 1, f) == 1, "truncated header in %s", path.c_str());
+        d.vocab = h.vocab;
         d.tokens.resize(n);
         CHECK(std::fread(d.tokens.data(), 2, n, f) == n, "truncated tokens in %s", path.c_str());
-        if (has_mask) {
+        if (h.has_mask) {
             d.mask.resize(n);
             CHECK(std::fread(d.mask.data(), 1, n, f) == n, "truncated mask in %s", path.c_str());
         }
@@ -230,6 +240,51 @@ struct TokenData {
         return d;
     }
 
+    // Several files as one: "a.tok,b.tok*3" is a.tok followed by b.tok three
+    // times. Where some files have a mask and others not, the unmasked ones
+    // train on every token. The headers give the total size first, so the
+    // result is allocated once and each file is freed as soon as it is
+    // copied in: memory peaks at the result plus one file, not twice the
+    // result.
+    [[nodiscard]] static TokenData load_list(const std::vector<std::pair<std::string, int>>& files) {
+        if (files.size() == 1 && files[0].second == 1) return load(files[0].first);
+        size_t total = 0;
+        bool any_mask = false;
+        for (const auto& [path, times] : files) {
+            CHECK(times >= 1, "bad repeat count %d for %s", times, path.c_str());
+            const Header h = peek(path);
+            total += size_t(h.n) * size_t(times);
+            any_mask |= h.has_mask != 0;
+        }
+        TokenData d;
+        d.tokens.reserve(total);
+        if (any_mask) d.mask.reserve(total);
+        for (const auto& [path, times] : files) {
+            const TokenData part = load(path);
+            d.vocab = std::max(d.vocab, part.vocab);
+            for (int r = 0; r < times; ++r) {
+                d.tokens.insert(d.tokens.end(), part.tokens.begin(), part.tokens.end());
+                if (!any_mask) continue;
+                if (part.mask.empty()) d.mask.insert(d.mask.end(), part.tokens.size(), uint8_t(1));
+                else d.mask.insert(d.mask.end(), part.mask.begin(), part.mask.end());
+            }
+        }
+        return d;
+    }
+
+private:
+    static Header read_header(FILE* f, const std::string& path) {
+        char magic[8];
+        Header h;
+        CHECK(std::fread(magic, 1, 8, f) == 8 && !std::memcmp(magic, "CXTOKEN1", 8),
+              "%s is not a token file", path.c_str());
+        CHECK(std::fread(&h.vocab, 4, 1, f) == 1 && std::fread(&h.has_mask, 4, 1, f) == 1 &&
+                  std::fread(&h.n, 8, 1, f) == 1,
+              "truncated header in %s", path.c_str());
+        return h;
+    }
+
+public:
     // B windows of Tn + 1 tokens starting at random offsets in [lo, hi - Tn - 1].
     // Targets that the mask excludes become -1.
     void sample_batch(Rng& rng, int B, int Tn, size_t lo, size_t hi, int* inputs, int* targets) const {

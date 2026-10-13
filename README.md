@@ -73,17 +73,19 @@ during training).
 | `sample` | generates text from a prompt |
 | `bench-infer` | times the ternary inference engine against an fp32 baseline |
 
-### Real data
+### Real data and GPU training
 
 ```sh
-python3 scripts/get_data.py gsm8k tinystories fineweb-edu openmath2 metamath
-./cxxgpt bpe-train --in data/fineweb-edu/train.txt --vocab 8192 --out data/tok.bpe
-./cxxgpt text2tok --in data/fineweb-edu/train.txt --out data/web.tok --bpe data/tok.bpe \
-    --doc-sep '<|endoftext|>'
-./cxxgpt prep-qa --in data/gsm8k/train.jsonl --out data/gsm8k/train --bpe data/tok.bpe
+scripts/prepare_data.sh              # download, train our tokenizer, write token files
+scripts/probe.sh                     # GPU speed and memory per model size
+TOKS=<tokens/s> scripts/night.sh     # one night of training, checked on GSM8K
 ```
 
-`get_data.py` needs only `pyarrow`; it resumes interrupted downloads.
+`prepare_data.sh` fetches GSM8K, TinyStories, FineWeb-Edu,
+OpenMathInstruct-2 and MetaMathQA (`scripts/get_data.py`, which needs only
+`pyarrow`), trains a 16k-token BPE on a sample, and encodes everything.
+[docs/LAPTOP.md](docs/LAPTOP.md) has the whole setup, from a fresh Windows
+laptop to a night of training.
 
 ## Code
 

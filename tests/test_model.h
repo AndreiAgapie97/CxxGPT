@@ -1,6 +1,7 @@
 // test_model.h — whole-model gradient checks and the BitLinear pieces.
 #pragma once
 
+#include "../src/generate.h"
 #include "../src/infer.h"
 #include "../src/model.h"
 #include "test_util.h"
@@ -299,7 +300,40 @@ inline void test_ternary_engine() {
     }
 }
 
+// The reasoning eval scores every problem, including one whose prompt does
+// not fit in the context (wrong, without stopping the run), and gives the
+// same answers however the problems are batched, as long as the context
+// leaves every batch room for max_new tokens.
+inline void test_eval_reasoning() {
+    Config cfg;
+    cfg.vocab = 256;  // byte-level
+    cfg.seq_len = 128;
+    cfg.d_model = 32;
+    cfg.n_layers = 2;
+    cfg.n_heads = 2;
+    Model<float> m(cfg);
+    m.init(9);
+    Rng rng(10);
+    std::vector<Problem> ps;
+    for (int i = 0; i < 7; ++i) ps.push_back(make_problem(i % 2 ? "add" : "chain", 1 + i % 3, rng));
+    Problem big = ps[0];
+    big.question = std::string(130, '7') + "+1";
+    ps.insert(ps.begin() + 3, big);
+    const EvalResult one = eval_reasoning(m, ps, {}, 1, 20, 100);
+    const EvalResult three = eval_reasoning(m, ps, {}, 3, 20, 100);
+    EXPECT(one.total == 8 && three.total == 8, "eval scored %d and %d of 8 problems", one.total, three.total);
+    bool too_long = false;
+    for (const auto& [p, text] : three.failures)
+        if (p.question == big.question) too_long = text.find("does not fit") != std::string::npos;
+    EXPECT(too_long, "the over-long prompt was not reported as not fitting");
+    bool same = one.correct == three.correct && one.failures.size() == three.failures.size();
+    for (size_t i = 0; same && i < one.failures.size(); ++i)
+        same = one.failures[i].second == three.failures[i].second;
+    EXPECT(same, "eval answers depend on the batch size");
+}
+
 inline void test_model() {
+    test_eval_reasoning();
     test_ternary_engine();
     test_decode_matches_forward();
     test_model_gradients();

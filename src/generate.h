@@ -2,6 +2,7 @@
 // reasoning evaluation built on it.
 #pragma once
 
+#include <algorithm>
 #include <functional>
 #include <map>
 #include <string>
@@ -104,24 +105,38 @@ EvalResult eval_reasoning(Model<T>& model, const std::vector<Problem>& problems,
         for (int t : gen) ok.push_back(t < tok.vocab_size() ? t : '?');
         return tok.decode(ok);
     };
-    EvalResult r;
-    for (size_t i0 = 0; i0 < problems.size(); i0 += batch) {
-        const size_t i1 = std::min(problems.size(), i0 + batch);
-        std::vector<std::vector<int>> prompts;
-        for (size_t i = i0; i < i1; ++i) prompts.push_back(prompt_tokens(problems[i], tok));
-        const auto outs = generate(model, prompts, max_new,
+    // Batches of similar prompt lengths: prompts are padded to the longest
+    // in their batch, and the context left after it is all the room any of
+    // them has to answer in. A prompt that fills the whole context cannot be
+    // answered and counts as wrong.
+    const size_t n = problems.size();
+    std::vector<std::vector<int>> prompts(n);
+    std::vector<size_t> order;
+    for (size_t i = 0; i < n; ++i) {
+        prompts[i] = prompt_tokens(problems[i], tok);
+        if (int(prompts[i].size()) < model.cfg.seq_len) order.push_back(i);
+    }
+    std::stable_sort(order.begin(), order.end(),
+                     [&](size_t x, size_t y) { return prompts[x].size() < prompts[y].size(); });
+    std::vector<std::string> texts(n, "(the prompt does not fit in the context)");
+    for (size_t k0 = 0; k0 < order.size(); k0 += size_t(batch)) {
+        const size_t k1 = std::min(order.size(), k0 + size_t(batch));
+        std::vector<std::vector<int>> group;
+        for (size_t k = k0; k < k1; ++k) group.push_back(prompts[order[k]]);
+        const auto outs = generate(model, group, max_new,
                                    [&](const std::vector<int>& gen) { return completion_done(text_of(gen)); });
-        for (size_t i = i0; i < i1; ++i) {
-            const Problem& p = problems[i];
-            const std::string text = text_of(outs[i - i0]);
-            const bool ok = completion_done(text) && extract_answer(text) == p.answer;
-            auto& cell = r.by_task[{p.task, p.difficulty}];
-            cell.first += ok;
-            cell.second += 1;
-            r.correct += ok;
-            r.total += 1;
-            if (!ok && r.failures.size() < keep_failures) r.failures.push_back({p, text});
-        }
+        for (size_t k = k0; k < k1; ++k) texts[order[k]] = text_of(outs[k - k0]);
+    }
+    EvalResult r;
+    for (size_t i = 0; i < n; ++i) {
+        const Problem& p = problems[i];
+        const bool ok = completion_done(texts[i]) && extract_answer(texts[i]) == p.answer;
+        auto& cell = r.by_task[{p.task, p.difficulty}];
+        cell.first += ok;
+        cell.second += 1;
+        r.correct += ok;
+        r.total += 1;
+        if (!ok && r.failures.size() < keep_failures) r.failures.push_back({p, texts[i]});
     }
     return r;
 }

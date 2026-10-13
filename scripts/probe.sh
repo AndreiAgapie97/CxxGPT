@@ -1,18 +1,21 @@
 #!/usr/bin/env bash
 # GPU throughput probe: trains each candidate model size for a few steps and
 # prints its speed, its GPU memory, and how many tokens a night would train.
-#   scripts/probe.sh [steps]          (default 30; needs cxxgpt-gpu: make gpu)
-# BATCH=8 SEQ=512 VOCAB=8192 set the shape of a step; extra sizes can be
-# given as SIZES="name:--dim 640 --layers 10 --heads 10;...".
+#   scripts/probe.sh [steps]          (default 20; needs cxxgpt-gpu: make gpu)
+# The defaults match scripts/night.sh, so its TOKS can come from here:
+# BATCH=8 SEQ=512 ACCUM=16 VOCAB=16384, OPT=--muon ("" for AdamW). Other
+# sizes: SIZES="name:--dim 640 --layers 10 --heads 10;...".
 # The tokens are synthetic (the reasoning curriculum); speed does not depend
 # on what they say, only on the vocabulary size, which VOCAB sets.
 set -euo pipefail
 cd "$(dirname "$0")/.."
-STEPS=${1:-30}
+STEPS=${1:-20}
 BATCH=${BATCH:-8}
 SEQ=${SEQ:-512}
-VOCAB=${VOCAB:-8192}
-NIGHT_HOURS=${NIGHT_HOURS:-8}
+ACCUM=${ACCUM:-16}
+OPT=${OPT---muon}
+VOCAB=${VOCAB:-16384}
+NIGHT_HOURS=${NIGHT_HOURS:-7.5}
 [ -x ./cxxgpt-gpu ] || { echo "build it first: make gpu"; exit 1; }
 [ -f data/reason.train.tok ] || ./cxxgpt-gpu gen-reasoning --out data/reason > /dev/null
 
@@ -32,8 +35,8 @@ while IFS= read -r line; do
   args=${line#*:}
   # shellcheck disable=SC2086
   if ./cxxgpt-gpu train --gpu --data data/reason.train.tok --vocab "$VOCAB" --seq "$SEQ" --batch "$BATCH" \
-      --steps "$STEPS" --warmup 5 --eval-every 0 --log-every 10 --save-every 0 --out "$tmp/probe.ckpt" \
-      $args > "$tmp/log" 2>&1; then
+      --accum "$ACCUM" --steps "$STEPS" --warmup 5 --eval-every 0 --log-every 10 --save-every 0 --out "$tmp/probe.ckpt" \
+      $args $OPT > "$tmp/log" 2>&1; then
     params=$(sed -n 's/^params: \([0-9.]* M\) total, \([0-9.]* M\) active.*/\1/p' "$tmp/log")
     active=$(sed -n 's/^params: \([0-9.]* M\) total, \([0-9.]* M\) active.*/\2/p' "$tmp/log")
     # The last log line averages the final 10 steps, after the warm-up ones.
@@ -49,4 +52,4 @@ while IFS= read -r line; do
     tail -5 "$tmp/log"
   fi
 done <<< "${SIZES//;/$'\n'}"
-echo "tokens/night: at this speed for $NIGHT_HOURS hours. Larger batches come from --accum."
+echo "tokens/night: at this speed for $NIGHT_HOURS hours ($((BATCH * SEQ * ACCUM)) tokens per step, optimizer: ${OPT:-AdamW})."
