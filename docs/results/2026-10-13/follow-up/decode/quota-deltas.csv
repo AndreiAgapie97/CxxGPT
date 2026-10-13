@@ -1,0 +1,5 @@
+phase,scenario,usage_usec,nr_periods,nr_throttled,throttled_usec
+quota2,dense-trained,274479,2,0,0
+quota2,dense-v8192,1695625,12,1,2598
+quota2,moe-trained,331056,2,0,0
+quota2,moe-v8192,1983255,14,1,2620

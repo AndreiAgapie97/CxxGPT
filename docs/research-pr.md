@@ -21,19 +21,25 @@ and reward-based bandit learning. Reasoning runs at 200 and 2,000 steps improve
 token loss but achieve only 0–3.3% exact answers. Raw results and limitations are
 recorded in `docs/research.md` and `docs/results/2026-10-13`.
 
-Claude's CUDA backend, streaming data pipeline, and laptop setup commits are
+Claude's CUDA backend, streaming pipeline, laptop/overnight setup, Muon
+optimizer, evaluation/loading updates, and compact GPU optimizer state are
 merged into this branch. Compatible conflicts preserve both changes; no
 Claude branch is overwritten and no force-push is used.
 
 Validation:
 
 - GCC 14.2 and Clang 19.1 builds with `-Wall -Wextra -Werror`; kernel and engine
-  suites, CLI regressions, ASan/UBSan and TSan including experiment smoke runs.
+  suites, AdamW/Muon CLI regressions, ASan/UBSan and TSan including the real
+  CLI and experiment smoke runs.
 - Scalar and AVX2 engine checks; reproducible native experiments and checkpoint
-  storage audit. Timing results are explicitly marked as noisy.
+  storage audit. Decode benchmarks record warmups, alternating raw trials,
+  CPU quotas and
+  weight storage. The quota-aware trained cases show about 1.6x observed
+  end-to-end speedup; embedding-heavy controls reduce whole-weight savings
+  to 1.07–1.12x. These are limited VM measurements.
 - CUDA host/device compile checks for `sm_89` using Clang and CUDA 12.4 headers.
-  The stable-loss and masked-accumulation paths have CPU/GPU regression fixtures; **GPU runtime
-  assertions remain pending `make gpu-test` on NVIDIA hardware. Keep this PR
+  The stable-loss, masked-accumulation and optimizer-state paths have CPU/GPU
+  regression fixtures; **GPU runtime assertions remain pending `make gpu-test` on NVIDIA hardware. Keep this PR
   draft until that validation is recorded.**
 
 The branch targets `main`, where Claude's current development lives. The GitHub

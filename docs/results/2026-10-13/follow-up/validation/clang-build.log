@@ -1,0 +1,5 @@
+/workspace/scratch/llvm/usr/bin/clang++-19 -O3 -march=native -std=c++20 -pthread -Wall -Wextra -Wno-unknown-warning-option -Wno-invalid-feature-combination -Werror ternary_moe.cpp -o ternary_moe
+/workspace/scratch/llvm/usr/bin/clang++-19 -O3 -march=native -std=c++20 -pthread -Wall -Wextra -Wno-unknown-warning-option -Wno-invalid-feature-combination -Werror tests/test_engine.cpp -o test_engine
+/workspace/scratch/llvm/usr/bin/clang++-19 -O3 -march=native -std=c++20 -pthread -Wall -Wextra -Wno-unknown-warning-option -Wno-invalid-feature-combination -Werror src/cxxgpt.cpp -o cxxgpt
+/workspace/scratch/llvm/usr/bin/clang++-19 -O3 -march=native -std=c++20 -pthread -Wall -Wextra -Wno-unknown-warning-option -Wno-invalid-feature-combination -Werror tests/test_training_cli.cpp -o test_training_cli
+/workspace/scratch/llvm/usr/bin/clang++-19 -O3 -march=native -std=c++20 -pthread -Wall -Wextra -Wno-unknown-warning-option -Wno-invalid-feature-combination -Werror experiments/toy_world.cpp -o research_experiment

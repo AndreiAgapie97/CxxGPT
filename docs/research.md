@@ -69,7 +69,8 @@ Three clipped float AdamW updates differ by at most `6e-8` in parameters
 and `7e-10` in moments. CLI tests run four updates on unequal and sparse masks
 for all four variants: macro/micro checkpoints agree within `2e-8`, data RNG
 and router biases match, and token-weighted train/validation CSV fields match
-at their printed precision. Sparse cases exercise whole-group skips; fully
+at their printed precision. Further CLI comparisons with Muon agree within
+`6e-8` in parameters and `2e-9` in moments. Sparse cases exercise whole-group skips; fully
 masked data and invalid accumulation/logging shapes return checked errors.
 
 `tests/test_gpu.cpp` also exercises this production helper against a CPU
@@ -157,6 +158,42 @@ Configuration checks now reject nonpositive model/head dimensions, negative
 hidden sizes or expert counts, and zero top-k before division or allocation.
 The CLI integration test checks seven invalid configurations return a checked
 error, and that single-window training actually includes a validation result.
+
+### Continued integration and validation
+
+Claude's `fbf1f19` (CPU/GPU Muon) and `9130fbe` (README and GPU probe) were
+merged as `5e9ee10`. Header and suite conflicts preserve both optimizers and
+all numerical, STE, training and policy-gradient tests. The README retains
+Claude's project guide and results, with explicit packed-storage and GPU
+validation qualifications. AdamW and Muon both pass the masked CLI checkpoint
+comparisons. Muon adds independent double optimizer and orthogonalization
+references and checkpoint tests.
+
+`5ce0eff` (overnight setup, lower-peak token mixing, prompt-length evaluation
+batching) was merged as `c68c2a7`. The sole conflict retained both whole-model
+STE and reasoning-evaluation tests. `09adc67` (compact GPU Muon second moments
+and an adaptive batch-size probe) was merged as `4b9b4e0` without conflicts.
+The device buffer layout and state round-trip assertions compile; their
+runtime and memory savings have not been measured on GPU hardware.
+
+GCC 14.2 and Clang 19.1 warning-as-error builds, all CPU suites, real CLI
+regressions, ASan/UBSan, TSan and native experiment sanitizer smoke runs pass
+after integration. Sanitizer targets now compile the real CLI and exercise
+its masked training, checkpoint and benchmark paths too. Scalar and AVX2
+engine checks passed before the data/evaluation update. CUDA host/device
+`sm_89` checks pass after the GPU-memory update; GPU test translation units
+and the GPU-enabled CLI compile. **None of the CUDA runtime assertions have
+run in this environment.** New laptop scripts pass shell syntax checks;
+no public corpus download or overnight GPU run was attempted.
+
+The twelve existing 2,000-step reasoning checkpoints were reevaluated after
+the prompt-length batching change. Exact-answer counts are unchanged, still
+0–2 out of 60. Thus improving batching robustness does not resolve the poor
+reasoning accuracy of these tiny models. Transcripts, comparisons, source
+and checkpoint hashes are in [follow-up results](results/2026-10-13/follow-up).
+Claude reports better larger-model results on `main`; this run has not
+reproduced those measurements, and one-seed comparisons do not measure seed
+variance.
 
 ## Reproducible experiments
 
@@ -271,6 +308,52 @@ checks, not controlled performance evidence.** A dedicated quiet benchmark
 with varied vocabulary, batch sizes, cache states and repeated A/B ordering
 remains necessary.
 
+### Quiet decode and CPU-quota investigation
+
+The benchmark now accepts `--warmup` and `--log`, records raw trial CSVs,
+alternates which path runs first, and reports the median of each path.
+`scripts/decode-benchmark.sh` preserves source, binary and checkpoint hashes,
+flags, budgets, CPU affinity and cgroup counters, and forces a rebuild using
+the recorded compiler. Both implementations use the same ternary projection
+weights, forced token stream and thread count; the fp32 baseline keeps
+activations unquantized. Model construction and packing are outside timing;
+KV cache reset and argmax are inside.
+
+A quiet matrix at `e5f302c` covered trained seed-1 dense/MoE checkpoints and
+untrained 8,192-vocabulary controls, prefixes 16/64/128, one/three threads,
+two warmup pairs and 21 recorded alternating pairs. Investigation found that
+three CPUs are available to affinity, but `cpu.max = 200000 100000` limits
+CPU time to two CPU equivalents. Three-thread paired timing ratios span
+roughly 0.09–16.85, so those trials cannot establish reliable performance.
+The matrix was repeated with one/two threads at `891f990`, with no concurrent
+build or experiment during measurements. All 1,008 trials and 48 summaries
+are retained in [follow-up/decode](results/2026-10-13/follow-up/decode).
+
+The following rows use two threads and a 128-token prefix. Times are medians
+of 21 trials in milliseconds, with warm code/weights and a reset KV cache.
+
+| Scenario | fp32 / packed ms | Observed ratio | fp32 / packed weight bytes | Weight reduction |
+| --- | ---: | ---: | ---: | ---: |
+| Trained dense, vocab 256 | 1.396 / 0.869 | 1.61x | 230,144 / 76,560 | 3.01x |
+| Trained MoE, vocab 256 | 1.662 / 1.057 | 1.57x | 329,472 / 83,752 | 3.93x |
+| Untrained dense, vocab 8,192 | 7.244 / 5.083 | 1.43x | 2,261,760 / 2,108,176 | 1.07x |
+| Untrained MoE, vocab 8,192 | 10.230 / 6.184 | 1.65x | 2,361,088 / 2,115,368 | 1.12x |
+
+The trained matrices record no quota throttling. The larger-vocabulary
+matrices each record one throttled period (about 2.6 ms) across their six
+cases. Individual 128-token two-thread ratios still span 0.71–2.13 overall;
+these are observed implementation timings on one shared VM, not architecture
+performance guarantees. Unquantized operations differ between the training
+model's decode path and the inference engine, so this comparison does not
+isolate ternary arithmetic. Argmax agrees on 97.7% and 98.4% of trained-case
+positions; 100% for untrained controls is not task accuracy.
+
+The vocabulary controls demonstrate how unquantized embeddings dominate
+whole-model weight storage. CPU training arrays remain 1,150,720 bytes for
+the trained dense checkpoint and 1,647,360 bytes for MoE, excluding
+activations, routing/replay buffers and allocator capacity. Neither these
+array counts nor the packed weight counts measure peak process memory.
+
 ## Limits and next work
 
 * Ternary training retains fp32 master weights and AdamW moments. The inference
@@ -291,3 +374,20 @@ remains necessary.
   rather than silently comparing those scores to the new validation metric.
 * Small synthetic tasks are useful for detecting bugs and measuring forgetting;
   they cannot establish real reasoning ability or reinforcement learning.
+
+## Publishing and continuation status
+
+The local research branch preserves all earlier work and ordinary Claude
+merges through `09adc67`. There are no unresolved merge conflicts. GitHub
+reads and fetches work, but Git HTTPS still denies push with HTTP 403 and
+the GitHub app's tree-write check returns `Resource not accessible by
+integration` (403). No remote `gpt/research` branch or research PR exists.
+The PR description is prepared in `docs/research-pr.md`, targeting `main`
+and remaining draft until NVIDIA runtime validation is recorded.
+
+The local bundle and binary patch in `/workspace` are refreshed after the
+final documentation commit. The existing hourly follow-up remains enabled;
+its context tracks completed token weighting, CPU-quota-aware benchmarks,
+pending GPU loss/accumulation/Muon validation, reasoning quality, and access
+checks. It must inspect the preserved artifacts before recreating missing
+remote work and must never force-push or alter Claude's branches.

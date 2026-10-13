@@ -1,0 +1,13 @@
+checkpoint,original_correct,sorted_correct,total
+dense-seed1,1,1,60
+dense-seed2,1,1,60
+dense-seed3,1,1,60
+dense-ternary-seed1,0,0,60
+dense-ternary-seed2,2,2,60
+dense-ternary-seed3,2,2,60
+moe-seed1,1,1,60
+moe-seed2,1,1,60
+moe-seed3,2,2,60
+moe-ternary-seed1,0,0,60
+moe-ternary-seed2,1,1,60
+moe-ternary-seed3,1,1,60

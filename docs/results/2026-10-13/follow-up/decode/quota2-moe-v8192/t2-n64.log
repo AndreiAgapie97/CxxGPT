@@ -1,0 +1,6 @@
+model: vocab 8192, seq 128, dim 64, layers 1, heads 4, MoE 4 experts (top-2, hidden 64, 0 shared), ternary BitLinear
+params: 0.590 M total, 0.566 M active per token
+decode, 1 sequence, 64 tokens, median of 21, 2 threads (2 warmup pairs, alternating order):
+  fp32       13709.4 tok/s   weights     2.36 MB
+  ternary    22229.3 tok/s   weights     2.12 MB
+  speedup 1.62x, memory 1.1x smaller; same argmax as fp32 on 100% of positions

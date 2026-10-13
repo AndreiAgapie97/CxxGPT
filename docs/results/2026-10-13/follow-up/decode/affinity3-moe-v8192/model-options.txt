@@ -1,0 +1,1 @@
+--vocab 8192 --seq 128 --dim 64 --heads 4 --layers 1 --ffn 128 --experts 4 --topk 2 --ehidden 64
