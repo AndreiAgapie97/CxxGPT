@@ -385,7 +385,8 @@ inline void save_checkpoint(const std::string& path, const Model<float>& model, 
         std::fwrite(opt.v.data(), 4, n, f);
     }
     for (const auto& b : model.router_bias) std::fwrite(b.data(), 4, b.size(), f);
-    CHECK(std::fclose(f) == 0, "error writing %s", tmp.c_str());
+    const bool write_failed = std::ferror(f) != 0;  // a full disk, say: keep the last good checkpoint
+    CHECK(std::fclose(f) == 0 && !write_failed, "error writing %s", tmp.c_str());
     // Replace atomically, so an interrupted save never destroys the last good one.
     CHECK(std::rename(tmp.c_str(), path.c_str()) == 0, "cannot rename %s", tmp.c_str());
 }

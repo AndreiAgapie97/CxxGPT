@@ -59,6 +59,10 @@ and can do everything else from there.
 - `--time-limit MINUTES` stops training and saves a checkpoint in time for
   the morning. Ctrl-C also saves before stopping. `--resume` continues
   from the checkpoint.
+- If training diverges (the loss or gradient becomes infinite or NaN),
+  that step is skipped; ten in a row stop the run without saving over
+  the last checkpoint. The log then says which step the checkpoint holds;
+  resume it with a lower `--lr` (night.sh: `LR=...`).
 - `nvidia-smi` in another terminal shows GPU load, memory and temperature.
 
 ## The plan

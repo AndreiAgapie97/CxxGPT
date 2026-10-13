@@ -10,6 +10,7 @@
 //   cxxgpt bench-infer [--ckpt model.ckpt | model options]  ternary engine vs fp32 decode
 //
 // Run a subcommand with --help for its options.
+#include <cmath>
 #include <csignal>
 #include <cstdio>
 #include <filesystem>
@@ -455,7 +456,8 @@ struct Backend {
     virtual double forward(const int* inp, const int* tgt, int B, int Tn, bool training) = 0;
     virtual void backward(double loss_scale) = 0;
     virtual void zero_grad() = 0;
-    // Clips the gradient to max_norm (if > 0), then takes an AdamW step.
+    // Clips the gradient to max_norm (if > 0), then takes an AdamW step;
+    // a gradient that is not finite (overflow, NaN) is skipped instead.
     // Returns the gradient norm before clipping.
     virtual double step(double lr, double max_norm) = 0;
     // Updates the router biases from the expert loads since the last call;
@@ -479,7 +481,7 @@ struct CpuBackend : Backend {
     void zero_grad() override { model.zero_grad(); }
     double step(double lr, double max_norm) override {
         const double norm = clip_grad_norm(model, max_norm);
-        opt.update(model, lr);
+        if (std::isfinite(norm)) opt.update(model, lr);
         return norm;
     }
     double balance(double rate) override {
@@ -509,6 +511,7 @@ struct GpuBackend : Backend {
     void zero_grad() override { gpu.zero_grad(); }
     double step(double lr, double max_norm) override {
         const double norm = gpu.grad_norm();
+        if (!std::isfinite(norm)) return norm;
         const double scale = max_norm > 0 && norm > max_norm ? double(float(max_norm / norm)) : 1.0;
         gpu.adamw_step(lr, opt.beta1, opt.beta2, opt.eps, opt.weight_decay, scale);
         ++opt.step;
@@ -669,6 +672,10 @@ int cmd_train(Args& a) {
     int n_acc = 0;
     long step = opt.step;
     const long first_step = step;
+    constexpr int kMaxBadSteps = 10;
+    int bad_steps = 0;
+    bool diverged = false;
+    long saved_step = resume ? first_step : -1;  // what --out holds
     for (; step < steps && !g_stop; ++step) {
         const double t0 = now_seconds();
         be.zero_grad();
@@ -680,6 +687,18 @@ int cmd_train(Args& a) {
         }
         const double lr_now = lr_at(step, warmup, steps, lr, min_frac);
         const double gnorm = be.step(lr_now, clip);
+        // A non-finite gradient leaves the weights untouched (Backend::step). A run
+        // of them stops training rather than spending the night on NaNs.
+        if (!std::isfinite(gnorm) || !std::isfinite(loss)) {
+            std::printf("step %ld: loss %g, gradient norm %g; update skipped\n", step + 1, loss, gnorm);
+            if (++bad_steps == kMaxBadSteps) {
+                std::printf("stopping: %d diverged steps in a row\n", kMaxBadSteps);
+                diverged = true;
+                break;
+            }
+            continue;
+        }
+        bad_steps = 0;
         const double load = be.balance(bias_rate);
         const double ms = (now_seconds() - t0) * 1e3;
         if (step == first_step && be.device_bytes() > 0)
@@ -711,6 +730,7 @@ int cmd_train(Args& a) {
         if (save_every > 0 && (step + 1) % save_every == 0) {
             be.sync();
             save_checkpoint(out, model, opt, data_rng);
+            saved_step = opt.step;
         }
         if (reason_every > 0 && (step + 1) % reason_every == 0 && !last) reason_eval(step + 1);
         if (time_limit > 0 && now_seconds() - t_start > time_limit) {
@@ -720,6 +740,16 @@ int cmd_train(Args& a) {
         }
     }
     if (g_profiler.enabled) g_profiler.report(int(step - first_step));
+    if (diverged) {
+        // The weights are finite, but whatever overflowed is in them by now:
+        // the last checkpoint is the one to keep.
+        if (saved_step >= 0)
+            std::printf("not saved: %s keeps step %ld; resume it with a lower --lr\n", out.c_str(), saved_step);
+        else
+            std::printf("not saved: no checkpoint yet; start again with a lower --lr\n");
+        if (log) std::fclose(log);
+        return 1;
+    }
     reason_eval(step);
     be.sync();
     save_checkpoint(out, model, opt, data_rng);
