@@ -254,6 +254,7 @@ int cmd_gen_reasoning(Args& a) {
     const int min_d = int(a.integer("min-diff", 1)), max_d = int(a.integer("max-diff", 3));
     const int test_max_d = int(a.integer("test-max-diff", max_d + 1));
     const std::vector<std::string> tasks = split(a.str("tasks", "chain,add,mul,expr,eq,cmp"), ',');
+    const bool chain_plan = a.flag("chain-plan");  // chain solutions look variables up first
     Rng rng(uint64_t(a.integer("seed", 1)));
     const Tokenizer tok = load_tokenizer(a.str("bpe"));
     a.done();
@@ -266,7 +267,7 @@ int cmd_gen_reasoning(Args& a) {
     for (const auto& t : tasks)
         for (int d = min_d; d <= test_max_d; ++d)
             for (int i = 0; i < per_cell;) {
-                Problem p = make_problem(t, d, rng);
+                Problem p = make_problem(t, d, rng, chain_plan);
                 if (!held_out.insert(p.question).second) continue;  // no duplicates
                 test.push_back(std::move(p));
                 ++i;
@@ -279,7 +280,8 @@ int cmd_gen_reasoning(Args& a) {
         long skipped = 0;
         for (long i = 0; i < n;) {
             const std::string& t = tasks[rng.below(tasks.size())];
-            const Problem p = make_problem(t, min_d + int(rng.below(uint64_t(max_d - min_d + 1))), rng);
+            const Problem p =
+                make_problem(t, min_d + int(rng.below(uint64_t(max_d - min_d + 1))), rng, chain_plan);
             if (held_out.count(p.question)) {
                 ++skipped;
                 continue;
