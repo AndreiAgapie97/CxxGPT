@@ -161,6 +161,58 @@ inline void pack_b(MatView<float> B, int p0, int kc, int j0, int nc, int jr0, in
     }
 }
 
+// Rows [0, M) x columns [j0, j1) of C for small M, when A's rows and B's
+// columns are both contiguous (Y = X · Wᵀ in decoding): plain dot products,
+// four columns at a time, without packing. Packing B would copy the whole
+// weight matrix on every call to serve a single row of A.
+inline void gemv_rows(int M, int K, MatView<float> A, MatView<float> B, float* C, long ldc,
+                      bool accumulate, int j0, int j1) {
+    auto hsum = [](vf v) {
+        alignas(64) float t[W];
+        vstore(t, v);
+        float s = 0.0f;
+        for (int i = 0; i < W; ++i) s += t[i];
+        return s;
+    };
+    for (int i = 0; i < M; ++i) {
+        const float* a = A.p + long(i) * A.rs;
+        float* c = C + long(i) * ldc;
+        int j = j0;
+        for (; j + 4 <= j1; j += 4) {
+            const float* b0 = B.p + long(j) * B.cs;
+            const float* b1 = b0 + B.cs;
+            const float* b2 = b1 + B.cs;
+            const float* b3 = b2 + B.cs;
+            vf s0 = vzero(), s1 = vzero(), s2 = vzero(), s3 = vzero();
+            int k = 0;
+            for (; k + W <= K; k += W) {
+                const vf x = vload(a + k);
+                s0 = vfma(x, vload(b0 + k), s0);
+                s1 = vfma(x, vload(b1 + k), s1);
+                s2 = vfma(x, vload(b2 + k), s2);
+                s3 = vfma(x, vload(b3 + k), s3);
+            }
+            float r[4] = {hsum(s0), hsum(s1), hsum(s2), hsum(s3)};
+            for (; k < K; ++k) {
+                r[0] += a[k] * b0[k];
+                r[1] += a[k] * b1[k];
+                r[2] += a[k] * b2[k];
+                r[3] += a[k] * b3[k];
+            }
+            for (int q = 0; q < 4; ++q) c[j + q] = accumulate ? c[j + q] + r[q] : r[q];
+        }
+        for (; j < j1; ++j) {
+            const float* b = B.p + long(j) * B.cs;
+            vf s0 = vzero();
+            int k = 0;
+            for (; k + W <= K; k += W) s0 = vfma(vload(a + k), vload(b + k), s0);
+            float r = hsum(s0);
+            for (; k < K; ++k) r += a[k] * b[k];
+            c[j] = accumulate ? c[j] + r : r;
+        }
+    }
+}
+
 }  // namespace gemm_detail
 
 // C[M, N] = (accumulate ? C : 0) + A[M, K] · B[K, N]. C is row-major with
@@ -179,6 +231,12 @@ inline void gemm(int M, int N, int K, MatView<float> A, MatView<float> B, float*
         if (threaded) pool().parallel_for(total, fn, 1);
         else fn(0, total);
     };
+    if (M <= 4 && A.cs == 1 && B.rs == 1) {
+        run((N + 15) / 16, [&](int q0, int q1) {
+            gemv_rows(M, K, A, B, C, ldc, accumulate, q0 * 16, std::min(N, q1 * 16));
+        });
+        return;
+    }
     // The B panel is shared by all threads; it belongs to the calling thread,
     // which stays blocked in parallel_for while the workers read it.
     static thread_local AlignedBuffer<float> b_buf;

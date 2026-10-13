@@ -6,6 +6,7 @@
 //   cxxgpt sample --ckpt model.ckpt [--prompt TEXT] [--bpe tok.bpe]  generate text
 //   cxxgpt gen-reasoning --out data/reason                 synthetic reasoning data
 //   cxxgpt eval-reasoning --ckpt model.ckpt --test FILE    exact-answer accuracy
+//   cxxgpt bench-infer [--ckpt model.ckpt | model options]  ternary engine vs fp32 decode
 //
 // Run a subcommand with --help for its options.
 #include <csignal>
@@ -19,6 +20,7 @@
 #include "args.h"
 #include "common.h"
 #include "generate.h"
+#include "infer.h"
 #include "model.h"
 #include "reasoning.h"
 #include "profile.h"
@@ -430,6 +432,72 @@ int cmd_sample(Args& a) {
     return 0;
 }
 
+// Single-sequence decoding speed and weight memory: the ternary engine
+// (bitplanes, int8 kernels) against the same model in fp32 (vectorized,
+// same threads). A/B runs are interleaved; medians are reported.
+int cmd_bench_infer(Args& a) {
+    ThreadPool tp(threads_arg(a));
+    g_pool = &tp;
+    const std::string ckpt = a.str("ckpt");
+    const int tokens = int(a.integer("tokens", 128)), reps = int(a.integer("reps", 7));
+    Config cfg = config_from_args(a, 256);
+    a.done();
+    if (!ckpt.empty()) cfg = peek_checkpoint_config(ckpt);
+    if (!cfg.ternary && !ckpt.empty())
+        std::printf("note: %s was trained without --ternary; this measures speed only\n", ckpt.c_str());
+    cfg.ternary = true;
+    Model<float> model(cfg);
+    if (ckpt.empty()) model.init(1);
+    else load_checkpoint(ckpt, model, nullptr, nullptr);
+    print_config(cfg, model);
+    CHECK(tokens > 0 && tokens <= cfg.seq_len, "--tokens must be in [1, seq_len]");
+
+    // fp32 baseline: the quantized weights as plain floats, no activation
+    // quantization.
+    model.quantize_weights();
+    Config fcfg = cfg;
+    fcfg.ternary = false;
+    Model<float> fp32(fcfg);
+    for (const ParamInfo& p : model.infos)
+        std::copy_n(&(p.ternary ? model.qparams : model.params)[p.offset], p.size, &fp32.params[p.offset]);
+    TernaryEngine engine(model);
+
+    Rng rng(7);
+    std::vector<int> seq(tokens);
+    for (int& t : seq) t = int(rng.below(cfg.vocab));
+    std::vector<double> t_fp32, t_tern;
+    double agree = 0;
+    for (int r = 0; r < reps; ++r) {
+        double t0 = now_seconds();
+        fp32.decode_begin(1, {0});
+        std::vector<int> top_fp32;
+        for (int pos = 0; pos < tokens; ++pos) {
+            const float* lg = fp32.decode_step(&seq[pos], pos);
+            top_fp32.push_back(pick_token(lg, cfg.vocab, 0.0, nullptr));
+        }
+        t_fp32.push_back(now_seconds() - t0);
+        t0 = now_seconds();
+        engine.reset();
+        int same = 0;
+        for (int pos = 0; pos < tokens; ++pos)
+            same += pick_token(engine.step(seq[pos]), cfg.vocab, 0.0, nullptr) == top_fp32[pos];
+        t_tern.push_back(now_seconds() - t0);
+        agree = double(same) / tokens;
+    }
+    auto median = [](std::vector<double> v) {
+        std::sort(v.begin(), v.end());
+        return v[v.size() / 2];
+    };
+    const double f = tokens / median(t_fp32), t = tokens / median(t_tern);
+    const double fb = double(model.num_params()) * 4, tb = double(engine.weight_bytes());
+    std::printf("decode, 1 sequence, %d tokens, median of %d, %d threads:\n", tokens, reps, tp.size());
+    std::printf("  fp32     %9.1f tok/s   weights %8.2f MB\n", f, fb / 1e6);
+    std::printf("  ternary  %9.1f tok/s   weights %8.2f MB\n", t, tb / 1e6);
+    std::printf("  speedup %.2fx, memory %.1fx smaller; same argmax as fp32 on %.0f%% of positions\n",
+                t / f, fb / tb, 100 * agree);
+    return 0;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -441,6 +509,7 @@ int main(int argc, char** argv) {
     if (cmd == "sample") return cmd_sample(a);
     if (cmd == "gen-reasoning") return cmd_gen_reasoning(a);
     if (cmd == "eval-reasoning") return cmd_eval_reasoning(a);
-    std::printf("usage: cxxgpt <bpe-train|text2tok|train|sample|gen-reasoning|eval-reasoning> [--options]\n");
+    if (cmd == "bench-infer") return cmd_bench_infer(a);
+    std::printf("usage: cxxgpt <bpe-train|text2tok|train|sample|gen-reasoning|eval-reasoning|bench-infer> [--options]\n");
     return cmd.empty() || cmd == "help" ? 0 : 1;
 }
