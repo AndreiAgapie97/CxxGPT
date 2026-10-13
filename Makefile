@@ -1,8 +1,13 @@
 CXX      ?= g++
 MARCH    ?= native
 EXTRA    ?=
-CXXFLAGS ?= -O3 -march=$(MARCH) -std=c++20 -pthread -Wall -Wextra $(EXTRA)
-SANFLAGS  = -O1 -g -march=$(MARCH) -std=c++20 -pthread $(EXTRA)
+# clang with -march=native on CPUs that report AVX10 warns that avx10.1-256
+# "will be promoted" to 512, which -Werror turns into a failed build.
+ifneq ($(findstring clang,$(shell $(CXX) --version 2>/dev/null)),)
+CLANG_WARN := -Wno-unknown-warning-option -Wno-invalid-feature-combination
+endif
+CXXFLAGS ?= -O3 -march=$(MARCH) -std=c++20 -pthread -Wall -Wextra $(CLANG_WARN) $(EXTRA)
+SANFLAGS  = -O1 -g -march=$(MARCH) -std=c++20 -pthread $(CLANG_WARN) $(EXTRA)
 
 HEADERS := $(wildcard src/*.h)
 TEST_HEADERS := $(wildcard tests/*.h)
