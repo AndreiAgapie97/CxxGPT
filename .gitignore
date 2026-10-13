@@ -10,3 +10,4 @@ gpu.o
 data/
 *.ckpt
 runs/
+.venv/
