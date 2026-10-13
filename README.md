@@ -1,7 +1,7 @@
 # CxxGPT
 
 CPU inference kernels for a ternary-weight (BitNet-style) Mixture-of-Experts
-layer, in one C++17 file: `ternary_moe.cpp`.
+layer, in one C++20 file: `ternary_moe.cpp`.
 
 Every weight is −1, 0 or +1, with one fp32 scale per matrix. A 4096×4096
 matrix takes 4 MB instead of 64 MB in fp32.
@@ -15,7 +15,7 @@ make bench      # tests, then GEMV and MoE benchmarks
 make asan tsan  # tests under AddressSanitizer+UBSan / ThreadSanitizer
 ```
 
-Or directly: `g++ -O3 -march=native -std=c++17 -pthread ternary_moe.cpp -o ternary_moe`,
+Or directly: `g++ -O3 -march=native -std=c++20 -pthread ternary_moe.cpp -o ternary_moe`,
 then `./ternary_moe [-t threads] [--tests]`.
 
 `-march` picks the kernels: scalar (`x86-64`), AVX2 (`haswell`), AVX2 +

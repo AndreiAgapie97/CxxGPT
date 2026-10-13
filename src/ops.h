@@ -1,0 +1,359 @@
+// ops.h — the layers of a transformer, each as a forward and a backward
+// function, in the style of llm.c.
+//
+// Conventions:
+// - Everything is templated on T. float trains; double runs the gradient
+//   checks, where finite differences need the extra precision.
+// - Activations are row-major [N, C], where N = batch * sequence length.
+// - A linear layer's weight is [out, in], and y = x · Wᵀ.
+// - Backward functions ACCUMULATE (+=) into every gradient they produce. The
+//   caller zeroes gradient buffers before a backward pass. That makes
+//   residual connections and tied weights free: two paths just add.
+#pragma once
+
+#include <cmath>
+#include <functional>
+#include <limits>
+#include <vector>
+
+#include "gemm.h"
+#include "thread_pool.h"
+
+// Runs fn over row ranges of [0, n) on the pool.
+inline void for_rows(int n, const std::function<void(int, int)>& fn, int min_per_thread = 4) {
+    pool().parallel_for(n, fn, min_per_thread);
+}
+
+// Dot product with 8 independent partial sums, so the compiler vectorizes
+// it without having to reorder a floating-point reduction itself.
+template <class T>
+inline T dot(const T* a, const T* b, int n) {
+    T acc[8] = {};
+    int i = 0;
+    for (; i + 8 <= n; i += 8)
+        for (int j = 0; j < 8; ++j) acc[j] += a[i + j] * b[i + j];
+    T s = 0;
+    for (; i < n; ++i) s += a[i] * b[i];
+    return s + ((acc[0] + acc[1]) + (acc[2] + acc[3])) + ((acc[4] + acc[5]) + (acc[6] + acc[7]));
+}
+
+// ---------------------------------------------------------------------------
+// Linear (no bias): y[N, OC] = x[N, IC] · w[OC, IC]ᵀ
+// ---------------------------------------------------------------------------
+template <class T>
+void linear_forward(T* y, const T* x, const T* w, int N, int IC, int OC) {
+    gemm(N, OC, IC, MatView<T>{x, IC, 1}, MatView<T>{w, 1, IC}, y, OC, false);
+}
+
+// dx += dy · w (skipped if dx is null), dw += dyᵀ · x.
+template <class T>
+void linear_backward(T* dx, T* dw, const T* dy, const T* x, const T* w, int N, int IC, int OC) {
+    if (dx) gemm(N, IC, OC, MatView<T>{dy, OC, 1}, MatView<T>{w, IC, 1}, dx, IC, true);
+    gemm(OC, IC, N, MatView<T>{dy, 1, OC}, MatView<T>{x, IC, 1}, dw, IC, true);
+}
+
+// ---------------------------------------------------------------------------
+// Token embedding: out[n] = wte[tokens[n]]
+// ---------------------------------------------------------------------------
+template <class T>
+void embedding_forward(T* out, const int* tokens, const T* wte, int N, int C) {
+    for_rows(N, [&](int n0, int n1) {
+        for (int n = n0; n < n1; ++n)
+            std::copy(wte + long(tokens[n]) * C, wte + long(tokens[n] + 1) * C, out + long(n) * C);
+    });
+}
+
+// Serial: two positions with the same token add into the same row.
+template <class T>
+void embedding_backward(T* dwte, const T* dout, const int* tokens, int N, int C) {
+    for (int n = 0; n < N; ++n) {
+        T* d = dwte + long(tokens[n]) * C;
+        const T* g = dout + long(n) * C;
+        for (int c = 0; c < C; ++c) d[c] += g[c];
+    }
+}
+
+// ---------------------------------------------------------------------------
+// RMSNorm: out = x / sqrt(mean(x²) + eps) * w. rstd[N] is saved for backward.
+// ---------------------------------------------------------------------------
+constexpr double kRmsEps = 1e-5;
+
+template <class T>
+void rmsnorm_forward(T* out, T* rstd, const T* x, const T* w, int N, int C) {
+    for_rows(N, [&](int n0, int n1) {
+        for (int n = n0; n < n1; ++n) {
+            const T* xn = x + long(n) * C;
+            const T r = T(1) / std::sqrt(dot(xn, xn, C) / T(C) + T(kRmsEps));
+            rstd[n] = r;
+            T* o = out + long(n) * C;
+            for (int c = 0; c < C; ++c) o[c] = xn[c] * r * w[c];
+        }
+    });
+}
+
+// With r = rstd and g_i = dout_i * w_i:
+//   dx_i = r * g_i - r³ / C * x_i * Σ_j g_j x_j,   dw_i = Σ_n dout_i * x_i * r.
+template <class T>
+void rmsnorm_backward(T* dx, T* dw, const T* dout, const T* x, const T* w, const T* rstd,
+                      int N, int C) {
+    for_rows(N, [&](int n0, int n1) {
+        for (int n = n0; n < n1; ++n) {
+            const T* xn = x + long(n) * C;
+            const T* dn = dout + long(n) * C;
+            const T r = rstd[n];
+            T gx = 0;
+            for (int c = 0; c < C; ++c) gx += dn[c] * w[c] * xn[c];
+            const T k = r * r * r * gx / T(C);
+            T* dxn = dx + long(n) * C;
+            for (int c = 0; c < C; ++c) dxn[c] += r * dn[c] * w[c] - k * xn[c];
+        }
+    });
+    // dw sums over rows, so split the columns instead.
+    pool().parallel_for(C, [&](int c0, int c1) {
+        for (int n = 0; n < N; ++n) {
+            const T* xn = x + long(n) * C;
+            const T* dn = dout + long(n) * C;
+            const T r = rstd[n];
+            for (int c = c0; c < c1; ++c) dw[c] += dn[c] * xn[c] * r;
+        }
+    }, 16);
+}
+
+// ---------------------------------------------------------------------------
+// Rotary position embedding, applied in place to the q and k parts of
+// qkv[B*T, 3C]. Each head's HS dimensions are split in halves; pair
+// (i, i + HS/2) is rotated by angle t * base^(-2i/HS). Backward rotates the
+// gradient by the opposite angle.
+// ---------------------------------------------------------------------------
+template <class T>
+struct RopeTable {
+    int T_max = 0, half = 0;
+    std::vector<T> cos, sin;  // [T_max, half]
+
+    RopeTable() = default;
+    RopeTable(int t_max, int head_size, double base = 10000.0)
+        : T_max(t_max), half(head_size / 2), cos(size_t(t_max) * half), sin(size_t(t_max) * half) {
+        for (int t = 0; t < t_max; ++t)
+            for (int i = 0; i < half; ++i) {
+                const double a = t * std::pow(base, -2.0 * i / head_size);
+                cos[size_t(t) * half + i] = T(std::cos(a));
+                sin[size_t(t) * half + i] = T(std::sin(a));
+            }
+    }
+};
+
+template <class T>
+void rope_apply(T* qkv, const RopeTable<T>& rope, int B, int Tn, int C, int NH, bool inverse) {
+    const int HS = C / NH, half = HS / 2;
+    for_rows(B * Tn, [&](int n0, int n1) {
+        for (int n = n0; n < n1; ++n) {
+            const int t = n % Tn;
+            const T* cs = &rope.cos[size_t(t) * half];
+            const T* sn = &rope.sin[size_t(t) * half];
+            for (int part = 0; part < 2; ++part)  // q, then k
+                for (int h = 0; h < NH; ++h) {
+                    T* x = qkv + long(n) * 3 * C + part * C + h * HS;
+                    for (int i = 0; i < half; ++i) {
+                        const T x0 = x[i], x1 = x[i + half];
+                        const T s = inverse ? -sn[i] : sn[i];
+                        x[i] = x0 * cs[i] - x1 * s;
+                        x[i + half] = x0 * s + x1 * cs[i];
+                    }
+                }
+        }
+    });
+}
+
+template <class T>
+void rope_forward(T* qkv, const RopeTable<T>& rope, int B, int Tn, int C, int NH) {
+    rope_apply(qkv, rope, B, Tn, C, NH, false);
+}
+
+// In place on dqkv: the gradient w.r.t. the rotated q, k becomes the gradient
+// w.r.t. the unrotated ones (a rotation's inverse is its transpose).
+template <class T>
+void rope_backward(T* dqkv, const RopeTable<T>& rope, int B, int Tn, int C, int NH) {
+    rope_apply(dqkv, rope, B, Tn, C, NH, true);
+}
+
+// ---------------------------------------------------------------------------
+// Causal multi-head attention. qkv[B*T, 3C] holds q, k, v side by side; head
+// h uses columns [h*HS, (h+1)*HS) of each. out[B*T, C]. att[B, NH, T, T]
+// keeps the softmax probabilities (zero above the diagonal) for backward.
+//
+// Each (batch, head) pair is one task on the pool and does its products with
+// the single-threaded gemm. Computing the full T x T score matrix wastes the
+// masked half, but the packed kernel is still far faster than dot loops.
+// ---------------------------------------------------------------------------
+template <class T>
+void attention_forward(T* out, T* att, const T* qkv, int B, int Tn, int C, int NH) {
+    const int HS = C / NH;
+    const T scale = T(1) / std::sqrt(T(HS));
+    pool().parallel_for(B * NH, [&](int j0, int j1) {
+        for (int j = j0; j < j1; ++j) {
+            const int b = j / NH, h = j % NH;
+            const T* q = qkv + long(b) * Tn * 3 * C + h * HS;
+            const T* k = q + C;
+            const T* v = q + 2 * C;
+            T* P = att + long(j) * Tn * Tn;
+            // P = Q · Kᵀ, then a scaled, causally masked softmax per row.
+            gemm(Tn, Tn, HS, MatView<T>{q, 3 * C, 1}, MatView<T>{k, 1, 3 * C}, P, Tn, false, false);
+            for (int t = 0; t < Tn; ++t) {
+                T* p = P + long(t) * Tn;
+                T mx = -std::numeric_limits<T>::infinity();
+                for (int s = 0; s <= t; ++s) mx = std::max(mx, p[s]);
+                T sum = 0;
+                for (int s = 0; s <= t; ++s) {
+                    p[s] = std::exp((p[s] - mx) * scale);
+                    sum += p[s];
+                }
+                const T inv = T(1) / sum;
+                for (int s = 0; s <= t; ++s) p[s] *= inv;
+                for (int s = t + 1; s < Tn; ++s) p[s] = 0;
+            }
+            // out = P · V
+            gemm(Tn, HS, Tn, MatView<T>{P, Tn, 1}, MatView<T>{v, 3 * C, 1},
+                 out + long(b) * Tn * C + h * HS, C, false, false);
+        }
+    }, 1);
+}
+
+// dqkv += gradient w.r.t. q, k, v. Heads write disjoint columns, so the
+// (batch, head) tasks never touch the same memory.
+template <class T>
+void attention_backward(T* dqkv, const T* dout, const T* att, const T* qkv, int B, int Tn, int C,
+                        int NH) {
+    const int HS = C / NH;
+    const T scale = T(1) / std::sqrt(T(HS));
+    pool().parallel_for(B * NH, [&](int j0, int j1) {
+        static thread_local std::vector<T> scratch;
+        scratch.resize(size_t(Tn) * Tn);
+        T* dS = scratch.data();
+        for (int j = j0; j < j1; ++j) {
+            const int b = j / NH, h = j % NH;
+            const long base = long(b) * Tn * 3 * C + h * HS;
+            const T* q = qkv + base;
+            const T* k = q + C;
+            const T* v = q + 2 * C;
+            T* dq = dqkv + base;
+            T* dk = dq + C;
+            T* dv = dq + 2 * C;
+            const T* P = att + long(j) * Tn * Tn;
+            const T* dO = dout + long(b) * Tn * C + h * HS;
+            // dP = dO · Vᵀ
+            gemm(Tn, Tn, HS, MatView<T>{dO, C, 1}, MatView<T>{v, 1, 3 * C}, dS, Tn, false, false);
+            // Softmax backward: dS = P ⊙ (dP - Σ P ⊙ dP), times the score scale.
+            // P is zero above the diagonal, so dS is too.
+            for (int t = 0; t < Tn; ++t) {
+                const T* p = P + long(t) * Tn;
+                T* d = dS + long(t) * Tn;
+                T pd = 0;
+                for (int s = 0; s <= t; ++s) pd += p[s] * d[s];
+                for (int s = 0; s <= t; ++s) d[s] = p[s] * (d[s] - pd) * scale;
+                for (int s = t + 1; s < Tn; ++s) d[s] = 0;
+            }
+            // dQ += dS · K,  dK += dSᵀ · Q,  dV += Pᵀ · dO
+            gemm(Tn, HS, Tn, MatView<T>{dS, Tn, 1}, MatView<T>{k, 3 * C, 1}, dq, 3 * C, true, false);
+            gemm(Tn, HS, Tn, MatView<T>{dS, 1, Tn}, MatView<T>{q, 3 * C, 1}, dk, 3 * C, true, false);
+            gemm(Tn, HS, Tn, MatView<T>{P, 1, Tn}, MatView<T>{dO, C, 1}, dv, 3 * C, true, false);
+        }
+    }, 1);
+}
+
+// ---------------------------------------------------------------------------
+// SwiGLU: inp[N, 2F] = [gate | up], out[N, F] = silu(gate) * up,
+// silu(g) = g * sigmoid(g).
+// ---------------------------------------------------------------------------
+template <class T>
+void swiglu_forward(T* out, const T* inp, int N, int F) {
+    for_rows(N, [&](int n0, int n1) {
+        for (int n = n0; n < n1; ++n) {
+            const T* g = inp + long(n) * 2 * F;
+            const T* u = g + F;
+            T* o = out + long(n) * F;
+            for (int i = 0; i < F; ++i) o[i] = g[i] / (T(1) + std::exp(-g[i])) * u[i];
+        }
+    });
+}
+
+// silu'(g) = sigmoid(g) * (1 + g * (1 - sigmoid(g)))
+template <class T>
+void swiglu_backward(T* dinp, const T* dout, const T* inp, int N, int F) {
+    for_rows(N, [&](int n0, int n1) {
+        for (int n = n0; n < n1; ++n) {
+            const T* g = inp + long(n) * 2 * F;
+            const T* u = g + F;
+            const T* d = dout + long(n) * F;
+            T* dg = dinp + long(n) * 2 * F;
+            T* du = dg + F;
+            for (int i = 0; i < F; ++i) {
+                const T sg = T(1) / (T(1) + std::exp(-g[i]));
+                dg[i] += d[i] * u[i] * sg * (T(1) + g[i] * (T(1) - sg));
+                du[i] += d[i] * g[i] * sg;
+            }
+        }
+    });
+}
+
+// ---------------------------------------------------------------------------
+// Elementwise helpers
+// ---------------------------------------------------------------------------
+template <class T>
+void add_forward(T* out, const T* a, const T* b, long n) {
+    for (long i = 0; i < n; ++i) out[i] = a[i] + b[i];
+}
+
+template <class T>
+void add_into(T* dst, const T* src, long n) {
+    for (long i = 0; i < n; ++i) dst[i] += src[i];
+}
+
+// ---------------------------------------------------------------------------
+// Softmax cross-entropy. logits[N, V] are replaced by probabilities in place.
+// losses[n] = -log p[target]; a target of -1 is ignored (loss 0, no
+// gradient). Returns the mean loss over counted positions.
+// ---------------------------------------------------------------------------
+template <class T>
+double cross_entropy_forward(T* probs, T* losses, const int* targets, int N, int V) {
+    for_rows(N, [&](int n0, int n1) {
+        for (int n = n0; n < n1; ++n) {
+            T* p = probs + long(n) * V;
+            T mx = p[0];
+            for (int i = 1; i < V; ++i) mx = std::max(mx, p[i]);
+            T sum = 0;
+            for (int i = 0; i < V; ++i) {
+                p[i] = std::exp(p[i] - mx);
+                sum += p[i];
+            }
+            const T inv = T(1) / sum;
+            for (int i = 0; i < V; ++i) p[i] *= inv;
+            // Clamped so a probability that underflowed to 0 gives a large
+            // finite loss instead of inf.
+            losses[n] = targets[n] < 0 ? T(0)
+                                       : -std::log(std::max(p[targets[n]], std::numeric_limits<T>::min()));
+        }
+    });
+    double total = 0;
+    int count = 0;
+    for (int n = 0; n < N; ++n)
+        if (targets[n] >= 0) total += double(losses[n]), ++count;
+    return count ? total / count : 0.0;
+}
+
+// dlogits = (p - onehot(target)) * dloss for counted rows, 0 for ignored
+// ones. Overwrites (not accumulates), and may alias probs.
+template <class T>
+void cross_entropy_backward(T* dlogits, const T* probs, const int* targets, int N, int V, T dloss) {
+    for_rows(N, [&](int n0, int n1) {
+        for (int n = n0; n < n1; ++n) {
+            const T* p = probs + long(n) * V;
+            T* d = dlogits + long(n) * V;
+            if (targets[n] < 0) {
+                std::fill(d, d + V, T(0));
+                continue;
+            }
+            for (int i = 0; i < V; ++i) d[i] = p[i] * dloss;
+            d[targets[n]] -= dloss;
+        }
+    });
+}

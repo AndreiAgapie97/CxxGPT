@@ -4,7 +4,7 @@
 // AVX2 / AVX-512 / VNNI, threaded across output rows.
 //
 // Build:
-//   g++ -O3 -march=native -std=c++17 -pthread ternary_moe.cpp -o ternary_moe
+//   g++ -O3 -march=native -std=c++20 -pthread ternary_moe.cpp -o ternary_moe
 //
 // Run:
 //   ./ternary_moe          # tests + benchmark

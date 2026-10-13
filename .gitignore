@@ -1,3 +1,5 @@
 ternary_moe
-ternary_moe_asan
-ternary_moe_tsan
+test_engine
+cxxgpt
+*_asan
+*_tsan
