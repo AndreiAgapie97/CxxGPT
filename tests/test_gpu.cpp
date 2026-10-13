@@ -82,6 +82,21 @@ void compare(const char* name, const Config& cfg, double tol_loss, double tol_gr
         gpu.get_params(p.data());
         worst_param = std::max(worst_param, rel_l2(p.data(), cpu.params.data(), p.size()));
     }
+    // The optimizer state matches the CPU's, and survives a trip through a
+    // second trainer, loaded as GpuBackend does (state first, then Muon).
+    std::vector<float> gm(p.size()), gv(p.size()), gm2(p.size()), gv2(p.size());
+    long gstep = 0, gstep2 = 0;
+    gpu.get_adam_state(&gstep, gm.data(), gv.data());
+    const double dm = rel_l2(gm.data(), opt.m.data(), gm.size()), dv = rel_l2(gv.data(), opt.v.data(), gv.size());
+    EXPECT(gstep == opt.step && dm <= 3 * tol_grad && dv <= 3 * tol_grad,
+           "%s: optimizer state differs from the CPU's (step %ld vs %ld, m by %g, v by %g)", name, gstep, opt.step,
+           dm, dv);
+    GpuTrainer gpu2(cfg, cpu.infos, /*tf32=*/false);
+    gpu2.set_adam_state(gstep, gm.data(), gv.data());
+    gpu2.set_muon(muon, opt.muon_momentum, opt.muon_steps);
+    gpu2.get_adam_state(&gstep2, gm2.data(), gv2.data());
+    EXPECT(gstep2 == gstep && gm2 == gm && gv2 == gv, "%s: optimizer state changed in a round trip", name);
+
     const auto load = gpu.take_expert_load();
     if (cfg.moe() && tol_grad < 1e-3)
         EXPECT(load == cpu.expert_load, "%s: expert loads differ (routing changed)", name);

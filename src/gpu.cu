@@ -35,7 +35,8 @@
     do {                                                                                       \
         const cublasStatus_t st_ = (call);                                                     \
         if (st_ != CUBLAS_STATUS_SUCCESS) {                                                    \
-            std::fprintf(stderr, "%s:%d: cuBLAS error %d\n", __FILE__, __LINE__, int(st_));    \
+            std::fprintf(stderr, "%s:%d: cuBLAS error: %s\n", __FILE__, __LINE__,              \
+                         cublasGetStatusString(st_));                                          \
             std::exit(1);                                                                      \
         }                                                                                      \
     } while (0)
@@ -563,6 +564,11 @@ struct GpuTrainer::Impl {
 
     DevBuf<float> params, grads, qparams, m, v;
     long adam_step = 0;
+    // v, AdamW's second moment, has room only for the tensors AdamW updates
+    // (with Muon on, its matrices need none: about 1 GB at 250 M
+    // parameters). v_at[i] is where tensor i's part starts, or kNoV.
+    static constexpr size_t kNoV = ~size_t(0);
+    std::vector<size_t> v_at;
     // Muon (set_muon): settings and Newton–Schulz work space.
     bool muon = false;
     float muon_mu = 0.95f;
@@ -618,10 +624,9 @@ struct GpuTrainer::Impl {
         grads.resize(n_params);
         qparams.resize(n_params);
         m.resize(n_params);
-        v.resize(n_params);
         grads.zero();
         m.zero();
-        v.zero();
+        layout_v();
 
         // Offsets by name, as Model's layout builds them.
         auto off = [&](const std::string& name, bool required) -> size_t {
@@ -1066,15 +1071,16 @@ struct GpuTrainer::Impl {
         ++adam_step;
         const float c1 = float(1.0 / (1.0 - std::pow(beta1, double(adam_step))));
         const float c2 = float(1.0 / (1.0 - std::pow(beta2, double(adam_step))));
-        for (const auto& info : infos) {
+        for (size_t i = 0; i < infos.size(); ++i) {
+            const ParamInfo& info = infos[i];
             const float wd = info.decay ? float(weight_decay) : 0.0f;
-            if (muon && muon_matrix(info)) {
+            if (v_at[i] == kNoV) {
                 muon_step(info, float(lr), wd, float(grad_scale));
                 continue;
             }
             const int grid = std::min(blocks_for(info.size), 4096);
             adamw<<<grid, kBlock>>>(params.p + info.offset, grads.p + info.offset, m.p + info.offset,
-                                    v.p + info.offset, info.size, float(lr), float(beta1), float(beta2), c1, c2,
+                                    v.p + v_at[i], info.size, float(lr), float(beta1), float(beta2), c1, c2,
                                     float(eps), wd, float(grad_scale));
             LAUNCH_CHECK();
         }
@@ -1092,10 +1098,28 @@ struct GpuTrainer::Impl {
         return {info.count * parts, info.rows / parts, info.cols};
     }
 
+    // Lays v out for the current optimizer, keeping what it holds.
+    void layout_v() {
+        std::vector<size_t> at(infos.size(), kNoV);
+        size_t n = 0;
+        for (size_t i = 0; i < infos.size(); ++i)
+            if (!(muon && muon_matrix(infos[i]))) at[i] = n, n += infos[i].size;
+        DevBuf<float> nv;
+        nv.resize(n);
+        nv.zero();
+        for (size_t i = 0; i < v_at.size(); ++i)
+            if (at[i] != kNoV && v_at[i] != kNoV)
+                CUDA_CHECK(cudaMemcpy(nv.p + at[i], v.p + v_at[i], infos[i].size * sizeof(float),
+                                      cudaMemcpyDeviceToDevice));
+        v = std::move(nv);  // the old buffer goes with nv
+        v_at = std::move(at);
+    }
+
     void set_muon(bool on, double momentum, int ns_steps) {
         muon = on;
         muon_mu = float(momentum);
         muon_ns = ns_steps;
+        layout_v();
         if (!on) return;
         for (const auto& info : infos) {
             if (!muon_matrix(info)) continue;
@@ -1151,13 +1175,20 @@ void GpuTrainer::set_adam_state(long step, const float* m, const float* v) {
     impl_->adam_step = step;
     if (m) to_device(impl_->m.p, m, impl_->n_params);
     else impl_->m.zero();
-    if (v) to_device(impl_->v.p, v, impl_->n_params);
-    else impl_->v.zero();
+    impl_->v.zero();
+    if (!v) return;
+    for (size_t i = 0; i < impl_->infos.size(); ++i)
+        if (impl_->v_at[i] != Impl::kNoV)
+            to_device(impl_->v.p + impl_->v_at[i], v + impl_->infos[i].offset, impl_->infos[i].size);
 }
 void GpuTrainer::get_adam_state(long* step, float* m, float* v) const {
     if (step) *step = impl_->adam_step;
     if (m) to_host(m, impl_->m.p, impl_->n_params);
-    if (v) to_host(v, impl_->v.p, impl_->n_params);
+    if (!v) return;
+    std::fill(v, v + impl_->n_params, 0.0f);  // Muon's matrices have none, as on the CPU
+    for (size_t i = 0; i < impl_->infos.size(); ++i)
+        if (impl_->v_at[i] != Impl::kNoV)
+            to_host(v + impl_->infos[i].offset, impl_->v.p + impl_->v_at[i], impl_->infos[i].size);
 }
 
 void GpuTrainer::set_router_bias(const std::vector<std::vector<float>>& bias) {
