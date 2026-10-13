@@ -392,7 +392,9 @@ int cmd_prep_qa(Args& a) {
     return 0;
 }
 
-void print_eval(const EvalResult& r, bool show_failures) {
+// The table of accuracy per task and difficulty, then up to show_failures
+// of the wrong answers.
+void print_eval(const EvalResult& r, size_t show_failures) {
     std::map<std::string, std::map<int, std::pair<int, int>>> table;
     int min_d = 1 << 30, max_d = -(1 << 30);
     for (const auto& [key, cell] : r.by_task) {
@@ -419,11 +421,16 @@ void print_eval(const EvalResult& r, bool show_failures) {
         std::printf(" %5.1f%%\n", 100.0 * c / std::max(1, n));
     }
     std::printf("overall %.1f%% (%d / %d)\n", 100.0 * r.correct / std::max(1, r.total), r.correct, r.total);
-    if (show_failures)
-        for (const auto& [p, text] : r.failures)
-            std::printf("--- wrong (%s d=%d): %s\n    expected: %s\n    got:      %s\n", p.task.c_str(),
-                        p.difficulty, p.question.c_str(), (p.steps + " #### " + p.answer).c_str(),
-                        text.c_str());
+    // Multi-line answers (GSM8K's) stay indented under their label.
+    auto indent = [](std::string t) {
+        for (size_t i = 0; (i = t.find('\n', i)) != std::string::npos; i += 15) t.replace(i, 1, "\n              ");
+        return t;
+    };
+    for (size_t i = 0; i < std::min(show_failures, r.failures.size()); ++i) {
+        const auto& [p, text] = r.failures[i];
+        std::printf("--- wrong (%s d=%d): %s\n    expected: %s\n    got:      %s\n", p.task.c_str(), p.difficulty,
+                    p.question.c_str(), indent(p.steps + " #### " + p.answer).c_str(), indent(text).c_str());
+    }
 }
 
 int cmd_eval_reasoning(Args& a) {
@@ -445,7 +452,7 @@ int cmd_eval_reasoning(Args& a) {
     }
     const double t0 = now_seconds();
     const EvalResult r = eval_reasoning(model, test, tok, batch);
-    print_eval(r, show);
+    print_eval(r, show ? r.failures.size() : 0);
     std::printf("(%.1f s)\n", now_seconds() - t0);
     return 0;
 }
@@ -659,7 +666,7 @@ int cmd_train(Args& a) {
         const double t0 = now_seconds();
         const EvalResult r = eval_reasoning(model, reason_test, tok);
         std::printf("reasoning eval at step %ld (%.1f s):\n", at_step, now_seconds() - t0);
-        print_eval(r, false);
+        print_eval(r, 1);  // one wrong answer, to see what the model writes
         if (log) {
             std::fprintf(log, "# reasoning step %ld: %d/%d\n", at_step, r.correct, r.total);
             std::fflush(log);
