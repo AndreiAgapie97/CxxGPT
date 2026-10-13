@@ -129,14 +129,42 @@ One seed each; with 960 problems, accuracy has a standard error of about
 
 - **MoE helps:** at the same compute per token, its validation loss is
   13% lower than dense.
-- **Ternary costs dense little** (0.1136 → 0.1152) but costs MoE much
-  more (0.0986 → 0.1116), which erases most of MoE's gain. A likely cause:
-  each expert sees only a quarter of the tokens, so its full-precision
-  latent weights move slowly and rarely cross the thresholds that change
-  their ternary values. Higher learning rates for ternary weights and
-  Muon are the next experiments.
+- **With AdamW, ternary costs dense little** (0.1136 → 0.1152) but costs
+  MoE much more (0.0986 → 0.1116), which erases most of MoE's gain. Muon
+  recovers it (below).
 - **Nobody generalizes to longer problems (d = 4).** Small transformers
   are known to struggle with this on arithmetic; it is on the list.
+- **Chain** (multi-hop variable lookup) is the hardest task. Most
+  failures are a wrong first step: the solution resolves variables from
+  the given value toward the question, so the model has to pick the path
+  to the queried variable before it has written anything about it.
+
+### Muon
+
+The same runs with Muon for the matrices inside the blocks (attention and
+FFN projections, each expert on its own); embeddings, norms and routers
+stay on AdamW. Same learning rate and steps.
+
+| variant | optimizer | val loss | accuracy | d = 1–3 | d = 4 |
+|---|---|---:|---:|---:|---:|
+| dense | AdamW | 0.1136 | 59.4% | 78.5% | 2.1% |
+| dense | Muon | **0.0894** | **64.9%** | **84.9%** | 5.0% |
+| MoE, ternary | AdamW | 0.1116 | 55.2% | 72.4% | 3.8% |
+| MoE, ternary | Muon | 0.0974 | 61.1% | 79.9% | 5.0% |
+
+- **Muon lowers the validation loss** by 21% on dense and 13% on ternary
+  MoE.
+- **Its cost** is the Newton–Schulz iterations on every matrix, which
+  grow with the number of parameters, not of tokens: here (4096 tokens
+  per step) 10% of the step time on dense and 15% on ternary MoE, whose
+  experts all go through it every step. For the laptop's d768 ternary MoE
+  at 65536 tokens per step it comes to about 13% of the arithmetic;
+  `scripts/probe.sh` measures the speed with Muon on.
+- **With Muon, the ternary MoE matches the full-precision MoE trained
+  with AdamW** (0.0974 vs 0.0986): 1.58-bit weights, at no loss.
+- On ternary MoE, Muon starts slower (validation 0.50 vs 0.43 at step
+  500) and is ahead from step 1000 on (0.154 vs 0.208).
+- `scripts/night.sh` uses Muon by default.
 
 ### Inference kernels
 
@@ -154,6 +182,25 @@ weights; medians in ms. The baseline is a vectorized fp32 dot product.
 A 4096×4096 ternary matrix takes 4 MB instead of 64 MB in fp32. One MoE
 layer (d_model 512, 8 experts, top-2) decodes a token in about 56 µs on 4
 threads.
+
+### Whole-model decoding
+
+`cxxgpt bench-infer`, same VM: one sequence, 128 tokens with a KV cache,
+median of 9 runs. The baseline is the same model on our vectorized fp32
+decoding path, with the ternary weights as plain floats.
+
+| model | threads | fp32 | ternary | speedup | weights |
+|---|---:|---:|---:|---:|---|
+| ternary MoE from the comparison (9.8 M, 3.3 M active) | 4 | 3431 tok/s | 9806 tok/s | 2.9× | 39 MB → 2.7 MB |
+| | 1 | 1511 tok/s | 7601 tok/s | 5.0× | |
+| MoE, d1024, 8 layers, random weights (304 M, 102 M active) | 4 | 120 tok/s | 759 tok/s | 6.3× | 1218 MB → 77 MB |
+| | 1 | 30.5 tok/s | 328 tok/s | 10.7× | |
+
+The bigger the model, the bigger the gain: fp32 decoding has to read
+every active weight from memory for every token, and ternary weights are
+16 times smaller. The engine picks the same next token as the model
+computes in training on 98–100% of positions; the rest are int8 rounding
+flips between near-equal candidates.
 
 ## How the kernels work
 
@@ -175,5 +222,4 @@ threads.
   checked on the GSM8K test set ([docs/LAPTOP.md](docs/LAPTOP.md)).
 - Length generalization on the curriculum.
 - Faster GPU training: fused attention, bf16.
-- Run an existing open ternary model (BitNet b1.58 2B4T) on our inference
-  engine and compare speed with bitnet.cpp.
+- Benchmark the inference engine against bitnet.cpp at equal model size.

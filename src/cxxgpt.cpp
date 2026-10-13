@@ -834,8 +834,17 @@ int cmd_bench_infer(Args& a) {
     Rng rng(7);
     std::vector<int> seq(tokens);
     for (int& t : seq) t = int(rng.below(cfg.vocab));
+    // What the model computes as trained (ternary weights and int8
+    // activations, in fp32 arithmetic): the engine should pick the same
+    // next token everywhere. The fp32 baseline skips the int8 rounding, so
+    // where the top two tokens are close (random input makes them close
+    // often) it can pick the other one.
+    std::vector<int> top_model;
+    model.decode_begin(1, {0});
+    for (int pos = 0; pos < tokens; ++pos)
+        top_model.push_back(pick_token(model.decode_step(&seq[pos], pos), cfg.vocab, 0.0, nullptr));
     std::vector<double> t_fp32, t_tern;
-    double agree = 0;
+    double agree = 0, agree_model = 0;
     for (int r = 0; r < reps; ++r) {
         double t0 = now_seconds();
         fp32.decode_begin(1, {0});
@@ -847,11 +856,17 @@ int cmd_bench_infer(Args& a) {
         t_fp32.push_back(now_seconds() - t0);
         t0 = now_seconds();
         engine.reset();
-        int same = 0;
+        std::vector<int> top_tern;
         for (int pos = 0; pos < tokens; ++pos)
-            same += pick_token(engine.step(seq[pos]), cfg.vocab, 0.0, nullptr) == top_fp32[pos];
+            top_tern.push_back(pick_token(engine.step(seq[pos]), cfg.vocab, 0.0, nullptr));
         t_tern.push_back(now_seconds() - t0);
+        int same = 0, same_model = 0;
+        for (int pos = 0; pos < tokens; ++pos) {
+            same += top_tern[pos] == top_fp32[pos];
+            same_model += top_tern[pos] == top_model[pos];
+        }
         agree = double(same) / tokens;
+        agree_model = double(same_model) / tokens;
     }
     auto median = [](std::vector<double> v) {
         std::sort(v.begin(), v.end());
@@ -862,8 +877,9 @@ int cmd_bench_infer(Args& a) {
     std::printf("decode, 1 sequence, %d tokens, median of %d, %d threads:\n", tokens, reps, tp.size());
     std::printf("  fp32     %9.1f tok/s   weights %8.2f MB\n", f, fb / 1e6);
     std::printf("  ternary  %9.1f tok/s   weights %8.2f MB\n", t, tb / 1e6);
-    std::printf("  speedup %.2fx, memory %.1fx smaller; same argmax as fp32 on %.0f%% of positions\n",
-                t / f, fb / tb, 100 * agree);
+    std::printf("  speedup %.2fx, memory %.1fx smaller\n", t / f, fb / tb);
+    std::printf("  same next token as the model as trained on %.0f%% of positions (as fp32: %.0f%%)\n",
+                100 * agree_model, 100 * agree);
     return 0;
 }
 
