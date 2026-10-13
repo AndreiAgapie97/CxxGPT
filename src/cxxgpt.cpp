@@ -480,7 +480,7 @@ int cmd_train(Args& a) {
 
         const bool last = step + 1 == steps;
         double vloss = -1;
-        if (eval_every > 0 && ((step + 1) % eval_every == 0 || last) && val_hi > val_lo + Tn + 1)
+        if (eval_every > 0 && ((step + 1) % eval_every == 0 || last) && val_hi >= val_lo + Tn + 1)
             vloss = eval_loss(model, *val, val_lo, val_hi, B, Tn, eval_batches);
         if ((step + 1) % log_every == 0 || last || vloss >= 0) {
             std::printf("step %6ld | loss %.4f", step + 1, loss_acc / n_acc);

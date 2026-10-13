@@ -9,6 +9,8 @@
 #include "test_reasoning.h"
 #include "test_tokenizer.h"
 #include "test_data.h"
+#include "test_numerics.h"
+#include "test_train.h"
 
 int main(int argc, char** argv) {
     int threads = int(std::thread::hardware_concurrency());
@@ -23,6 +25,8 @@ int main(int argc, char** argv) {
         {"reasoning", test_reasoning},
         {"tokenizer", test_tokenizer},
         {"data", test_data},
+        {"numerics", test_numerics},
+        {"train", test_train},
     };
     for (auto& s : suites) {
         const int before = g_failures;

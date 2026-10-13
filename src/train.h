@@ -62,13 +62,13 @@ inline double clip_grad_norm(Model<float>& model, double max_norm) {
     pool().parallel_for(blocks, [&](int b0, int b1) {
         for (int b = b0; b < b1; ++b) {
             const size_t i0 = size_t(b) * kBlock, i1 = std::min(n, i0 + kBlock);
-            float acc[8] = {};
+            double acc[8] = {};
             size_t i = i0;
             for (; i + 8 <= i1; i += 8)
-                for (int j = 0; j < 8; ++j) acc[j] += g[i + j] * g[i + j];
+                for (int j = 0; j < 8; ++j) acc[j] += double(g[i + j]) * g[i + j];
             double s = 0.0;
             for (; i < i1; ++i) s += double(g[i]) * g[i];
-            for (float a : acc) s += a;
+            for (double a : acc) s += a;
             partial[b] = s;
         }
     }, 1);
@@ -141,9 +141,10 @@ struct TokenData {
     // B windows of Tn + 1 tokens starting at random offsets in [lo, hi - Tn - 1].
     // Targets that the mask excludes become -1.
     void sample_batch(Rng& rng, int B, int Tn, size_t lo, size_t hi, int* inputs, int* targets) const {
-        CHECK(hi > lo + size_t(Tn) + 1, "data range of %zu tokens is shorter than a sequence", hi - lo);
+        CHECK(B > 0 && Tn > 0 && lo <= hi && hi <= tokens.size(), "invalid data sampling range or shape");
+        CHECK(hi - lo >= size_t(Tn) + 1, "data range of %zu tokens is shorter than a sequence", hi - lo);
         for (int b = 0; b < B; ++b) {
-            const size_t s = lo + rng.below(hi - lo - Tn - 1);
+            const size_t s = lo + rng.below(hi - lo - Tn);
             for (int t = 0; t < Tn; ++t) {
                 inputs[b * Tn + t] = tokens[s + t];
                 const bool train = mask.empty() || mask[s + t + 1];
