@@ -52,9 +52,10 @@ gpu-test: test_gpu
 
 .PHONY: all test bench asan tsan clean gpu gpu-test
 
-test: ternary_moe test_engine
+test: ternary_moe test_engine cxxgpt
 	./ternary_moe --tests
 	./test_engine
+	bash tests/test_cli.sh
 
 bench: ternary_moe
 	./ternary_moe

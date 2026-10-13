@@ -39,6 +39,11 @@ struct Config {
 
     void validate() const {
         CHECK(vocab > 0 && seq_len > 0 && n_layers > 0, "bad sizes");
+        // Validate divisors before head_size()/ehidden() or tensor allocation.
+        CHECK(d_model > 0 && n_heads > 0, "d_model and n_heads must be positive");
+        CHECK(ffn_hidden >= 0 && expert_hidden >= 0, "hidden sizes must be nonnegative (0 = auto)");
+        CHECK(n_experts >= 0 && n_shared >= 0, "expert counts must be nonnegative");
+        CHECK(top_k >= 1, "top_k must be positive");
         CHECK(d_model % n_heads == 0, "d_model %d not divisible by n_heads %d", d_model, n_heads);
         CHECK(head_size() % 2 == 0, "head size must be even for RoPE");
         CHECK(!moe() || (top_k >= 1 && top_k <= n_experts), "top_k must be in [1, n_experts]");
