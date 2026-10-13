@@ -11,6 +11,7 @@
 //   residual connections and tied weights free: two paths just add.
 #pragma once
 
+#include <algorithm>
 #include <cmath>
 #include <functional>
 #include <limits>
@@ -354,6 +355,47 @@ void cross_entropy_backward(T* dlogits, const T* probs, const int* targets, int 
             }
             for (int i = 0; i < V; ++i) d[i] = p[i] * dloss;
             d[targets[n]] -= dloss;
+        }
+    });
+}
+
+// ---------------------------------------------------------------------------
+// BitLinear quantizers (BitNet b1.58). Training keeps fp32 master weights;
+// the forward pass uses quantized copies, and backward passes gradients
+// straight through the rounding (the straight-through estimator).
+// ---------------------------------------------------------------------------
+
+// Ternary weights: gamma = mean |w|, w_q = clip(round(w / gamma), -1, 1) * gamma.
+// The inference kernels store exactly these values: the sign pattern as
+// bitplanes and gamma as the matrix scale.
+template <class T>
+T ternary_quantize(T* wq, const T* w, long n) {
+    double s = 0.0;
+    for (long i = 0; i < n; ++i) s += std::abs(double(w[i]));
+    const T gamma = T(s / double(n)) + T(1e-8);
+    for (long i = 0; i < n; ++i) {
+        const T r = std::nearbyint(w[i] / gamma);
+        wq[i] = std::clamp(r, T(-1), T(1)) * gamma;
+    }
+    return gamma;
+}
+
+// int8 activations, one scale per row (token): x_q = round(x * 127 / max|x|)
+// * max|x| / 127. Same symmetric [-127, 127] range as the inference kernels.
+template <class T>
+void act_quantize(T* xq, const T* x, int N, int C) {
+    for_rows(N, [&](int n0, int n1) {
+        for (int n = n0; n < n1; ++n) {
+            const T* xn = x + long(n) * C;
+            T* q = xq + long(n) * C;
+            T amax = 0;
+            for (int c = 0; c < C; ++c) amax = std::max(amax, std::abs(xn[c]));
+            if (amax == T(0)) {
+                std::fill(q, q + C, T(0));
+                continue;
+            }
+            const T s = T(127) / amax, inv = amax / T(127);
+            for (int c = 0; c < C; ++c) q[c] = std::nearbyint(xn[c] * s) * inv;
         }
     });
 }

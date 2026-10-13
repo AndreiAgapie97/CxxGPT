@@ -3,3 +3,6 @@ test_engine
 cxxgpt
 *_asan
 *_tsan
+data/
+*.ckpt
+runs/

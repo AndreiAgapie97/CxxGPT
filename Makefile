@@ -7,7 +7,7 @@ SANFLAGS  = -O1 -g -march=$(MARCH) -std=c++20 -pthread $(EXTRA)
 HEADERS := $(wildcard src/*.h)
 TEST_HEADERS := $(wildcard tests/*.h)
 
-all: ternary_moe test_engine
+all: ternary_moe test_engine cxxgpt
 
 ternary_moe: ternary_moe.cpp src/thread_pool.h
 	$(CXX) $(CXXFLAGS) $< -o $@

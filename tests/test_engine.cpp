@@ -4,6 +4,7 @@
 #include <cstring>
 #include <thread>
 
+#include "test_model.h"
 #include "test_ops.h"
 
 int main(int argc, char** argv) {
@@ -15,6 +16,7 @@ int main(int argc, char** argv) {
 
     struct { const char* name; void (*fn)(); } suites[] = {
         {"ops", test_ops},
+        {"model", test_model},
     };
     for (auto& s : suites) {
         const int before = g_failures;
