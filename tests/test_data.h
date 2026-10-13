@@ -5,6 +5,7 @@
 
 #include "../src/json.h"
 #include "../src/reasoning.h"
+#include "../src/train.h"
 #include "test_util.h"
 
 inline void test_json() {
@@ -49,7 +50,28 @@ inline void test_problem_file() {
                "problem %zu changed in the round trip", i);
 }
 
+// A token file written in pieces reads back as one.
+inline void test_token_writer() {
+    const std::string path = "/tmp/cxxgpt_test_tokens.tok";
+    std::vector<uint16_t> all;
+    {
+        TokenWriter w(path, 1000);
+        for (int piece = 0; piece < 3; ++piece) {
+            std::vector<uint16_t> t;
+            for (int i = 0; i < 100 + piece; ++i) t.push_back(uint16_t((piece * 37 + i * 11) % 1000));
+            w.write(t);
+            all.insert(all.end(), t.begin(), t.end());
+        }
+        w.write({});
+    }  // the destructor finishes the file
+    const TokenData d = TokenData::load(path);
+    std::remove(path.c_str());
+    EXPECT(d.vocab == 1000 && d.mask.empty() && d.tokens == all, "token file read back wrongly (%zu tokens)",
+           d.tokens.size());
+}
+
 inline void test_data() {
     test_json();
     test_problem_file();
+    test_token_writer();
 }

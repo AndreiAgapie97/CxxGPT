@@ -98,28 +98,6 @@ int cmd_bpe_train(Args& a) {
     return 0;
 }
 
-int cmd_text2tok(Args& a) {
-    const std::string in = a.str("in"), out = a.str("out"), bpe = a.str("bpe");
-    a.done();
-    CHECK(!in.empty() && !out.empty(), "usage: cxxgpt text2tok --in text.txt --out data.tok [--bpe tok.bpe]");
-    const std::string text = read_file(in);
-    TokenData d;
-    if (bpe.empty()) {
-        d.vocab = 256;
-        d.tokens.assign(text.begin(), text.end());
-        for (auto& t : d.tokens) t &= 0xFF;  // char may be signed
-    } else {
-        Tokenizer tok;
-        tok.load(bpe);
-        d.vocab = uint32_t(tok.vocab_size());
-        const std::vector<int> ids = tok.encode(text);
-        d.tokens.assign(ids.begin(), ids.end());
-    }
-    d.save(out);
-    std::printf("%zu bytes -> %zu tokens (vocab %u) -> %s\n", text.size(), d.tokens.size(), d.vocab, out.c_str());
-    return 0;
-}
-
 std::vector<std::string> split(const std::string& s, char sep) {
     std::vector<std::string> out;
     size_t pos = 0;
@@ -139,6 +117,111 @@ Tokenizer load_tokenizer(const std::string& path) {
     Tokenizer tok;
     if (!path.empty()) tok.load(path);
     return tok;
+}
+
+// Text to a token file. The file streams through in blocks that are
+// encoded in parallel, so it can be far bigger than memory. With --doc-sep S
+// the text is a series of documents separated by S (TinyStories uses
+// "<|endoftext|>"); each document is trimmed and starts with BOS.
+int cmd_text2tok(Args& a) {
+    const std::string in = a.str("in"), out = a.str("out"), bpe = a.str("bpe"), sep = a.str("doc-sep");
+    const int threads = threads_arg(a);
+    a.done();
+    CHECK(!in.empty() && !out.empty(),
+          "usage: cxxgpt text2tok --in text.txt --out data.tok [--bpe tok.bpe] [--doc-sep STR]");
+    const Tokenizer tok = load_tokenizer(bpe);
+    std::vector<Tokenizer> toks(threads, tok);  // encode() caches chunks, so one per thread
+    std::ifstream f(in, std::ios::binary);
+    CHECK(f, "cannot open %s", in.c_str());
+    TokenWriter w(out, uint32_t(tok.vocab_size()));
+
+    // Cuts are made where encoding in pieces matches encoding the whole:
+    // right after a separator, or else at Tokenizer::next_safe_split.
+    constexpr size_t kBlock = 8 << 20;
+    constexpr size_t npos = std::string::npos;
+    auto encode_block = [&](std::string_view blk, const Tokenizer& t, std::vector<uint16_t>& o, long& docs) {
+        o.clear();
+        if (sep.empty()) {
+            for (int id : t.encode(blk)) o.push_back(uint16_t(id));
+            return;
+        }
+        for (size_t p = 0; p <= blk.size();) {
+            size_t q = blk.find(sep, p);
+            if (q == npos) q = blk.size();
+            const std::string doc = trim(std::string(blk.substr(p, q - p)));
+            if (!doc.empty()) {
+                o.push_back(uint16_t(kBos));
+                for (int id : t.encode(doc)) o.push_back(uint16_t(id));
+                ++docs;
+            }
+            p = q + sep.size();
+        }
+    };
+    std::string buf;
+    bool eof = false, starved = false;
+    size_t bytes = 0;
+    long docs = 0;
+    const double t0 = now_seconds();
+    double last_report = t0;
+    std::vector<std::vector<uint16_t>> outs(threads);
+    std::vector<long> block_docs(threads);
+    while (true) {
+        while (!eof && (buf.size() < kBlock * threads || starved)) {
+            const size_t old = buf.size();
+            buf.resize(old + kBlock);
+            f.read(buf.data() + old, std::streamsize(kBlock));
+            buf.resize(old + size_t(f.gcount()));
+            eof = !f;
+            starved = false;
+        }
+        const std::string_view all(buf);
+        std::vector<std::string_view> blocks;
+        size_t pos = 0;
+        while (pos < all.size() && blocks.size() < size_t(threads)) {
+            const size_t target = pos + kBlock;
+            size_t end;
+            if (target >= all.size()) {
+                end = eof ? all.size() : npos;
+            } else if (sep.empty()) {
+                end = Tokenizer::next_safe_split(all, target);
+                if (end == all.size() && !eof) end = npos;
+            } else {
+                end = all.find(sep, target);
+                end = end != npos ? end + sep.size() : eof ? all.size() : npos;
+            }
+            if (end == npos) break;
+            blocks.push_back(all.substr(pos, end - pos));
+            pos = end;
+        }
+        if (blocks.empty()) {
+            if (eof) break;
+            starved = true;  // no place to cut yet: read more
+            continue;
+        }
+        std::vector<std::thread> pool;
+        for (size_t i = 0; i < blocks.size(); ++i) {
+            block_docs[i] = 0;
+            pool.emplace_back([&, i] { encode_block(blocks[i], toks[i], outs[i], block_docs[i]); });
+        }
+        for (auto& th : pool) th.join();
+        for (size_t i = 0; i < blocks.size(); ++i) {
+            w.write(outs[i]);
+            docs += block_docs[i];
+        }
+        bytes += pos;
+        buf.erase(0, pos);
+        if (now_seconds() - last_report > 10) {
+            last_report = now_seconds();
+            std::printf("  %.0f MB -> %.1f M tokens (%.1f MB/s)\n", bytes / 1e6, w.count() / 1e6,
+                        bytes / 1e6 / (last_report - t0));
+            std::fflush(stdout);
+        }
+    }
+    w.close();
+    std::printf("%zu bytes -> %llu tokens (vocab %d", bytes, (unsigned long long)w.count(), tok.vocab_size());
+    if (!sep.empty()) std::printf(", %ld documents", docs);
+    std::printf(") in %.1f s -> %s\n", now_seconds() - t0, out.c_str());
+    return 0;
 }
 
 // BOS and the prompt (not trained on), then the completion (trained on).
@@ -227,12 +310,35 @@ int cmd_gen_reasoning(Args& a) {
     return 0;
 }
 
-// Question/answer pairs from a JSON Lines file (GSM8K's format: the answer
-// is the worked solution, then "#### " and the final answer) to a problems
-// file for eval-reasoning (OUT.txt) and masked training tokens (OUT.tok).
+// "1,080" -> "1080": commas that group digits go, so the exact-match check
+// ignores digit grouping; other commas, as in "(1, 2)", stay.
+std::string strip_digit_commas(const std::string& s) {
+    auto digit = [&](size_t i) { return i < s.size() && s[i] >= '0' && s[i] <= '9'; };
+    std::string o;
+    for (size_t i = 0; i < s.size(); ++i) {
+        const bool grouping = s[i] == ',' && i > 0 && digit(i - 1) && digit(i + 1) && digit(i + 2) &&
+                              digit(i + 3) && !digit(i + 4);
+        if (!grouping) o += s[i];
+    }
+    return o;
+}
+
+// A JSON number as an answer: 18 -> "18", 2.5 -> "2.5".
+std::string format_number(double v) {
+    char buf[32];
+    std::snprintf(buf, sizeof buf, "%.15g", v);
+    return buf;
+}
+
+// Question/answer pairs from a JSON Lines file to a problems file for
+// eval-reasoning (OUT.txt) and masked training tokens (OUT.tok). By default
+// the answer is GSM8K's: the worked solution, then "#### " and the final
+// answer. With --final-key, the final answer is a field of its own and the
+// whole answer field is the solution.
 int cmd_prep_qa(Args& a) {
     const std::string in = a.str("in"), out = a.str("out"), task = a.str("task", "qa");
     const std::string q_key = a.str("question-key", "question"), a_key = a.str("answer-key", "answer");
+    const std::string final_key = a.str("final-key");
     const bool keep_calc = a.flag("keep-calc");
     const Tokenizer tok = load_tokenizer(a.str("bpe"));
     a.done();
@@ -250,18 +356,29 @@ int cmd_prep_qa(Args& a) {
         const Json *q = j.get(q_key), *ans = j.get(a_key);
         CHECK(q && ans && q->type == Json::String && ans->type == Json::String,
               "%s:%ld: missing string fields '%s' and '%s'", in.c_str(), line_no, q_key.c_str(), a_key.c_str());
-        const size_t mark = ans->str.rfind("#### ");
-        if (mark == std::string::npos) {
-            ++skipped;
-            continue;
-        }
         Problem p;
         p.task = task;
         p.question = trim(q->str);
-        p.steps = trim(ans->str.substr(0, mark));
-        // "1,080" -> "1080", so the exact-match check ignores digit grouping.
-        for (char c : trim(ans->str.substr(mark + 5)))
-            if (c != ',') p.answer += c;
+        if (final_key.empty()) {
+            const size_t mark = ans->str.rfind("#### ");
+            if (mark == std::string::npos) {
+                ++skipped;
+                continue;
+            }
+            p.steps = trim(ans->str.substr(0, mark));
+            p.answer = strip_digit_commas(trim(ans->str.substr(mark + 5)));
+        } else {
+            const Json* fin = j.get(final_key);
+            CHECK(fin, "%s:%ld: missing field '%s'", in.c_str(), line_no, final_key.c_str());
+            p.steps = trim(ans->str);
+            if (fin->type == Json::String) p.answer = strip_digit_commas(trim(fin->str));
+            else if (fin->type == Json::Number) p.answer = format_number(fin->number);
+        }
+        // One line only: the format ends the answer at the first newline.
+        if (p.answer.empty() || p.answer.find('\n') != std::string::npos || p.question.empty()) {
+            ++skipped;
+            continue;
+        }
         if (!keep_calc) {  // drop calculator annotations: "48/2 = <<48/2=24>>24" -> "48/2 = 24"
             std::string t;
             for (size_t i = 0; i < p.steps.size();) {
@@ -282,7 +399,7 @@ int cmd_prep_qa(Args& a) {
     d.vocab = uint32_t(tok.vocab_size());
     for (const Problem& p : problems) append_problem(d, p, tok);
     d.save(out + ".tok");
-    std::printf("%s: %zu problems (%ld without '#### ' skipped) -> %s.txt, %s.tok (%zu tokens)\n", in.c_str(),
+    std::printf("%s: %zu problems (%ld without a usable answer skipped) -> %s.txt, %s.tok (%zu tokens)\n", in.c_str(),
                 problems.size(), skipped, out.c_str(), out.c_str(), d.tokens.size());
     return 0;
 }

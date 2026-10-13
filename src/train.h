@@ -154,6 +154,45 @@ struct TokenData {
     }
 };
 
+// Writes a token file (TokenData's format, without a mask) piece by piece,
+// for data too big to hold in memory. The count goes into the header last.
+class TokenWriter {
+public:
+    TokenWriter(const std::string& path, uint32_t vocab) : path_(path) {
+        f_ = std::fopen(path.c_str(), "wb");
+        CHECK(f_, "cannot write %s", path.c_str());
+        const uint32_t has_mask = 0;
+        const uint64_t n = 0;
+        std::fwrite("CXTOKEN1", 1, 8, f_);
+        std::fwrite(&vocab, 4, 1, f_);
+        std::fwrite(&has_mask, 4, 1, f_);
+        std::fwrite(&n, 8, 1, f_);
+    }
+    ~TokenWriter() { close(); }
+    TokenWriter(const TokenWriter&) = delete;
+    TokenWriter& operator=(const TokenWriter&) = delete;
+
+    void write(const std::vector<uint16_t>& t) {
+        if (t.empty()) return;  // fwrite must not see the null data() of an empty vector
+        CHECK(std::fwrite(t.data(), 2, t.size(), f_) == t.size(), "error writing %s", path_.c_str());
+        n_ += t.size();
+    }
+    uint64_t count() const { return n_; }
+
+    void close() {
+        if (!f_) return;
+        CHECK(std::fseek(f_, 16, SEEK_SET) == 0 && std::fwrite(&n_, 8, 1, f_) == 1, "error writing %s",
+              path_.c_str());
+        CHECK(std::fclose(f_) == 0, "error writing %s", path_.c_str());
+        f_ = nullptr;
+    }
+
+private:
+    std::string path_;
+    FILE* f_ = nullptr;
+    uint64_t n_ = 0;
+};
+
 // ---------------------------------------------------------------------------
 // Checkpoints: config, step, data RNG, parameters, optimizer moments and
 // router biases, so training resumes exactly where it stopped.

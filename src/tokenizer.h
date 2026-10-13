@@ -59,6 +59,17 @@ public:
         }
     }
 
+    // The first position p >= from where a line starts with something other
+    // than whitespace (s[p-1] is '\n'), or s.size() if there is none. Such a
+    // p always starts a chunk, whatever came before, so text cut there
+    // encodes exactly as the whole does: big files can be encoded in
+    // independent pieces, in parallel.
+    static size_t next_safe_split(std::string_view s, size_t from) {
+        for (size_t p = std::max<size_t>(from, 1); p < s.size(); ++p)
+            if (s[p - 1] == '\n' && !is_space(s[p])) return p;
+        return s.size();
+    }
+
     static std::vector<std::pair<size_t, size_t>> chunks(std::string_view s) {
         std::vector<std::pair<size_t, size_t>> out;
         for_each_chunk(s, [&](size_t b, size_t e) { out.push_back({b, e}); });
@@ -149,14 +160,16 @@ public:
         build_ranks();
     }
 
-    std::vector<int> encode(const std::string& text) const {
+    std::vector<int> encode(std::string_view tv) const {
         std::vector<int> out;
-        const std::string_view tv(text);
         for_each_chunk(tv, [&](size_t b, size_t e) {
             const std::string_view w = tv.substr(b, e - b);
             if (w.size() == 1) return out.push_back(int((unsigned char)w[0]));
             auto it = cache_.find(w);
-            if (it == cache_.end()) it = cache_.emplace(std::string(w), encode_chunk(w)).first;
+            if (it == cache_.end()) {
+                if (cache_.size() >= kMaxCache) cache_.clear();  // bounded memory on huge corpora
+                it = cache_.emplace(std::string(w), encode_chunk(w)).first;
+            }
             out.insert(out.end(), it->second.begin(), it->second.end());
         });
         return out;
@@ -271,5 +284,6 @@ private:
         using is_transparent = void;
         size_t operator()(std::string_view v) const { return std::hash<std::string_view>{}(v); }
     };
+    static constexpr size_t kMaxCache = size_t(1) << 19;
     mutable std::unordered_map<std::string, std::vector<int>, Hash, std::equal_to<>> cache_;
 };

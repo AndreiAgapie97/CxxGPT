@@ -32,7 +32,7 @@ cxxgpt: src/cxxgpt.cpp $(HEADERS)
 NVCC      ?= nvcc
 CUDA_ARCH ?= native
 CUDA_HOME ?= /usr/local/cuda
-NVCCFLAGS ?= -O3 -std=c++20 -arch=$(CUDA_ARCH) -Xcompiler -Wall,-Wextra
+NVCCFLAGS ?= -O3 -std=c++20 -arch=$(CUDA_ARCH) -Xcompiler -Wall,-Wextra $(NVCC_EXTRA)
 CUDA_LIBS ?= -L$(CUDA_HOME)/lib64 -Wl,-rpath,$(CUDA_HOME)/lib64 -lcublas -lcudart
 
 gpu.o: src/gpu.cu src/gpu.h src/config.h src/common.h
