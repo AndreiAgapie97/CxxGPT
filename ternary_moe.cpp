@@ -1,7 +1,7 @@
-// ternary_moe.cpp — v2.1
+// ternary_moe.cpp — v3
 //
 // Ternary MoE inference kernels: two-bitplane weights, int8 activations,
-// AVX2 / AVX-512, threaded across output rows.
+// AVX2 / AVX-512 / VNNI, threaded across output rows.
 //
 // Build:
 //   g++ -O3 -march=native -std=c++17 -pthread ternary_moe.cpp -o ternary_moe
@@ -415,6 +415,49 @@ void gemv_bitplane_int8_avx2(const int8_t* __restrict xq, float x_scale,
 }
 #endif
 
+// --- VNNI -------------------------------------------------------------------
+// vpdpbusd does maddubs + madd + add in one instruction. Unlike the add it
+// replaces, it sits on the accumulator's dependency chain with several
+// cycles of latency, so these kernels split the sum across independent
+// accumulators: 2 for 256-bit, 4 for 512-bit. A single accumulator gives
+// up roughly half of the 512-bit kernel's gain over B5b.
+#if defined(__AVX2__) && \
+    (defined(__AVXVNNI__) || (defined(__AVX512VNNI__) && defined(__AVX512VL__)))
+#define TERNARY_HAVE_VNNI256 1
+
+static inline __m256i dpbusd256(__m256i acc, __m256i u8, __m256i s8) {
+#if defined(__AVXVNNI__)
+    return _mm256_dpbusd_avx_epi32(acc, u8, s8);  // VEX: AVX-VNNI without AVX-512
+#else
+    return _mm256_dpbusd_epi32(acc, u8, s8);      // EVEX: AVX512-VNNI + VL
+#endif
+}
+
+void gemv_bitplane_int8_vnni256(const int8_t* __restrict xq, float x_scale,
+                                const TernaryMatrixBitplane& W, float* __restrict Y) {
+    const int WPR = W.words_per_row;
+    const float out_scale = x_scale * W.scale;
+    const __m256i one8 = _mm256_set1_epi8(1);
+    constexpr int B = cfg::kAvx2Bytes;
+
+    pool().parallel_for(W.rows, [&](int r0, int r1) {
+        for (int r = r0; r < r1; ++r) {
+            const uint32_t* __restrict p = &W.pos[size_t(r) * WPR];
+            const uint32_t* __restrict n = &W.neg[size_t(r) * WPR];
+            __m256i acc0 = _mm256_setzero_si256(), acc1 = _mm256_setzero_si256();
+
+            int w = 0;
+            for (; w + 2 <= WPR; w += 2) {
+                acc0 = dpbusd256(acc0, one8, apply_ternary32(p[w], n[w], xq + w * B));
+                acc1 = dpbusd256(acc1, one8, apply_ternary32(p[w + 1], n[w + 1], xq + (w + 1) * B));
+            }
+            if (w < WPR) acc0 = dpbusd256(acc0, one8, apply_ternary32(p[w], n[w], xq + w * B));
+            Y[r] = float(hsum_epi32(_mm256_add_epi32(acc0, acc1))) * out_scale;
+        }
+    });
+}
+#endif
+
 #if defined(__AVX512BW__)
 // Two mask words applied to their 64 activations: x, -x, or 0 per byte.
 // With pair == false only p[0] / n[0] are read and the upper 32 activation
@@ -457,8 +500,40 @@ void gemv_bitplane_int8_avx512(const int8_t* __restrict xq, float x_scale,
         }
     });
 }
-#endif
 
+#if defined(__AVX512VNNI__)
+void gemv_bitplane_int8_vnni512(const int8_t* __restrict xq, float x_scale,
+                                const TernaryMatrixBitplane& W, float* __restrict Y) {
+    const int WPR = W.words_per_row;
+    const float out_scale = x_scale * W.scale;
+    const __m512i one8 = _mm512_set1_epi8(1);
+    constexpr int B = cfg::kWeightsPerWord;
+    constexpr int kAcc = 4;  // each covers one word pair => 8 words per step
+
+    pool().parallel_for(W.rows, [&](int r0, int r1) {
+        for (int r = r0; r < r1; ++r) {
+            const uint32_t* __restrict p = &W.pos[size_t(r) * WPR];
+            const uint32_t* __restrict n = &W.neg[size_t(r) * WPR];
+            __m512i acc[kAcc];
+            for (auto& a : acc) a = _mm512_setzero_si512();
+
+            int w = 0;
+            for (; w + 2 * kAcc <= WPR; w += 2 * kAcc)
+                for (int a = 0; a < kAcc; ++a) {
+                    const int wa = w + 2 * a;
+                    acc[a] = _mm512_dpbusd_epi32(acc[a], one8,
+                                                 apply_ternary64(p + wa, n + wa, xq + wa * B, true));
+                }
+            for (; w < WPR; w += 2)
+                acc[0] = _mm512_dpbusd_epi32(acc[0], one8,
+                                             apply_ternary64(p + w, n + w, xq + w * B, w + 1 < WPR));
+            for (int a = 1; a < kAcc; ++a) acc[0] = _mm512_add_epi32(acc[0], acc[a]);
+            Y[r] = float(_mm512_reduce_add_epi32(acc[0])) * out_scale;
+        }
+    });
+}
+#endif
+#endif
 
 // Float-input adapter for an int8 kernel: quantize, then run Q. The scratch
 // is per calling thread, so concurrent callers never share it.
@@ -554,13 +629,25 @@ static std::vector<Kernel> all_kernels() {
         {"B5b: int8 AVX-512", gemv_quantize_then<gemv_bitplane_int8_avx512>,
          gemv_bitplane_int8_avx512},
 #endif
+#if defined(TERNARY_HAVE_VNNI256)
+        {"B6: int8 VNNI 256-bit", gemv_quantize_then<gemv_bitplane_int8_vnni256>,
+         gemv_bitplane_int8_vnni256},
+#endif
+#if defined(__AVX512BW__) && defined(__AVX512VNNI__)
+        {"B6b: int8 VNNI 512-bit", gemv_quantize_then<gemv_bitplane_int8_vnni512>,
+         gemv_bitplane_int8_vnni512},
+#endif
     };
 }
 
 // The int8 kernel the MoE layer uses by default: the widest this build has.
 static Kernel default_int8_kernel() {
-#if defined(__AVX512BW__)
+#if defined(__AVX512BW__) && defined(__AVX512VNNI__)
+    const GemvQFn want = gemv_bitplane_int8_vnni512;
+#elif defined(__AVX512BW__)
     const GemvQFn want = gemv_bitplane_int8_avx512;
+#elif defined(TERNARY_HAVE_VNNI256)
+    const GemvQFn want = gemv_bitplane_int8_vnni256;
 #elif defined(__AVX2__)
     const GemvQFn want = gemv_bitplane_int8_avx2;
 #else
@@ -903,7 +990,8 @@ static void run_tests() {
     // odd row counts and multiple words per row
     run_case("M=1 K=256", random_ternary(1, 256, 0.6, 77), random_activations(256, 9), 1, 256);
     run_case("M=33 K=96", random_ternary(33, 96, 0.6, 78), random_activations(96, 10), 33, 96);
-    // 1, 5, 6 and 7 words per row
+    // with K=64, 96, 128 and 256 elsewhere, every remainder of the VNNI
+    // kernels' 2- and 8-word unrolls
     for (int k : {32, 160, 192, 224}) {
         char label[32];
         snprintf(label, sizeof label, "M=5 K=%d", k);
