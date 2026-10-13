@@ -63,9 +63,13 @@ and can do everything else from there.
 
 ## The plan
 
-1. **First evening:** setup and tests, then a short throughput probe (how
-   many tokens per second each model size trains at), then the data
-   downloads and our tokenizer:
+1. **First evening:** setup and tests, then a throughput probe: how many
+   tokens per second each model size trains at, and whether it fits in
+   the 8 GB (a few minutes):
+   ```sh
+   scripts/probe.sh
+   ```
+   Then the data downloads and our tokenizer:
    ```sh
    .venv/bin/python scripts/get_data.py gsm8k tinystories fineweb-edu openmath2 metamath
    ```

@@ -2,6 +2,8 @@
 # Trains the four architecture variants on the reasoning curriculum with the
 # same budget and settings, then evaluates each on the full held-out test set.
 #   scripts/compare.sh [steps] [extra train args...]
+# ONLY="dense moe" runs a subset; TAG=-x names the outputs runs/<variant>-x.*
+# (for example: ONLY=dense TAG=-muon scripts/compare.sh 2500 --muon).
 # Needs data/reason.{train,val}.tok and data/reason.test.txt
 # (cxxgpt gen-reasoning --out data/reason). Logs go to runs/.
 set -euo pipefail
@@ -19,13 +21,14 @@ declare -A VARIANTS=(
   [moe]="--experts 8 --topk 2"
   [moe-ternary]="--experts 8 --topk 2 --ternary"
 )
-for name in dense dense-ternary moe moe-ternary; do
-  echo "=== $name ($(date -u +%H:%M:%S))"
+TAG=${TAG:-}
+for name in ${ONLY:-dense dense-ternary moe moe-ternary}; do
+  [[ -v "VARIANTS[$name]" ]] || { echo "unknown variant $name"; exit 1; }
+  out="runs/$name$TAG"
+  echo "=== $name$TAG ($(date -u +%H:%M:%S))"
   # shellcheck disable=SC2086
-  ./cxxgpt train "${COMMON[@]}" ${VARIANTS[$name]} --out "runs/$name.ckpt" --log "runs/$name.csv" \
-    > "runs/$name.log" 2>&1
-  ./cxxgpt eval-reasoning --ckpt "runs/$name.ckpt" --test data/reason.test.txt --show-failures \
-    > "runs/$name.eval" 2>&1
-  grep -E "overall" "runs/$name.eval"
+  ./cxxgpt train "${COMMON[@]}" ${VARIANTS[$name]} --out "$out.ckpt" --log "$out.csv" > "$out.log" 2>&1
+  ./cxxgpt eval-reasoning --ckpt "$out.ckpt" --test data/reason.test.txt --show-failures > "$out.eval" 2>&1
+  grep -E "overall" "$out.eval"
 done
 echo "=== done ($(date -u +%H:%M:%S))"
