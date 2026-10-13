@@ -7,6 +7,7 @@
 #include "test_model.h"
 #include "test_ops.h"
 #include "test_reasoning.h"
+#include "test_reasoning_metrics.h"
 #include "test_tokenizer.h"
 #include "test_data.h"
 #include "test_numerics.h"
@@ -24,6 +25,7 @@ int main(int argc, char** argv) {
         {"ops", test_ops},
         {"model", test_model},
         {"reasoning", test_reasoning},
+        {"reasoning metrics", test_reasoning_metrics},
         {"tokenizer", test_tokenizer},
         {"data", test_data},
         {"numerics", test_numerics},

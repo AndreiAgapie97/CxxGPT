@@ -12,3 +12,5 @@ data/
 runs/
 .venv/
 test_training_cli
+reasoning_audit
+reasoning_targets

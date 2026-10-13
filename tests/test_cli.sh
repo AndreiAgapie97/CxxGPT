@@ -2,6 +2,8 @@
 # Exercise the real CLI after config parsing and backend selection.
 set -euo pipefail
 CXXGPT=${CXXGPT:-./cxxgpt}
+CXXGPT_AUDIT=${CXXGPT_AUDIT:-./reasoning_audit}
+CXXGPT_TARGETS=${CXXGPT_TARGETS:-./reasoning_targets}
 cd "$(dirname "$0")/.."
 TEST_DIR=$(mktemp -d)
 trap 'rm -rf -- "$TEST_DIR"' EXIT
@@ -67,3 +69,43 @@ status=0
     --tokens 8 --reps 0 --threads 2 > "$TEST_DIR/bad-reps.log" 2>&1 || status=$?
 [[ "$status" == 1 ]] && grep -q 'reps must be positive' "$TEST_DIR/bad-reps.log"
 printf 'CLI: benchmark emits alternating raw trials and rejects zero repeats\n'
+
+"$CXXGPT" train "${COMMON[@]}" --steps 0 --init "$TEST_DIR/model.ckpt" --out "$TEST_DIR/fresh.ckpt" > "$TEST_DIR/init.log"
+./test_training_cli fresh "$TEST_DIR/model.ckpt" "$TEST_DIR/fresh.ckpt"
+status=0
+./test_training_cli same-sampler "$TEST_DIR/model.ckpt" "$TEST_DIR/fresh.ckpt" > "$TEST_DIR/rng-different.log" 2>&1 || status=$?
+[[ "$status" == 1 ]] && grep -q 'different samples' "$TEST_DIR/rng-different.log"
+cp "$TEST_DIR/model.ckpt" "$TEST_DIR/protected.ckpt"
+"$CXXGPT" train "${COMMON[@]}" --resume --init "$TEST_DIR/does-not-exist.ckpt" > "$TEST_DIR/resume.log"
+cmp "$TEST_DIR/model.ckpt" "$TEST_DIR/protected.ckpt"
+# A skipped seek must still detect a truncated moment array in weight-only loads.
+cp "$TEST_DIR/model.ckpt" "$TEST_DIR/truncated.ckpt"
+./test_training_cli truncate "$TEST_DIR/truncated.ckpt"
+status=0
+"$CXXGPT" train "${COMMON[@]}" --steps 0 --init "$TEST_DIR/truncated.ckpt" > "$TEST_DIR/truncated.log" 2>&1 || status=$?
+[[ "$status" == 1 ]] && grep -q 'truncated optimizer state' "$TEST_DIR/truncated.log"
+for kind in params m v short-v; do
+    status=0
+    ./test_training_cli bad-save "$TEST_DIR/protected.ckpt" "$kind" > "$TEST_DIR/bad-save.log" 2>&1 || status=$?
+    [[ "$status" == 1 ]] && grep -q 'check failed' "$TEST_DIR/bad-save.log"
+    cmp "$TEST_DIR/model.ckpt" "$TEST_DIR/protected.ckpt"
+done
+status=0
+"$CXXGPT" train "${COMMON[@]}" --init "$TEST_DIR/unstable.ckpt" --out "$TEST_DIR/protected.ckpt" \
+    --steps 20 --save-every 1 > "$TEST_DIR/diverged.log" 2>&1 || status=$?
+[[ "$status" == 1 ]] && grep -q '10 diverged steps' "$TEST_DIR/diverged.log"
+[[ $(grep -c 'step 1: .*update skipped' "$TEST_DIR/diverged.log") == 10 ]]
+cmp "$TEST_DIR/model.ckpt" "$TEST_DIR/protected.ckpt"
+printf 'CLI: warm start/reset, resume precedence, truncated moments and checkpoint protection passed\n'
+
+"$CXXGPT_AUDIT" --ckpt "$TEST_DIR/audit.ckpt" --problems "$TEST_DIR/audit.txt" --threads 2 > "$TEST_DIR/audit.csv"
+awk -F, '$2=="all_completion" {if ($3!=13 || $4<=0) exit 1; all=$4*13}
+    $2=="step_digit" || $2=="step_other" || $2=="delimiter" || $2=="answer_digit" || $2=="answer_other" {sum+=$3*$4; n+=$3}
+    $2=="teacher_coverage" {if ($5!=1 || $6!=1) exit 1}
+    END {if (n!=13 || (sum-all)>0.000001 || (all-sum)>0.000001) exit 1}' "$TEST_DIR/audit.csv"
+printf 'CLI: reasoning audit covers the gold completion and preserves weighted segment loss\n'
+
+"$CXXGPT_TARGETS" --train "$TEST_DIR/targets.tok" --val "$TEST_DIR/targets.tok" \
+    --exclude-test "$TEST_DIR/audit.txt" --out "$TEST_DIR/targets" --per-cell 3 > "$TEST_DIR/targets.log"
+./test_training_cli targets "$TEST_DIR/targets.tok" "$TEST_DIR/targets/train-final.tok" "$TEST_DIR/targets/probe.txt"
+printf 'CLI: final-digit masks preserve tokens and fresh probes exclude known questions\n'
