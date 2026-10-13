@@ -295,12 +295,40 @@ inline Problem make_problem(const std::string& task, int difficulty, Rng& rng) {
 
 // Problem sets on disk: one per line, tab-separated
 // task, difficulty, question, steps, answer.
+// One problem per line: task, difficulty, question, steps, answer, separated
+// by tabs. Backslash, tab and newline inside a field are written as \\, \t
+// and \n.
+inline std::string escape_field(const std::string& s) {
+    std::string o;
+    for (char c : s) {
+        if (c == '\\') o += "\\\\";
+        else if (c == '\t') o += "\\t";
+        else if (c == '\n') o += "\\n";
+        else o += c;
+    }
+    return o;
+}
+
+inline std::string unescape_field(const std::string& s) {
+    std::string o;
+    for (size_t i = 0; i < s.size(); ++i) {
+        if (s[i] != '\\' || i + 1 == s.size()) {
+            o += s[i];
+            continue;
+        }
+        const char c = s[++i];
+        o += c == 't' ? '\t' : c == 'n' ? '\n' : c;
+    }
+    return o;
+}
+
 inline void save_problems(const std::string& path, const std::vector<Problem>& ps) {
     FILE* f = std::fopen(path.c_str(), "w");
     CHECK(f, "cannot write %s", path.c_str());
     for (const auto& p : ps)
-        std::fprintf(f, "%s\t%d\t%s\t%s\t%s\n", p.task.c_str(), p.difficulty, p.question.c_str(),
-                     p.steps.c_str(), p.answer.c_str());
+        std::fprintf(f, "%s\t%d\t%s\t%s\t%s\n", escape_field(p.task).c_str(), p.difficulty,
+                     escape_field(p.question).c_str(), escape_field(p.steps).c_str(),
+                     escape_field(p.answer).c_str());
     CHECK(std::fclose(f) == 0, "error writing %s", path.c_str());
 }
 
@@ -321,11 +349,11 @@ inline std::vector<Problem> load_problems(const std::string& path) {
         fields.push_back(line.substr(pos));
         CHECK(fields.size() == 5, "bad line in %s: %s", path.c_str(), line.c_str());
         Problem p;
-        p.task = fields[0];
+        p.task = unescape_field(fields[0]);
         p.difficulty = std::atoi(fields[1].c_str());
-        p.question = fields[2];
-        p.steps = fields[3];
-        p.answer = fields[4];
+        p.question = unescape_field(fields[2]);
+        p.steps = unescape_field(fields[3]);
+        p.answer = unescape_field(fields[4]);
         ps.push_back(std::move(p));
         line.clear();
     }

@@ -5,6 +5,7 @@
 //   cxxgpt train --data data.tok [options]                train (or resume)
 //   cxxgpt sample --ckpt model.ckpt [--prompt TEXT] [--bpe tok.bpe]  generate text
 //   cxxgpt gen-reasoning --out data/reason                 synthetic reasoning data
+//   cxxgpt prep-qa --in gsm8k.jsonl --out data/gsm8k/train  Q/A JSON Lines -> problems + tokens
 //   cxxgpt eval-reasoning --ckpt model.ckpt --test FILE    exact-answer accuracy
 //   cxxgpt bench-infer [--ckpt model.ckpt | model options]  ternary engine vs fp32 decode
 //
@@ -21,6 +22,7 @@
 #include "common.h"
 #include "generate.h"
 #include "infer.h"
+#include "json.h"
 #include "model.h"
 #include "reasoning.h"
 #include "profile.h"
@@ -122,6 +124,52 @@ std::vector<std::string> split(const std::string& s, char sep) {
     return out;
 }
 
+std::string trim(const std::string& s) {
+    const size_t b = s.find_first_not_of(" \t\r\n");
+    if (b == std::string::npos) return "";
+    return s.substr(b, s.find_last_not_of(" \t\r\n") - b + 1);
+}
+
+// The tokenizer at path, or the byte-level one (no merges) if path is empty.
+Tokenizer load_tokenizer(const std::string& path) {
+    Tokenizer tok;
+    if (!path.empty()) tok.load(path);
+    return tok;
+}
+
+// BOS and the prompt (not trained on), then the completion (trained on).
+void append_problem(TokenData& d, const Problem& p, const Tokenizer& tok) {
+    const std::vector<int> prompt = prompt_tokens(p, tok), completion = tok.encode(p.completion());
+    for (int t : prompt) d.tokens.push_back(uint16_t(t)), d.mask.push_back(0);
+    for (int t : completion) d.tokens.push_back(uint16_t(t)), d.mask.push_back(1);
+}
+
+// "a.tok,b.tok*3": the files concatenated, b three times (to weight a small
+// dataset up). A file without a mask counts as all trained-on.
+TokenData load_token_list(const std::string& spec) {
+    std::vector<std::pair<TokenData, int>> parts;
+    bool any_mask = false;
+    for (const std::string& item : split(spec, ',')) {
+        const size_t star = item.rfind('*');
+        const int times = star == std::string::npos ? 1 : std::atoi(item.c_str() + star + 1);
+        CHECK(times >= 1, "bad repeat count in '%s'", item.c_str());
+        parts.emplace_back(TokenData::load(item.substr(0, star)), times);
+        any_mask |= !parts.back().first.mask.empty();
+    }
+    if (parts.size() == 1 && parts[0].second == 1) return std::move(parts[0].first);
+    TokenData d;
+    for (auto& [part, times] : parts) {
+        d.vocab = std::max(d.vocab, part.vocab);
+        for (int r = 0; r < times; ++r) {
+            d.tokens.insert(d.tokens.end(), part.tokens.begin(), part.tokens.end());
+            if (!any_mask) continue;
+            if (part.mask.empty()) d.mask.insert(d.mask.end(), part.tokens.size(), 1);
+            else d.mask.insert(d.mask.end(), part.mask.begin(), part.mask.end());
+        }
+    }
+    return d;
+}
+
 // Training data (masked so only answers are learned), a validation slice,
 // and a held-out test set that the training data never contains.
 int cmd_gen_reasoning(Args& a) {
@@ -132,6 +180,7 @@ int cmd_gen_reasoning(Args& a) {
     const int test_max_d = int(a.integer("test-max-diff", max_d + 1));
     const std::vector<std::string> tasks = split(a.str("tasks", "chain,add,mul,expr,eq,cmp"), ',');
     Rng rng(uint64_t(a.integer("seed", 1)));
+    const Tokenizer tok = load_tokenizer(a.str("bpe"));
     a.done();
     for (const auto& t : tasks) make_problem(t, 1, rng);  // rejects unknown names
 
@@ -151,7 +200,7 @@ int cmd_gen_reasoning(Args& a) {
 
     auto make_tokens = [&](long n, const std::string& path) {
         TokenData d;
-        d.vocab = 256;
+        d.vocab = uint32_t(tok.vocab_size());
         long skipped = 0;
         for (long i = 0; i < n;) {
             const std::string& t = tasks[rng.below(tasks.size())];
@@ -160,10 +209,7 @@ int cmd_gen_reasoning(Args& a) {
                 ++skipped;
                 continue;
             }
-            d.tokens.push_back(kBos);
-            d.mask.push_back(0);
-            for (unsigned char ch : p.prompt()) d.tokens.push_back(ch), d.mask.push_back(0);
-            for (unsigned char ch : p.completion()) d.tokens.push_back(ch), d.mask.push_back(1);
+            append_problem(d, p, tok);
             ++i;
         }
         d.save(path);
@@ -177,20 +223,81 @@ int cmd_gen_reasoning(Args& a) {
     return 0;
 }
 
+// Question/answer pairs from a JSON Lines file (GSM8K's format: the answer
+// is the worked solution, then "#### " and the final answer) to a problems
+// file for eval-reasoning (OUT.txt) and masked training tokens (OUT.tok).
+int cmd_prep_qa(Args& a) {
+    const std::string in = a.str("in"), out = a.str("out"), task = a.str("task", "qa");
+    const std::string q_key = a.str("question-key", "question"), a_key = a.str("answer-key", "answer");
+    const bool keep_calc = a.flag("keep-calc");
+    const Tokenizer tok = load_tokenizer(a.str("bpe"));
+    a.done();
+    CHECK(!in.empty() && !out.empty(), "usage: cxxgpt prep-qa --in FILE.jsonl --out PREFIX [--bpe tok.bpe]");
+    std::ifstream f(in);
+    CHECK(f, "cannot open %s", in.c_str());
+    std::vector<Problem> problems;
+    long line_no = 0, skipped = 0;
+    for (std::string line; std::getline(f, line);) {
+        ++line_no;
+        if (line.find_first_not_of(" \t\r") == std::string::npos) continue;
+        Json j;
+        std::string err;
+        CHECK(Json::parse(line, j, &err), "%s:%ld: %s", in.c_str(), line_no, err.c_str());
+        const Json *q = j.get(q_key), *ans = j.get(a_key);
+        CHECK(q && ans && q->type == Json::String && ans->type == Json::String,
+              "%s:%ld: missing string fields '%s' and '%s'", in.c_str(), line_no, q_key.c_str(), a_key.c_str());
+        const size_t mark = ans->str.rfind("#### ");
+        if (mark == std::string::npos) {
+            ++skipped;
+            continue;
+        }
+        Problem p;
+        p.task = task;
+        p.question = trim(q->str);
+        p.steps = trim(ans->str.substr(0, mark));
+        // "1,080" -> "1080", so the exact-match check ignores digit grouping.
+        for (char c : trim(ans->str.substr(mark + 5)))
+            if (c != ',') p.answer += c;
+        if (!keep_calc) {  // drop calculator annotations: "48/2 = <<48/2=24>>24" -> "48/2 = 24"
+            std::string t;
+            for (size_t i = 0; i < p.steps.size();) {
+                const size_t open = p.steps.find("<<", i), close = open == std::string::npos ? open : p.steps.find(">>", open);
+                if (close == std::string::npos) {
+                    t += p.steps.substr(i);
+                    break;
+                }
+                t += p.steps.substr(i, open - i);
+                i = close + 2;
+            }
+            p.steps = t;
+        }
+        problems.push_back(std::move(p));
+    }
+    save_problems(out + ".txt", problems);
+    TokenData d;
+    d.vocab = uint32_t(tok.vocab_size());
+    for (const Problem& p : problems) append_problem(d, p, tok);
+    d.save(out + ".tok");
+    std::printf("%s: %zu problems (%ld without '#### ' skipped) -> %s.txt, %s.tok (%zu tokens)\n", in.c_str(),
+                problems.size(), skipped, out.c_str(), out.c_str(), d.tokens.size());
+    return 0;
+}
+
 void print_eval(const EvalResult& r, bool show_failures) {
     std::map<std::string, std::map<int, std::pair<int, int>>> table;
-    int max_d = 0;
+    int min_d = 1 << 30, max_d = -(1 << 30);
     for (const auto& [key, cell] : r.by_task) {
         table[key.first][key.second] = cell;
+        min_d = std::min(min_d, key.second);
         max_d = std::max(max_d, key.second);
     }
     std::printf("%-6s", "task");
-    for (int d = 1; d <= max_d; ++d) std::printf("   d=%d", d);
+    for (int d = min_d; d <= max_d; ++d) std::printf("   d=%d", d);
     std::printf("   all\n");
     for (const auto& [task, row] : table) {
         std::printf("%-6s", task.c_str());
         int c = 0, n = 0;
-        for (int d = 1; d <= max_d; ++d) {
+        for (int d = min_d; d <= max_d; ++d) {
             auto it = row.find(d);
             if (it == row.end()) {
                 std::printf("      -");
@@ -216,6 +323,7 @@ int cmd_eval_reasoning(Args& a) {
     const std::string ckpt = a.str("ckpt", "model.ckpt"), test_path = a.str("test", "data/reason.test.txt");
     const int batch = int(a.integer("batch", 64)), limit = int(a.integer("limit", 0));
     const bool show = a.flag("show-failures");
+    const Tokenizer tok = load_tokenizer(a.str("bpe"));
     a.done();
     Model<float> model(peek_checkpoint_config(ckpt));
     load_checkpoint(ckpt, model, nullptr, nullptr);
@@ -227,7 +335,7 @@ int cmd_eval_reasoning(Args& a) {
         test = std::move(sub);
     }
     const double t0 = now_seconds();
-    const EvalResult r = eval_reasoning(model, test, batch);
+    const EvalResult r = eval_reasoning(model, test, tok, batch);
     print_eval(r, show);
     std::printf("(%.1f s)\n", now_seconds() - t0);
     return 0;
@@ -248,8 +356,9 @@ double eval_loss(Model<float>& model, const TokenData& data, size_t lo, size_t h
 int cmd_train(Args& a) {
     if (a.flag("help")) {
         std::printf(
-            "cxxgpt train --data FILE [options]\n"
+            "cxxgpt train --data FILE[,FILE*N...] [options]  (*N repeats a file N times)\n"
             "data:   --val FILE (default: last --val-frac of --data, 0.05)\n"
+            "        --bpe tok.bpe (the tokenizer the data was made with, for --reason-test)\n"
             "model:  --seq 256 --dim 256 --layers 4 --heads 4 --ffn 0(auto)\n"
             "        --experts 0 --topk 2 --ehidden 0(auto) --shared 0 --ternary\n"
             "train:  --batch 16 --accum 1 --steps 2000 --lr 1e-3 --min-lr-frac 0.1\n"
@@ -266,9 +375,9 @@ int cmd_train(Args& a) {
     const std::string data_path = a.str("data"), val_path = a.str("val");
     const std::string out = a.str("out", "model.ckpt"), log_path = a.str("log");
     CHECK(!data_path.empty(), "--data is required (see cxxgpt train --help)");
-    const TokenData data = TokenData::load(data_path);
+    const TokenData data = load_token_list(data_path);
     TokenData val_data;
-    if (!val_path.empty()) val_data = TokenData::load(val_path);
+    if (!val_path.empty()) val_data = load_token_list(val_path);
     const double val_frac = a.real("val-frac", 0.05);
     const bool resume = a.flag("resume") && std::filesystem::exists(out);
 
@@ -284,6 +393,7 @@ int cmd_train(Args& a) {
     const int eval_batches = int(a.integer("eval-batches", 20)), save_every = int(a.integer("save-every", 500));
     const double time_limit = a.real("time-limit", 0) * 60.0;
     const std::string reason_path = a.str("reason-test");
+    const Tokenizer tok = load_tokenizer(a.str("bpe"));
     const int reason_every = int(a.integer("reason-every", 0)), reason_limit = int(a.integer("reason-limit", 300));
     g_profiler.enabled = a.flag("profile");
     AdamW opt;
@@ -334,7 +444,7 @@ int cmd_train(Args& a) {
     auto reason_eval = [&](long at_step) {
         if (reason_test.empty()) return;
         const double t0 = now_seconds();
-        const EvalResult r = eval_reasoning(model, reason_test);
+        const EvalResult r = eval_reasoning(model, reason_test, tok);
         std::printf("reasoning eval at step %ld (%.1f s):\n", at_step, now_seconds() - t0);
         print_eval(r, false);
         if (log) {
@@ -509,7 +619,8 @@ int main(int argc, char** argv) {
     if (cmd == "sample") return cmd_sample(a);
     if (cmd == "gen-reasoning") return cmd_gen_reasoning(a);
     if (cmd == "eval-reasoning") return cmd_eval_reasoning(a);
+    if (cmd == "prep-qa") return cmd_prep_qa(a);
     if (cmd == "bench-infer") return cmd_bench_infer(a);
-    std::printf("usage: cxxgpt <bpe-train|text2tok|train|sample|gen-reasoning|eval-reasoning|bench-infer> [--options]\n");
+    std::printf("usage: cxxgpt <bpe-train|text2tok|train|sample|gen-reasoning|prep-qa|eval-reasoning|bench-infer> [--options]\n");
     return cmd.empty() || cmd == "help" ? 0 : 1;
 }

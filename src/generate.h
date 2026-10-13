@@ -9,6 +9,7 @@
 
 #include "model.h"
 #include "reasoning.h"
+#include "tokenizer.h"
 
 // Picks the next token from one row of logits: argmax if temperature <= 0,
 // otherwise a sample from softmax(logits / temperature).
@@ -69,23 +70,9 @@ std::vector<std::vector<int>> generate(Model<T>& model, const std::vector<std::v
     return out;
 }
 
-inline std::vector<int> bytes_to_tokens(const std::string& s) {
-    std::vector<int> t;
-    for (unsigned char c : s) t.push_back(c);
-    return t;
-}
-
-inline std::string tokens_to_bytes(const std::vector<int>& t) {
-    std::string s;
-    for (int x : t) s += char(x);
-    return s;
-}
-
 // A completion is over once the "#### answer" line has ended.
-inline bool completion_done(const std::vector<int>& gen) {
-    if (gen.empty() || gen.back() != '\n') return false;
-    const std::string s = tokens_to_bytes(gen);
-    return s.find("#### ") != std::string::npos;
+inline bool completion_done(const std::string& text) {
+    return !text.empty() && text.back() == '\n' && text.find("#### ") != std::string::npos;
 }
 
 struct EvalResult {
@@ -95,24 +82,39 @@ struct EvalResult {
     std::vector<std::pair<Problem, std::string>> failures;  // a few, for inspection
 };
 
+// The tokens a problem's prompt is fed as: BOS, then "Q: ...\nA: ". The
+// completion is encoded separately (training does the same), so no token
+// straddles the boundary the model starts generating from.
+inline std::vector<int> prompt_tokens(const Problem& p, const Tokenizer& tok) {
+    std::vector<int> t = tok.encode(p.prompt());
+    t.insert(t.begin(), kBos);
+    return t;
+}
+
 // Greedy-decodes every problem from "A: " and checks the answer exactly.
+// The default Tokenizer (no merges) is byte-level.
 template <class T>
-EvalResult eval_reasoning(Model<T>& model, const std::vector<Problem>& problems, int batch = 64,
-                          int max_new = 200, size_t keep_failures = 8) {
+EvalResult eval_reasoning(Model<T>& model, const std::vector<Problem>& problems, const Tokenizer& tok = {},
+                          int batch = 64, int max_new = 200, size_t keep_failures = 8) {
+    CHECK(model.cfg.vocab >= tok.vocab_size(), "model vocab %d < tokenizer vocab %d", model.cfg.vocab,
+          tok.vocab_size());
+    // Ids the tokenizer cannot decode (model vocab padding) end a completion.
+    auto text_of = [&](const std::vector<int>& gen) {
+        std::vector<int> ok;
+        for (int t : gen) ok.push_back(t < tok.vocab_size() ? t : '?');
+        return tok.decode(ok);
+    };
     EvalResult r;
     for (size_t i0 = 0; i0 < problems.size(); i0 += batch) {
         const size_t i1 = std::min(problems.size(), i0 + batch);
         std::vector<std::vector<int>> prompts;
-        for (size_t i = i0; i < i1; ++i) {
-            std::vector<int> p = bytes_to_tokens(problems[i].prompt());
-            p.insert(p.begin(), kBos);
-            prompts.push_back(std::move(p));
-        }
-        const auto outs = generate(model, prompts, max_new, completion_done);
+        for (size_t i = i0; i < i1; ++i) prompts.push_back(prompt_tokens(problems[i], tok));
+        const auto outs = generate(model, prompts, max_new,
+                                   [&](const std::vector<int>& gen) { return completion_done(text_of(gen)); });
         for (size_t i = i0; i < i1; ++i) {
             const Problem& p = problems[i];
-            const std::string text = tokens_to_bytes(outs[i - i0]);
-            const bool ok = completion_done(outs[i - i0]) && extract_answer(text) == p.answer;
+            const std::string text = text_of(outs[i - i0]);
+            const bool ok = completion_done(text) && extract_answer(text) == p.answer;
             auto& cell = r.by_task[{p.task, p.difficulty}];
             cell.first += ok;
             cell.second += 1;
