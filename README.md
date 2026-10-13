@@ -1,10 +1,17 @@
 # CxxGPT
 
-CPU inference kernels for a ternary-weight (BitNet-style) Mixture-of-Experts
-layer, in one C++20 file: `ternary_moe.cpp`.
+CxxGPT is a native C++20 transformer research engine with dense or
+Mixture-of-Experts feed-forward layers, trainable ternary projections,
+AdamW, a byte/BPE tokenizer, checkpoints, and CPU bitplane inference.
+Training and experiments use the standard library and our own kernels;
+no Python ML framework is required.
 
 Every weight is −1, 0 or +1, with one fp32 scale per matrix. A 4096×4096
 matrix takes 4 MB instead of 64 MB in fp32.
+
+This describes a ternary projection's packed inference storage. Embeddings,
+norms, and the router retain fp32 weights, and training retains fp32 master
+weights, gradients, quantized copies, and optimizer moments.
 
 ## Build and run
 
@@ -21,6 +28,35 @@ then `./ternary_moe [-t threads] [--tests]`.
 `-march` picks the kernels: scalar (`x86-64`), AVX2 (`haswell`), AVX2 +
 AVX-VNNI (`alderlake`), AVX-512 (`skylake-avx512`), AVX-512 + VNNI
 (`icelake-server`; Zen 4 gets it with `native`).
+
+## Training and research
+
+```sh
+mkdir -p data
+./cxxgpt gen-reasoning --out data/reason --train 2000 --val 500
+./cxxgpt train --data data/reason.train.tok --val data/reason.val.tok \
+    --seq 256 --dim 64 --layers 1 --heads 4 --ffn 128 \
+    --experts 4 --topk 2 --ehidden 64 --ternary --batch 2 --steps 200 \
+    --out model.ckpt
+./cxxgpt eval-reasoning --ckpt model.ckpt --test data/reason.test.txt
+```
+
+For comparisons with recorded seeds, source hashes, compiler flags, budgets,
+and raw results:
+
+```sh
+scripts/research.sh runs/toy-01 200 3 3 500
+scripts/reasoning-baseline.sh runs/reason-01 200 3 3
+```
+
+The first runs all four variants on a tiny transition environment, a continual
+task switch with a bounded replay buffer, and a contextual bandit that learns
+from rewards. The second uses the existing CLI to train on addition and
+comparison problems, then evaluates held-out questions. Run directories must
+be new; the scripts preserve previous results.
+
+These are small research probes. See [the research log](docs/research.md) for
+gradient definitions, numerical regressions, measured results, and limitations.
 
 ## How it works
 
@@ -101,7 +137,12 @@ fusion, the repeated-token case took about 360 µs on 4 threads.
 CI runs these with GCC and clang on several `-march` targets, plus ASan/UBSan
 and TSan.
 
-## Not here yet
+## Current research priorities
 
-- **Batched (prefill) GEMM:** several tokens sharing each weight load.
-- **Real model:** loading actual model weights, attention, a tokenizer.
+- Numerical and surrogate-gradient validation, followed by larger reproducible
+  training runs on reasoning data.
+- Batched int8/bitplane prefill kernels and a CUDA backend checked against CPU.
+- Continual learning beyond the toy replay experiment, and reinforcement
+  learning with multiple steps and delayed rewards.
+- Peak process memory and benchmarks at useful model sizes. Tiny-model weight
+  compression and throughput do not establish large-model performance.

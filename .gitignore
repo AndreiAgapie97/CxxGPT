@@ -1,6 +1,7 @@
 ternary_moe
 test_engine
 cxxgpt
+research_experiment
 *_asan
 *_tsan
 data/
