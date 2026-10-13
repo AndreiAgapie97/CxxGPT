@@ -188,9 +188,11 @@ def get_openmath2(out, args):
     # NVIDIA's OpenMathInstruct-2: problems with worked solutions written by a
     # large model; problem_source says where each problem came from.
     repo = "nvidia/OpenMathInstruct-2"
-    files = [p for p in hf_files(repo, "data") if os.path.basename(p).startswith(args.split + "-")]
+    listed = hf_files(repo, "data")
+    files = [p for p in listed if os.path.basename(p).startswith(args.split + "-")]
     if not files:
-        sys.exit(f"no files for split {args.split}; see {HF}/datasets/{repo}/tree/main/data")
+        splits = sorted({os.path.basename(p).split("-")[0] for p in listed})
+        sys.exit(f"no files for split {args.split} in {repo}/data; the splits there: {', '.join(splits) or 'none'}")
     sources = set(args.sources.split(",")) if args.sources else None
     paths = [hf_download(repo, p, os.path.join(out, "parquet", os.path.basename(p))) for p in files]
     cols = ["problem", "generated_solution", "expected_answer", "problem_source"]
