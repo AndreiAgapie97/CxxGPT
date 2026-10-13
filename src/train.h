@@ -116,7 +116,7 @@ struct TokenData {
         CHECK(std::fclose(f) == 0, "error writing %s", path.c_str());
     }
 
-    static TokenData load(const std::string& path) {
+    [[nodiscard]] static TokenData load(const std::string& path) {
         FILE* f = std::fopen(path.c_str(), "rb");
         CHECK(f, "cannot open %s", path.c_str());
         char magic[8];

@@ -1,8 +1,9 @@
 // cxxgpt — train and run the model.
 //
-//   cxxgpt text2tok --in text.txt --out data.tok          bytes -> token file
+//   cxxgpt bpe-train --in text.txt --vocab 4096 --out tok.bpe   learn a BPE tokenizer
+//   cxxgpt text2tok --in text.txt --out data.tok [--bpe tok.bpe]  text -> token file
 //   cxxgpt train --data data.tok [options]                train (or resume)
-//   cxxgpt sample --ckpt model.ckpt [--prompt TEXT]       generate text
+//   cxxgpt sample --ckpt model.ckpt [--prompt TEXT] [--bpe tok.bpe]  generate text
 //   cxxgpt gen-reasoning --out data/reason                 synthetic reasoning data
 //   cxxgpt eval-reasoning --ckpt model.ckpt --test FILE    exact-answer accuracy
 //
@@ -21,6 +22,7 @@
 #include "model.h"
 #include "reasoning.h"
 #include "profile.h"
+#include "tokenizer.h"
 #include "train.h"
 
 namespace {
@@ -68,17 +70,45 @@ void print_config(const Config& c, const Model<float>& m) {
                 m.active_params() / 1e6);
 }
 
-int cmd_text2tok(Args& a) {
+int cmd_bpe_train(Args& a) {
     const std::string in = a.str("in"), out = a.str("out");
+    const int vocab = int(a.integer("vocab", 4096));
+    const long max_bytes = a.integer("max-bytes", 200L << 20);
     a.done();
-    CHECK(!in.empty() && !out.empty(), "usage: cxxgpt text2tok --in text.txt --out data.tok");
+    CHECK(!in.empty() && !out.empty(), "usage: cxxgpt bpe-train --in text.txt --vocab N --out tok.bpe");
+    CHECK(vocab >= 256 && vocab <= 65536, "--vocab must be in [256, 65536] (tokens are stored as uint16)");
+    std::string text = read_file(in);
+    if (long(text.size()) > max_bytes) text.resize(size_t(max_bytes));
+    const double t0 = now_seconds();
+    Tokenizer tok;
+    tok.train(text, vocab, true);
+    tok.save(out);
+    const size_t n = tok.encode(text).size();
+    std::printf("%d tokens (%zu merges) in %.1f s -> %s\n", tok.vocab_size(), tok.num_merges(),
+                now_seconds() - t0, out.c_str());
+    std::printf("%zu bytes -> %zu tokens (%.2f bytes per token)\n", text.size(), n, double(text.size()) / n);
+    return 0;
+}
+
+int cmd_text2tok(Args& a) {
+    const std::string in = a.str("in"), out = a.str("out"), bpe = a.str("bpe");
+    a.done();
+    CHECK(!in.empty() && !out.empty(), "usage: cxxgpt text2tok --in text.txt --out data.tok [--bpe tok.bpe]");
     const std::string text = read_file(in);
     TokenData d;
-    d.vocab = 256;
-    d.tokens.assign(text.begin(), text.end());
-    for (auto& t : d.tokens) t &= 0xFF;  // char may be signed
+    if (bpe.empty()) {
+        d.vocab = 256;
+        d.tokens.assign(text.begin(), text.end());
+        for (auto& t : d.tokens) t &= 0xFF;  // char may be signed
+    } else {
+        Tokenizer tok;
+        tok.load(bpe);
+        d.vocab = uint32_t(tok.vocab_size());
+        const std::vector<int> ids = tok.encode(text);
+        d.tokens.assign(ids.begin(), ids.end());
+    }
     d.save(out);
-    std::printf("%zu bytes -> %s\n", d.tokens.size(), out.c_str());
+    std::printf("%zu bytes -> %zu tokens (vocab %u) -> %s\n", text.size(), d.tokens.size(), d.vocab, out.c_str());
     return 0;
 }
 
@@ -375,20 +405,26 @@ int cmd_train(Args& a) {
 int cmd_sample(Args& a) {
     ThreadPool tp(threads_arg(a));
     g_pool = &tp;
-    const std::string ckpt = a.str("ckpt", "model.ckpt"), prompt = a.str("prompt", "\n");
+    const std::string ckpt = a.str("ckpt", "model.ckpt"), prompt = a.str("prompt", "\n"), bpe = a.str("bpe");
     const int n = int(a.integer("n", 500));
     const double temp = a.real("temp", 0.8);
     Rng rng(uint64_t(a.integer("seed", 1)));
     a.done();
     Model<float> model(peek_checkpoint_config(ckpt));
     load_checkpoint(ckpt, model, nullptr, nullptr);
-    CHECK(model.cfg.vocab == 256, "sample: only byte-level models for now");
+    Tokenizer tok;
+    if (!bpe.empty()) tok.load(bpe);
+    CHECK(model.cfg.vocab >= tok.vocab_size(), "the model's vocab %d is smaller than the tokenizer's %d",
+          model.cfg.vocab, tok.vocab_size());
+    const std::vector<int> ids = tok.encode(prompt);
     std::fwrite(prompt.data(), 1, prompt.size(), stdout);
-    const int room = model.cfg.seq_len - int(prompt.size());
+    const int room = model.cfg.seq_len - int(ids.size());
     CHECK(room > 0, "prompt longer than the model's seq_len");
-    const auto out = generate(model, {bytes_to_tokens(prompt)}, std::min(n, room),
-                              [](const std::vector<int>&) { return false; }, temp, &rng);
-    const std::string text = tokens_to_bytes(out[0]);
+    const auto out = generate(model, {ids}, std::min(n, room), [](const std::vector<int>&) { return false; },
+                              temp, &rng);
+    std::vector<int> gen;
+    for (int t : out[0]) gen.push_back(t < tok.vocab_size() ? t : '?');  // padding ids decode as '?'
+    const std::string text = tok.decode(gen);
     std::fwrite(text.data(), 1, text.size(), stdout);
     std::printf("\n");
     return 0;
@@ -399,11 +435,12 @@ int cmd_sample(Args& a) {
 int main(int argc, char** argv) {
     const std::string cmd = argc > 1 ? argv[1] : "";
     Args a(argc, argv, 2);
+    if (cmd == "bpe-train") return cmd_bpe_train(a);
     if (cmd == "text2tok") return cmd_text2tok(a);
     if (cmd == "train") return cmd_train(a);
     if (cmd == "sample") return cmd_sample(a);
     if (cmd == "gen-reasoning") return cmd_gen_reasoning(a);
     if (cmd == "eval-reasoning") return cmd_eval_reasoning(a);
-    std::printf("usage: cxxgpt <text2tok|train|sample|gen-reasoning|eval-reasoning> [--options]\n");
+    std::printf("usage: cxxgpt <bpe-train|text2tok|train|sample|gen-reasoning|eval-reasoning> [--options]\n");
     return cmd.empty() || cmd == "help" ? 0 : 1;
 }
