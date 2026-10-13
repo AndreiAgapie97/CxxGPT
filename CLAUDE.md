@@ -28,6 +28,10 @@ Reasoning is the first capability we go after.
 - `src/reasoning.h`: a synthetic reasoning curriculum with held-out harder
   test levels. `cxxgpt prep-qa` turns GSM8K-style JSON Lines into the same
   format.
+- `src/gpu.cu` (interface `src/gpu.h`): the CUDA training backend, the
+  same model op for op, fp32 with cuBLAS (TF32 by default).
+  `tests/test_gpu.cpp` compares it with the CPU engine. Build with
+  `make gpu`, giving `cxxgpt-gpu` (`train --gpu`) and `test_gpu`.
 - `src/cxxgpt.cpp`: the CLI (train, sample, eval, data prep, benchmarks).
 - `ternary_moe.cpp`: kernel tests and the kernel benchmark.
 
@@ -61,6 +65,11 @@ Reasoning is the first capability we go after.
 - Before committing, run all of these; CI runs the same set:
   - build with `-Wall -Wextra -Werror` under both g++ and clang++;
   - `make test`, `make asan` and `make tsan`.
+- The CUDA code cannot run on this VM. CI compiles and links it with nvcc;
+  here, compile-check it with clang's CUDA mode (`clang++ -x cuda
+  --cuda-gpu-arch=sm_89 --cuda-device-only`, then `--cuda-host-only`)
+  against the toolkit headers from the PyPI `nvidia-*` wheels. Run
+  `make gpu-test` on a GPU before trusting a change to `gpu.cu`.
 - Every numeric change is tested against a double-precision reference.
   Wherever the code claims two paths agree (SIMD and scalar, decode and
   forward, engine and training model), a test checks it.
