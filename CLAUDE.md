@@ -54,7 +54,8 @@ Reasoning is the first capability we go after.
   branch (stable cross-entropy, token-weighted accumulation, optimizer
   grids, digit curricula), with raw results under `docs/results/`.
 - `docs/research-plan.md`: what to try next, in order (a calculator in the
-  engine, finer experts, learning from checked solutions, place-value digit
+  engine, then more tools through the same hook, taught by a program that
+  writes word problems; finer experts, learning from checked solutions, place-value digit
   embeddings, int8 tensor cores for ternary), the optimizer's memory in CPU
   RAM for growing past 8 GB, and the seed-repeat funnel an idea passes
   before it gets a laptop night. Decisions are made on a dev set held out

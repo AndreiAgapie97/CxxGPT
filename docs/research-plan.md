@@ -219,8 +219,52 @@ Without them, comparisons between nights are not trustworthy.
 **First experiment.** Run eval-reasoning on the same checkpoint with and
 without the calculator. That alone measures how much of the GSM8K failure is
 arithmetic. Then a curriculum A/B with notes kept versus dropped.
+- Night 1's data has no notes, so its model never writes `<<`. For that model
+  the calculator watches for plain arithmetic instead: when the model has
+  written `16 x 7 =`, the engine writes `112`. Night 1's step-2000 exam shows
+  the kind of error this removes ("16 x 7 = 108").
 
 **Cost.** Small. **Expected effect:** the largest per hour of work.
+
+**Then more tools, through the same hook.** The model writes an opening mark,
+the engine computes something exactly and writes the result, and the model
+continues. In order:
+1. **Calculator** (above): `<<48/2=` → `24>>`.
+2. **Named values:** `<<eggs = 16-3-4=` → `9>>`, and later `<<eggs*2=` →
+   `18>>`. The engine remembers values by name, so the model cannot copy a
+   number wrong from five lines up.
+3. **Checker:** `<<check 9*2+4=22` → `yes>>` or `no>>`. The model can test a
+   step and correct course.
+4. **Mini programs:** a few lines with named values, arithmetic and a short
+   loop, run by our own small interpreter. This is TinyGSM's approach
+   (Microsoft, 2023: GSM8K-style problems with Python solutions), which brought
+   models around 1 B parameters to strong GSM8K scores.
+5. **Equation solver** (`<<solve 3x+5=20` → `x=5>>`) and **units and time**
+   (`<<2h 15min in min=` → `135>>`), when the problem mix needs them.
+6. **Lookup:** see bet 6 (retrieval), much later.
+
+Steps 1, 2 and 4 are one growing interpreter, in C++ and tested like the rest
+of the engine. Each tool is reported with and without it, as for the
+calculator.
+
+**The teacher: a program that writes word problems.**
+- A tool only helps once the model knows when to call it and what to put in.
+  Real data barely shows that: only GSM8K has calculator notes.
+- So: a generator of GSM8K-style word problems, extending the curriculum in
+  `src/reasoning.h`:
+  - a few hundred sentence patterns ("X has N apples", "she gives away a
+    third", "each box costs $P");
+  - random names, objects, units and prices;
+  - multi-step chains, optional distractor sentences;
+  - worked solutions in GSM8K's format, with the tool calls written in.
+- Every answer and every tool call is computed by the program, so all of it is
+  correct. It is our own code and our own data, so no outside terms apply.
+- **Weakness:** generated problems are less varied than human writing, so a
+  model can learn the templates instead of the reasoning. Always mix with real
+  data. Judge on problems the generator never made (SVAMP, the GSM8K test): if
+  only the generator's own problems improve, the model learned the templates.
+- The generator also feeds bet 3: with generated problems the right answer is
+  always known.
 
 ### 2. Finer experts: more of them, each smaller
 
