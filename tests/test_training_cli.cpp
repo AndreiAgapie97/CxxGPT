@@ -1,10 +1,32 @@
 // Native fixture generation and checkpoint comparison for the real trainer.
 #include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <set>
 #include "test_accumulation.h"
 #include "../src/reasoning.h"
 
 int main(int argc, char** argv) {
+    if (argc == 3 && std::string(argv[1]) == "word") {
+        const std::string prefix(argv[2]);
+        const auto ps = load_problems(prefix + ".txt");
+        EXPECT(ps.size() == 28, "wrong gen-word count");
+        std::string expected_text;
+        std::vector<uint16_t> expected_tokens;
+        for (const auto& p : ps) {
+            EXPECT(p.task == "word" && p.difficulty >= 2 && p.difficulty <= 8, "bad word metadata");
+            const std::string document = p.prompt() + p.completion();
+            expected_text += document + "<|endoftext|>\n";
+            expected_tokens.push_back(kBos);
+            for (unsigned char byte : trim(document)) expected_tokens.push_back(byte);
+        }
+        std::ifstream text(prefix + ".text", std::ios::binary);
+        const std::string actual_text(std::istreambuf_iterator<char>(text), {});
+        EXPECT(actual_text == expected_text, "word text differs from the loaded problem file");
+        const auto tokens = TokenData::load(prefix + ".tok");
+        EXPECT(tokens.tokens == expected_tokens, "text2tok did not preserve the word documents");
+        return g_failures ? 1 : 0;
+    }
     if (argc == 3 && std::string(argv[1]) == "curriculum") {
         const std::string dir(argv[2]);
         const auto control = load_problems(dir + "/control.txt"), expanded = load_problems(dir + "/expanded.txt");

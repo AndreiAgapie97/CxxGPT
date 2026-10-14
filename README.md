@@ -72,6 +72,7 @@ during training).
 | command | does |
 |---|---|
 | `gen-reasoning` | writes the synthetic curriculum: problems with step-by-step solutions, train/val token files and a test set one difficulty level beyond training |
+| `gen-word` | writes exact word problems, worked solutions, and separate train/test sentence patterns |
 | `bpe-train` | trains a BPE tokenizer on a text file |
 | `text2tok` | encodes text into a token file (parallel, streaming; `--doc-sep` splits documents) |
 | `prep-qa` | turns question/answer JSONL (GSM8K and the like) into token files with a loss mask and a test set |
@@ -79,6 +80,53 @@ during training).
 | `eval-reasoning` | exact-answer accuracy per task and difficulty |
 | `sample` | generates text from a prompt |
 | `bench-infer` | times the ternary inference engine against an fp32 baseline |
+
+### Generated word problems
+
+```sh
+./cxxgpt gen-word --out data/word/train --split train --seed 1 --count 10000
+./cxxgpt gen-word --out data/word/test --split test --seed 2 --count 1000
+./cxxgpt text2tok --in data/word/train.text --out data/word/train.tok --doc-sep '<|endoftext|>'
+# Add --bpe tok.bpe to text2tok when using a learned tokenizer.
+./cxxgpt eval-reasoning --ckpt model.ckpt --test data/word/test.txt
+```
+
+`gen-word` writes two files from the same problems: `PREFIX.txt` is the
+existing five-field problem format read by `eval-reasoning`; `PREFIX.text`
+is readable Q/A text, with `####` before each final answer and
+`<|endoftext|>` between problems, for `text2tok`. Tokenizing the Q/A text
+trains on the whole document; it does not create a question loss mask.
+
+Options (see `gen-word --help`):
+
+- `--seed 1`, `--count 1000`, `--out data/word`: reproducible generation and
+  output prefix. Zero count writes empty files.
+- `--min-steps 2 --max-steps 8`: inclusive range of arithmetic operations.
+  Set both to the same number for a fixed length. A percentage takes two
+  operations: multiply by the percentage, then divide by 100.
+- `--distractors on|off`: include or omit a sentence with an irrelevant
+  number (default on).
+- `--notes on|off`: include or omit GSM8K calculator notes such as
+  `<<48/2=24>>24` (default on). This changes only the worked solution.
+- `--split train|test`: 48 training sentence patterns or 24 held-out test
+  patterns, grouped into 12 arithmetic situations. The opening patterns
+  differ too, so the splits cannot share a complete question, even with
+  different seeds. Each file also omits duplicate questions.
+
+The situations include boxes of objects, hourly production and wages,
+liquid volumes, gifts, donations, equal shares, fractions, percentages,
+selling, buying, and liters converted to milliliters. Names, objects,
+prices, and quantities vary. Objects must remain whole; money and volume
+may use exact hundredths. No floating-point arithmetic or rounding is used.
+An attempt is discarded if any intermediate value is negative, exceeds
+1,000,000, needs more than two decimal places, or gives fractional objects.
+The step count stays fixed while invalid attempts are retried.
+
+This first version uses short, sequential stories and unit fractions
+(`1/2`, `1/3`, `1/4`, `1/5`). It is less varied than human-written math.
+Success on its held-out wording alone is not evidence of improvement on
+GSM8K or SVAMP. No generated datasets are checked into the repository, and
+this command does not change the night data mix.
 
 ### Real data and GPU training
 
