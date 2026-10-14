@@ -112,4 +112,21 @@ inline void test_tokenizer() {
     Tokenizer tok3;
     tok3.train(corpus, 300);
     EXPECT(tok3.encode(corpus) == enc, "training is not deterministic");
+
+    // A chunk over kMaxChunkBytes: training skips it (same merges as without
+    // it), encoding writes it as plain bytes, and both count it.
+    const std::string huge = " " + std::string(Tokenizer::kMaxChunkBytes + 1, 'a');
+    Tokenizer tok4;
+    tok4.train(corpus + huge, 300);
+    EXPECT(tok4.long_chunks() == 1, "training did not count the long chunk");
+    EXPECT(tok4.num_merges() == tok.num_merges(), "a skipped long chunk changed the merges");
+    for (int id = 0; id < tok.vocab_size(); ++id)
+        EXPECT(tok4.token_bytes(id) == tok.token_bytes(id), "a skipped long chunk changed the vocabulary");
+    Tokenizer tok5 = tok;
+    const auto with_huge = tok5.encode("one two" + huge + " three");
+    std::vector<int> expected = tok.encode("one two");
+    for (unsigned char c : huge) expected.push_back(int(c));
+    for (int id : tok.encode(" three")) expected.push_back(id);
+    EXPECT(with_huge == expected, "a long chunk is not encoded as plain bytes");
+    EXPECT(tok5.long_chunks() == 1, "encoding did not count the long chunk");
 }

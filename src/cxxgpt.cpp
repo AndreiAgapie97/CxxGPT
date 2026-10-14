@@ -105,6 +105,9 @@ int cmd_bpe_train(Args& a) {
     const double t0 = now_seconds();
     Tokenizer tok;
     tok.train(text, vocab, true);
+    if (tok.long_chunks() > 0)
+        std::printf("warning: %zu chunks longer than %zu bytes were left out of the merges\n", tok.long_chunks(),
+                    Tokenizer::kMaxChunkBytes);
     tok.save(out);
     const size_t n = tok.encode(text).size();
     std::printf("%d tokens (%zu merges) in %.1f s -> %s\n", tok.vocab_size(), tok.num_merges(),
@@ -234,6 +237,11 @@ int cmd_text2tok(Args& a) {
     std::printf("%zu bytes -> %llu tokens (vocab %d", bytes, (unsigned long long)w.count(), tok.vocab_size());
     if (!sep.empty()) std::printf(", %ld documents", docs);
     std::printf(") in %.1f s -> %s\n", now_seconds() - t0, out.c_str());
+    size_t long_chunks = 0;
+    for (const Tokenizer& t : toks) long_chunks += t.long_chunks();
+    if (long_chunks > 0)
+        std::printf("warning: %zu chunks longer than %zu bytes were written as plain bytes, without merges\n",
+                    long_chunks, Tokenizer::kMaxChunkBytes);
     return 0;
 }
 

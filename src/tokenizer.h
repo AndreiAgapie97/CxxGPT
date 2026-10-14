@@ -30,7 +30,13 @@ class Tokenizer {
 public:
     Tokenizer() { reset_vocab(); }
 
-    static constexpr size_t kMaxChunkBytes = 65536;  // bound merge work, do not silently split/change BPE
+    // Merging inside a chunk costs time that grows with the square of its
+    // length. A longer chunk (a huge run of letters or symbols in some web
+    // page) is never merged: encode() writes it as plain bytes and train()
+    // skips it, and both count it, so the caller can report it. A data run of
+    // several hours goes on instead of stopping on one odd document.
+    static constexpr size_t kMaxChunkBytes = 65536;
+    size_t long_chunks() const { return long_chunks_; }
 
     int vocab_size() const { return int(vocab_.size()); }
     size_t num_merges() const { return merges_.size(); }
@@ -89,9 +95,13 @@ public:
         // Unique chunks with their counts; each as a token sequence.
         std::unordered_map<std::string_view, long> freq;
         const std::string_view tv(text);
+        long_chunks_ = 0;
         for_each_chunk(tv, [&](size_t b, size_t e) {
-            CHECK(e-b <= kMaxChunkBytes, "tokenizer chunk exceeds %zu bytes; prepare shorter input chunks", kMaxChunkBytes);
-            ++freq[tv.substr(b, e-b)];
+            if (e - b > kMaxChunkBytes) {
+                ++long_chunks_;  // too long to learn merges from (see kMaxChunkBytes)
+                return;
+            }
+            ++freq[tv.substr(b, e - b)];
         });
         std::vector<std::vector<int>> words;
         std::vector<long> counts;
@@ -173,7 +183,11 @@ public:
         std::vector<int> out;
         for_each_chunk(tv, [&](size_t b, size_t e) {
             const std::string_view w = tv.substr(b, e - b);
-            CHECK(w.size() <= kMaxChunkBytes, "tokenizer chunk exceeds %zu bytes; prepare shorter input chunks", kMaxChunkBytes);
+            if (w.size() > kMaxChunkBytes) {
+                ++long_chunks_;  // plain bytes, no merges (see kMaxChunkBytes)
+                for (unsigned char c : w) out.push_back(int(c));
+                return;
+            }
             if (w.size() == 1) return out.push_back(int((unsigned char)w[0]));
             auto it = cache_.find(w);
             if (it == cache_.end()) {
@@ -298,4 +312,5 @@ private:
     };
     static constexpr size_t kMaxCache = size_t(1) << 19;
     mutable std::unordered_map<std::string, std::vector<int>, Hash, std::equal_to<>> cache_;
+    mutable size_t long_chunks_ = 0;  // chunks over kMaxChunkBytes seen by train() or encode()
 };

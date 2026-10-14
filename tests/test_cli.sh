@@ -141,12 +141,11 @@ python3 - "$TEST_DIR/long.txt" <<'PYLONG'
 import pathlib,sys
 pathlib.Path(sys.argv[1]).write_text('a'*65537)
 PYLONG
-for command in text2tok bpe-train; do
-    status=0
-    "$CXXGPT" "$command" --in "$TEST_DIR/long.txt" --out "$TEST_DIR/chunk-out" > "$TEST_DIR/chunk.log" 2>&1 || status=$?
-    [[ "$status" == 1 ]]
-    grep -q 'tokenizer chunk exceeds' "$TEST_DIR/chunk.log"
-done
+# An over-long chunk is reported, not fatal: a long data run keeps going.
+"$CXXGPT" text2tok --in "$TEST_DIR/long.txt" --out "$TEST_DIR/chunk-out.tok" --threads 2 > "$TEST_DIR/chunk.log"
+grep -q 'warning: 1 chunks longer than 65536 bytes were written as plain bytes' "$TEST_DIR/chunk.log"
+"$CXXGPT" bpe-train --in "$TEST_DIR/long.txt" --out "$TEST_DIR/chunk-out.bpe" --vocab 300 > "$TEST_DIR/chunk.log"
+grep -q 'warning: 1 chunks longer than 65536 bytes were left out of the merges' "$TEST_DIR/chunk.log"
 status=0
 "$CXXGPT_TRAINING_CLI" bad-tokenizer-vocab > "$TEST_DIR/core-vocab.log" 2>&1 || status=$?
 [[ "$status" == 1 ]]
