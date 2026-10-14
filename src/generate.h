@@ -105,6 +105,7 @@ template <class T>
 EvalResult eval_reasoning(Model<T>& model, const std::vector<Problem>& problems, const Tokenizer& tok = {},
                           int batch = 64, int max_new = 200, size_t keep_failures = 8,
                           bool keep_completions = false) {
+    CHECK(batch > 0 && max_new > 0, "evaluation batch and max_new must be positive");
     CHECK(model.cfg.vocab >= tok.vocab_size(), "model vocab %d < tokenizer vocab %d", model.cfg.vocab,
           tok.vocab_size());
     // Ids the tokenizer cannot decode (model vocab padding) end a completion.

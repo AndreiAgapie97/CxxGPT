@@ -46,6 +46,12 @@ status=0
 [[ "$status" == 1 ]] && grep -q 'one-logit softmax has zero task gradient' "$TEST_DIR/top1.log"
 
 ./test_training_cli generate "$TEST_DIR"
+for batch in 0 -1; do
+    status=0
+    "$CXXGPT" eval-reasoning --ckpt "$TEST_DIR/audit.ckpt" --test "$TEST_DIR/audit.txt" --batch "$batch" \
+        --threads 2 > "$TEST_DIR/eval-batch.log" 2>&1 || status=$?
+    [[ "$status" == 1 ]] && grep -q 'evaluation batch and max_new must be positive' "$TEST_DIR/eval-batch.log"
+done
 for count in '' 1junk 99999999999999999999999 0 -1; do
     status=0
     "$CXXGPT" train "${COMMON[@]}" --data "$TEST_DIR/data.tok*$count" > "$TEST_DIR/repeat-count.log" 2>&1 || status=$?
