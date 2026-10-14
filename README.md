@@ -416,3 +416,10 @@ vocabulary that layer is under 1 MB.
   on the laptop they still miss three GPU checks (docs/LAPTOP.md, "GPU
   options"), and `--profile` says what to speed up next.
 - Benchmark the inference engine against bitnet.cpp at equal model size.
+
+### CPU build portability
+
+The default `-march=native` binary targets the build machine's CPU. Rebuild
+on the destination machine, or use `make MARCH=x86-64` for a portable baseline
+within x86-64 on the same OS/ABI; compile-time kernels are selected accordingly. Runtime ISA
+dispatch and cross-architecture binary portability are not implemented.

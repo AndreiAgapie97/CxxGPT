@@ -460,7 +460,8 @@ T ternary_quantize(T* wq, const T* w, long n) {
 // x_q = round(x / scale) * scale, with exactly the arithmetic of the
 // inference kernels' quantize_int8 (multiply by 1 / scale, round half to
 // even, clamp to [-127, 127]), so a trained model sees the same int8 levels
-// in training and in deployment.
+// in CPU training and deployment. GPU TF32/bf16 GEMMs round these inputs
+// further; this input-arithmetic contract does not promise identical GPU products.
 template <class T>
 void act_quantize(T* xq, const T* x, int N, int C) {
     PROFILE("act_quant");

@@ -90,7 +90,6 @@ inline Problem chain(Rng& rng, int d, bool plan) {
     for (int i = 25; i > 0; --i) std::swap(letters[i], letters[rng.below(i + 1)]);
     std::vector<int> val;
     std::vector<std::string> defs, steps;
-    std::vector<std::vector<std::string>> lhs_rhs;  // for the solution
     auto name = [&](int i) { return std::string(1, letters[i]); };
     auto make = [&](int i, bool needed) {
         if (i == 0) {
@@ -328,7 +327,6 @@ inline Problem make_problem(const std::string& task, int difficulty, Rng& rng, c
 }
 
 // Problem sets on disk: one per line, tab-separated
-// task, difficulty, question, steps, answer.
 // One problem per line: task, difficulty, question, steps, answer, separated
 // by tabs. Backslash, tab and newline inside a field are written as \\, \t
 // and \n.
