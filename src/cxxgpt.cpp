@@ -19,6 +19,7 @@
 #include <memory>
 #include <set>
 #include <thread>
+#include <utility>
 
 #include "args.h"
 #include "common.h"
@@ -851,17 +852,20 @@ int cmd_bench_infer(Args& a) {
 
     // fp32 baseline: the quantized weights as plain floats, no activation
     // quantization.
-    model.quantize_weights();
-    Config fcfg = cfg;
-    fcfg.ternary = false;
-    Model<float> fp32(fcfg);
-    for (const ParamInfo& p : model.infos)
-        std::copy_n(&(p.ternary ? model.qparams : model.params)[p.offset], p.size, &fp32.params[p.offset]);
+    Model<float> fp32 = make_fp32_decode_baseline(model);
     TernaryEngine engine(model);
 
     Rng rng(7);
     std::vector<int> seq(tokens);
     for (int& t : seq) t = int(rng.below(cfg.vocab));
+    // Quantized training-model reference, including converted checkpoints
+    // in speed-only mode. The fp32 baseline skips int8 rounding, so
+    // where the top two tokens are close (random input makes them close
+    // often) it can pick the other one.
+    std::vector<int> top_model;
+    model.decode_begin(1, {0});
+    for (int pos = 0; pos < tokens; ++pos)
+        top_model.push_back(pick_token(model.decode_step(&seq[pos], pos), cfg.vocab, 0.0, nullptr));
     std::vector<double> t_fp32, t_tern;
     std::vector<int> top_fp32(tokens), top_tern(tokens);
     auto run_pair = [&](bool fp32_first, double& elapsed_fp32, double& elapsed_tern) {
@@ -881,30 +885,36 @@ int cmd_bench_infer(Args& a) {
         };
         if (fp32_first) { run_fp32(); run_tern(); }
         else { run_tern(); run_fp32(); }
-        int same = 0;
-        for (int pos = 0; pos < tokens; ++pos) same += top_fp32[pos] == top_tern[pos];
-        return double(same) / tokens;
+        int same = 0, same_model = 0;
+        for (int pos = 0; pos < tokens; ++pos) {
+            same += top_fp32[pos] == top_tern[pos];
+            same_model += top_model[pos] == top_tern[pos];
+        }
+        return std::pair<double, double>{double(same) / tokens, double(same_model) / tokens};
     };
+    size_t fp32_weight_bytes = fp32.params.size() * sizeof(float);
+    if (cfg.moe())
+        for (const auto& bias : fp32.router_bias) fp32_weight_bytes += bias.size() * sizeof(float);
     FILE* log = nullptr;
     if (!log_path.empty()) {
         CHECK(!std::filesystem::exists(log_path), "benchmark log already exists: %s", log_path.c_str());
         log = std::fopen(log_path.c_str(), "w");
         CHECK(log, "cannot write %s", log_path.c_str());
-        std::fprintf(log, "trial,fp32_first,tokens,threads,fp32_ms,ternary_ms,argmax_agreement,fp32_weight_bytes,ternary_weight_bytes\n");
+        std::fprintf(log, "trial,fp32_first,tokens,threads,fp32_ms,ternary_ms,argmax_agreement,fp32_weight_bytes,ternary_weight_bytes,ternary_model_agreement\n");
     }
-    double agree = 0;
+    double agree = 0, agree_model = 0;
     for (int r = 0; r < warmup; ++r) {
         double f, t;
         run_pair(r % 2 == 0, f, t);
     }
     for (int r = 0; r < reps; ++r) {
         double f, t;
-        const double same = run_pair(r % 2 == 0, f, t);
+        const auto [same, same_model] = run_pair(r % 2 == 0, f, t);
         t_fp32.push_back(f); t_tern.push_back(t);
-        agree += same / reps;
-        if (log) std::fprintf(log, "%d,%d,%d,%d,%.9f,%.9f,%.9f,%zu,%zu\n", r,
+        agree += same / reps; agree_model += same_model / reps;
+        if (log) std::fprintf(log, "%d,%d,%d,%d,%.9f,%.9f,%.9f,%zu,%zu,%.9f\n", r,
                               int(r % 2 == 0), tokens, tp.size(), f * 1e3, t * 1e3, same,
-                              model.num_params() * sizeof(float), engine.weight_bytes());
+                              fp32_weight_bytes, engine.weight_bytes(), same_model);
     }
     if (log) std::fclose(log);
     auto median = [](std::vector<double> v) {
@@ -913,13 +923,14 @@ int cmd_bench_infer(Args& a) {
         return v.size() % 2 ? v[i] : (v[i - 1] + v[i]) / 2;
     };
     const double f = tokens / median(t_fp32), t = tokens / median(t_tern);
-    const double fb = double(model.num_params()) * 4, tb = double(engine.weight_bytes());
+    const double fb = double(fp32_weight_bytes), tb = double(engine.weight_bytes());
     std::printf("decode, 1 sequence, %d tokens, median of %d, %d threads (%d warmup pairs, alternating order):\n",
                 tokens, reps, tp.size(), warmup);
     std::printf("  fp32     %9.1f tok/s   weights %8.2f MB\n", f, fb / 1e6);
     std::printf("  ternary  %9.1f tok/s   weights %8.2f MB\n", t, tb / 1e6);
-    std::printf("  speedup %.2fx, memory %.1fx smaller; same argmax as fp32 on %.0f%% of positions\n",
-                t / f, fb / tb, 100 * agree);
+    std::printf("  speedup %.2fx, memory %.1fx smaller\n", t / f, fb / tb);
+    std::printf("  same next token as the ternary training-model path on %.0f%% of positions (as fp32: %.0f%%)\n",
+                100 * agree_model, 100 * agree);
     return 0;
 }
 

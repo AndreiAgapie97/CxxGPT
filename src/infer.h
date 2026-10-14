@@ -17,6 +17,18 @@
 #include "model.h"
 #include "ternary.h"
 
+// Decode baseline with the same effective weights and routing state, using
+// fp32 activations. Router biases affect expert selection and must be copied.
+inline Model<float> make_fp32_decode_baseline(Model<float>& source) {
+    source.quantize_weights();
+    Config cfg = source.cfg; cfg.ternary = false;
+    Model<float> out(cfg);
+    for (const ParamInfo& p : source.infos)
+        std::copy_n(&(p.ternary ? source.qparams : source.params)[p.offset], p.size, &out.params[p.offset]);
+    out.router_bias = source.router_bias;
+    return out;
+}
+
 class TernaryEngine {
 public:
     explicit TernaryEngine(const Model<float>& m) : cfg_(m.cfg), kernel_(default_int8_kernel()) {
@@ -78,12 +90,12 @@ public:
     int position() const { return pos_; }
 
     // Bytes of weight storage: bitplanes for the ternary matrices, float for
-    // the rest.
+    // the rest, including the routing biases.
     size_t weight_bytes() const {
         size_t b = (wte_.size() + lnf_.size()) * 4;
         auto bp = [](const TernaryMatrixBitplane& W) { return (W.pos.size() + W.neg.size()) * 4 + 4; };
         for (const auto& L : layers_) {
-            b += (L.ln1.size() + L.ln2.size() + L.router.size()) * 4 + bp(L.wqkv) + bp(L.wo);
+            b += (L.ln1.size() + L.ln2.size() + L.router.size() + L.bias.size()) * 4 + bp(L.wqkv) + bp(L.wo);
             if (F_ > 0) b += bp(L.wfc) + bp(L.wproj);
             for (const auto& W : L.efc) b += bp(W);
             for (const auto& W : L.eproj) b += bp(W);

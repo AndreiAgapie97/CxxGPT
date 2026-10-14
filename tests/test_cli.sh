@@ -63,7 +63,7 @@ printf 'CLI: AdamW/Muon masked/sparse accumulation, weighted validation, empty-g
 "$CXXGPT" bench-infer --vocab 13 --seq 8 --dim 32 --heads 2 --layers 1 --ffn 64 \
     --tokens 8 --reps 4 --warmup 1 --threads 2 --log "$TEST_DIR/decode.csv" > "$TEST_DIR/decode.log"
 [[ $(wc -l < "$TEST_DIR/decode.csv") == 5 ]]
-awk -F, 'NR>1 {if ($1 != NR-2 || $2 != (NR%2==0) || $5 <= 0 || $6 <= 0 || $7 < 0 || $7 > 1) exit 1}' "$TEST_DIR/decode.csv"
+awk -F, 'NR>1 {if ($1 != NR-2 || $2 != (NR%2==0) || $5 <= 0 || $6 <= 0 || $7 < 0 || $7 > 1 || $10 != 1) exit 1}' "$TEST_DIR/decode.csv"
 status=0
 "$CXXGPT" bench-infer --vocab 13 --seq 8 --dim 32 --heads 2 --layers 1 --ffn 64 \
     --tokens 8 --reps 0 --threads 2 > "$TEST_DIR/bad-reps.log" 2>&1 || status=$?
