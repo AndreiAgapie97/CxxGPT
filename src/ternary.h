@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <cstring>
 #include <numeric>
+#include <limits>
 #include <random>
 #include <vector>
 
@@ -256,6 +257,14 @@ inline float quantize_int8(const float* __restrict X, int K, int8_t* __restrict 
     if (amax == 0.0f) { std::memset(out, 0, size_t(K)); return 0.0f; }
 
     const float scale = amax / float(cfg::kInt8Max);
+    if (scale == 0.0f) { std::memset(out, 0, size_t(K)); return 0.0f; }
+    if (scale <= 1.0f / std::numeric_limits<float>::max()) {
+        // A subnormal scale can have an infinite reciprocal. Division is
+        // bounded here, unlike multiplying tiny inputs (or zero) by inf.
+        for (int j = 0; j < K; ++j)
+            out[j] = int8_t(std::clamp(std::nearbyint(X[j] / scale), -127.0f, 127.0f));
+        return scale;
+    }
     const float inv = 1.0f / scale;
     k = 0;
 #if defined(__AVX512F__)

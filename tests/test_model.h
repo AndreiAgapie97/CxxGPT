@@ -1,5 +1,6 @@
 // test_model.h — whole-model gradient checks and the BitLinear pieces.
 #pragma once
+#include <cfenv>
 
 #include "../src/generate.h"
 #include "../src/infer.h"
@@ -575,6 +576,20 @@ inline void test_router_balancing() {
 }
 
 inline void test_activation_int8_contract() {
+    for (int C : {1,7,8,9,15,16,17,31,33}) for (float magnitude : {1e-36f,1e-38f,1e-40f,1e-44f}) {
+        std::vector<float> x(C), got(C); std::vector<int8_t> q(C);
+        for (int j = 0; j < C; ++j) x[j] = j%3 == 0 ? magnitude : j%3 == 1 ? -magnitude : 0;
+        std::feclearexcept(FE_OVERFLOW);
+        act_quantize(got.data(), x.data(), 1, C);
+        const float scale = quantize_int8(x.data(), C, q.data());
+        EXPECT(!std::fetestexcept(FE_OVERFLOW), "tiny quantization formed an overflowing reciprocal");
+        for (int j = 0; j < C; ++j) {
+            const double ratio = scale == 0 ? 0 : double(x[j])/double(scale);
+            const int ref = int(std::clamp(std::nearbyint(ratio), -127.0, 127.0));
+            EXPECT(q[j] == ref && std::isfinite(got[j]) && got[j] == float(q[j])*scale,
+                   "tiny activation quantization differs from finite double reference");
+        }
+    }
     Rng rng(78);
     for (int C : {1,7,8,9,15,16,17,31,32,33,127}) for (int mode = 0; mode < 5; ++mode) {
         const int N = 3; std::vector<float> x(N*C), got(N*C);
