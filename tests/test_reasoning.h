@@ -2,6 +2,7 @@
 // solver that only reads the question text.
 #pragma once
 
+#include <algorithm>
 #include <cctype>
 #include <map>
 
@@ -94,21 +95,58 @@ inline std::string solve(const Problem& p) {
 
 }  // namespace reasoning_check
 
-// chain_plan changes only how chain solutions are written: the same random
-// draws give the same questions and answers, and the plan, rebuilt here from
-// the question alone, follows the definitions back from the queried variable.
-inline void test_chain_plan() {
-    Rng plain_rng(43), plan_rng(43);
-    int planned = 0;
+inline std::vector<std::string> split_steps(const std::string& s) {
+    std::vector<std::string> out;
+    size_t at = 0;
+    for (size_t semi; (semi = s.find("; ", at)) != std::string::npos; at = semi + 2) out.push_back(s.substr(at, semi - at));
+    out.push_back(s.substr(at));
+    return out;
+}
+
+// expr_rewrite: every step but the last also writes the expression left,
+// which has one operation fewer and still evaluates to the answer.
+inline void check_expr_rewrite(const Problem& plain, const Problem& rw) {
+    const std::vector<std::string> ps = split_steps(plain.steps), qs = split_steps(rw.steps);
+    EXPECT(ps.size() == qs.size(), "expr rewrite of %s: %zu steps, plain has %zu", rw.question.c_str(), qs.size(),
+           ps.size());
+    if (ps.size() != qs.size()) return;
+    for (size_t i = 0; i < ps.size(); ++i) {
+        if (i + 1 == ps.size()) {
+            EXPECT(qs[i] == ps[i], "expr rewrite: last step '%s', plain '%s'", qs[i].c_str(), ps[i].c_str());
+            continue;
+        }
+        const size_t colon = qs[i].find(": ");
+        EXPECT(colon != std::string::npos && qs[i].substr(0, colon) == ps[i], "expr rewrite: step '%s', plain '%s'",
+               qs[i].c_str(), ps[i].c_str());
+        if (colon == std::string::npos) continue;
+        const std::string left = qs[i].substr(colon + 2);
+        const long ops = std::count_if(left.begin(), left.end(), [](char c) { return c == '+' || c == '-' || c == '*'; });
+        EXPECT(ops == long(ps.size() - 1 - i) && std::to_string(reasoning_check::eval(left)) == rw.answer,
+               "expr rewrite of %s: '%s' after step %zu", rw.question.c_str(), left.c_str(), i + 1);
+    }
+}
+
+// Formats change only how solutions are written: the same random draws give
+// the same questions and answers. The chain plan, rebuilt here from the
+// question alone, follows the definitions back from the queried variable.
+inline void test_formats() {
+    Rng plain_rng(43), fmt_rng(43);
+    const Formats all{.chain_plan = true, .expr_rewrite = true};
+    int planned = 0, rewritten = 0;
     for (const auto& task : reasoning_tasks())
         for (int d = 1; d <= 5; ++d)
             for (int i = 0; i < 100; ++i) {
                 const Problem p = make_problem(task, d, plain_rng);
-                const Problem q = make_problem(task, d, plan_rng, true);
-                EXPECT(p.question == q.question && p.answer == q.answer, "%s d=%d: chain_plan changed the problem",
+                const Problem q = make_problem(task, d, fmt_rng, all);
+                EXPECT(p.question == q.question && p.answer == q.answer, "%s d=%d: a format changed the problem",
                        task.c_str(), d);
+                if (task == "expr") {
+                    check_expr_rewrite(p, q);
+                    ++rewritten;
+                    continue;
+                }
                 if (task != "chain") {
-                    EXPECT(p.steps == q.steps, "%s: chain_plan changed its steps", task.c_str());
+                    EXPECT(p.steps == q.steps, "%s: a format changed its steps", task.c_str());
                     continue;
                 }
                 // "h=6; a=c*5; m=h+a; c=h+8; c?" -> plan "c=h+8; h=6".
@@ -126,7 +164,8 @@ inline void test_chain_plan() {
                        q.question.c_str(), q.steps.c_str(), want.c_str(), p.steps.c_str());
                 ++planned;
             }
-    std::printf("  %d chain plans rebuilt from their questions\n", planned);
+    std::printf("  %d chain plans rebuilt from their questions, %d expression rewrites checked\n", planned,
+                rewritten);
 }
 
 inline void test_reasoning() {
@@ -162,5 +201,5 @@ inline void test_reasoning() {
             }
     }
     std::printf("  %d problems verified by an independent solver\n", checked);
-    test_chain_plan();
+    test_formats();
 }

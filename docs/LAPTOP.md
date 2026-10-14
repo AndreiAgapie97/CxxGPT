@@ -50,6 +50,8 @@ and can do everything else from there.
    curl -fsSL https://claude.ai/install.sh | bash
    cd ~/CxxGPT && claude
    ```
+   To follow and steer that session from the Claude app (phone or
+   browser), start it with `claude remote-control` instead of `claude`.
    To let it push to GitHub from the laptop, also run
    `sudo apt install gh && gh auth login` once.
 

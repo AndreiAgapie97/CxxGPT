@@ -15,7 +15,7 @@ COMMON=(--data "$TEST_DIR/data.tok" --val "$TEST_DIR/data.tok" --seq 8 --dim 8 -
 "$CXXGPT" train "${COMMON[@]}" > "$TEST_DIR/train.log"
 grep -q '9 train tokens, 9 val tokens' "$TEST_DIR/train.log"
 grep -q '| val ' "$TEST_DIR/train.log"
-for option in dim heads experts shared ffn ehidden topk batch accum log-every eval-batches; do
+for option in dim heads experts shared ffn ehidden topk batch accum log-every eval-batches nope-every; do
     value=-1
     if [[ "$option" == dim || "$option" == heads || "$option" == topk || "$option" == batch || "$option" == accum || "$option" == log-every || "$option" == eval-batches ]]; then value=0; fi
     status=0
@@ -26,13 +26,15 @@ for option in dim heads experts shared ffn ehidden topk batch accum log-every ev
         exit 1
     fi
 done
-printf 'CLI: single-window train/validation and eleven invalid configurations passed\n'
+printf 'CLI: single-window train/validation and twelve invalid configurations passed\n'
 
 ./test_training_cli generate "$TEST_DIR"
-for variant in dense ternary moe ternary-moe; do
+for variant in dense ternary moe ternary-moe hybrid hybrid-moe nope nope-ternary-moe; do
     ARCH=()
     if [[ "$variant" == *ternary* ]]; then ARCH+=(--ternary); fi
     if [[ "$variant" == *moe* ]]; then ARCH+=(--experts 4 --topk 2 --ehidden 6 --shared 1); fi
+    if [[ "$variant" == hybrid* ]]; then ARCH+=(--ternary --fp-attn); fi
+    if [[ "$variant" == nope* ]]; then ARCH+=(--nope-every 1); fi
     for optimizer in adamw muon; do
       OPT=()
       if [[ "$optimizer" == muon ]]; then OPT+=(--muon); fi
@@ -74,6 +76,8 @@ printf 'CLI: benchmark emits alternating raw trials and rejects zero repeats\n'
 ./test_training_cli fresh "$TEST_DIR/model.ckpt" "$TEST_DIR/fresh.ckpt"
 "$CXXGPT" train "${COMMON[@]}" --steps 0 --ternary --init "$TEST_DIR/model.ckpt" --out "$TEST_DIR/fresh-ternary.ckpt" > "$TEST_DIR/init-ternary.log"
 ./test_training_cli fresh-ternary "$TEST_DIR/model.ckpt" "$TEST_DIR/fresh-ternary.ckpt"
+"$CXXGPT" train "${COMMON[@]}" --steps 0 --ternary --fp-attn --init "$TEST_DIR/model.ckpt" --out "$TEST_DIR/fresh-hybrid.ckpt" > "$TEST_DIR/init-hybrid.log"
+./test_training_cli fresh-hybrid "$TEST_DIR/model.ckpt" "$TEST_DIR/fresh-hybrid.ckpt"
 status=0
 ./test_training_cli same-sampler "$TEST_DIR/model.ckpt" "$TEST_DIR/fresh.ckpt" > "$TEST_DIR/rng-different.log" 2>&1 || status=$?
 [[ "$status" == 1 ]] && grep -q 'different samples' "$TEST_DIR/rng-different.log"

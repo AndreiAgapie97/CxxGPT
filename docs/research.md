@@ -562,10 +562,39 @@ probe text and validation. No environmental or multi-step RL experiment ran
 in this follow-up. GPU stable loss, masked accumulation, compact Muon state
 and conditional weight buffers still require `make gpu-test` on NVIDIA hardware.
 
+## Hybrid attention and positional encoding integration: 2026-10-14
+
+Claude through `cf183cd` is integrated with an ordinary merge, adding CPU
+full-precision attention with ternary FFNs, optional layers without RoPE,
+and expression-rewrite supervision. Two compatible conflicts preserve both
+per-projection precision choices and the research STE helpers, and retain
+the router-bias-preserving decode baseline. That baseline also clears the
+hybrid attention flag when constructing its full-precision clone.
+
+Eight double-reference and clipped float accumulation variants now cover
+hybrid dense/MoE and all/mixed NoPE. Actual masked/sparse CLI comparisons
+cover both AdamW and Muon in the new modes. Warm starts retain hybrid attention,
+and checkpoint fixtures cover 11-, 12- and 13-field configurations. Existing
+stable loss, norm, sampler, checkpoint protection and memory tests remain.
+GCC/Clang, native/CLI, ASan/UBSan and TSan checks pass; CUDA host/device
+compilation passes, but NVIDIA runtime remains pending. GPU training explicitly
+rejects hybrid attention and NoPE; packed inference supports NoPE and explicitly
+rejects hybrid attention. The defaults retain the original architecture.
+
+Main was reviewed independently before integration: its new CPU features
+passed their checks, but it still contains probability-clamped cross-entropy
+and equal-microbatch weighting because the research changes remain unpublished.
+The measured extreme loss is 87.33654 rather than 1000; unequal-mask CLI
+partition differences are about 0.00446/0.00423 after four AdamW/Muon updates.
+Both fixes remain preserved here. The new switches alone do not establish
+that ternary attention causes copying mistakes or improve digit-length
+generalization. Integration evidence is retained in
+`docs/results/2026-10-14/integration-cf183cd`.
+
 ## Publishing and continuation status
 
 The local research branch preserves all earlier work and ordinary Claude
-merges through `b7f2322`. There are no unresolved merge conflicts. GitHub
+merges through `cf183cd`. There are no unresolved merge conflicts. GitHub
 reads and fetches work, but Git HTTPS still denies push with HTTP 403 and
 the GitHub app's tree-write check returns `Resource not accessible by
 integration` (403). No remote `gpt/research` branch or research PR exists.

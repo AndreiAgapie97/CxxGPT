@@ -69,14 +69,17 @@ int main(int argc, char** argv) {
         for (int i = 0; i < 4; ++i) EXPECT(ra.state()[i] == rb.state()[i], "experiment arms consumed different samples");
         return g_failures ? 1 : 0;
     }
-    if (argc == 4 && (std::string(argv[1]) == "fresh" || std::string(argv[1]) == "fresh-ternary")) {
+    if (argc == 4 && (std::string(argv[1]) == "fresh" || std::string(argv[1]) == "fresh-ternary" ||
+                     std::string(argv[1]) == "fresh-hybrid")) {
         Model<float> a(peek_checkpoint_config(argv[2])), b(peek_checkpoint_config(argv[3]));
         AdamW opt;
         Rng rng(0), expected(2);
         load_checkpoint(argv[2], a, nullptr, nullptr); load_checkpoint(argv[3], b, &opt, &rng);
         EXPECT(a.params == b.params && a.router_bias == b.router_bias, "warm start changed weights/biases");
-        if (std::string(argv[1]) == "fresh-ternary")
+        if (std::string(argv[1]) != "fresh")
             EXPECT(!a.cfg.ternary && b.cfg.ternary && !b.qparams.empty(), "warm start did not convert to ternary");
+        if (std::string(argv[1]) == "fresh-hybrid")
+            EXPECT(b.cfg.fp_attention, "warm start did not retain full-precision attention");
         EXPECT(opt.step == 0 && opt.m.empty() && opt.v.empty(), "warm start retained optimizer state");
         for (int i = 0; i < 4; ++i) EXPECT(rng.state()[i] == expected.state()[i], "warm start retained data RNG");
         return g_failures ? 1 : 0;

@@ -166,6 +166,7 @@ between related synthetic problems.
   failures are a wrong first step: the solution resolves variables from
   the given value toward the question, so the model has to pick the path
   to the queried variable before it has written anything about it.
+  Writing the lookups first fixes most of that (below).
 
 ### Muon
 
@@ -225,6 +226,30 @@ Ternary MoE, otherwise the same runs:
   `scripts/night.sh` keeps 1.5e-3 for now: the best learning rate
   usually drops as models get wider, and a diverged run costs a night.
 - **Weight decay makes no measurable difference.**
+
+### Chain: look the variables up first
+
+`gen-reasoning --chain-plan` writes chain solutions in two passes: first
+the lookups, from the queried variable back to the given value (copying
+each definition), then the arithmetic forward. Same problems, same test
+set (validation losses are on different text, so not comparable):
+
+| variant | chain, plain | chain, plan first | all tasks, plain | all tasks, plan first |
+|---|---:|---:|---:|---:|
+| dense, Muon | 35.0% | **78.8%** | 64.9% | **70.0%** |
+| MoE, ternary, Muon | 21.2% | 35.0% | 61.1% | 62.4% |
+
+- **Planning first more than doubles chain accuracy on dense:** 100% at
+  difficulties 1–2, 97.5% at 3, and 17.5% at 4 (harder than training,
+  where it mostly stops one lookup short). The model no longer has to
+  guess the path before writing anything; it finds it one lookup at a
+  time. How a solution is written matters as much as the model.
+- **The ternary MoE gains much less.** Its errors are copying errors: it
+  writes the definition of another variable with the same source
+  (`f=z+5` where the problem says `f=z-1`). Precise copying is the job of
+  attention, and ternary attention weights may be too coarse for it at
+  this size; to look into, with the switch to ternary at the end or with
+  attention kept in higher precision.
 
 ### Full precision first, ternary at the end
 
@@ -308,7 +333,7 @@ flips between near-equal candidates.
 - Train on the laptop GPU: language first, then worked math solutions,
   checked on the GSM8K test set ([docs/LAPTOP.md](docs/LAPTOP.md)).
 - Ternary's cost at larger sizes, and how late the switch to ternary
-  can come.
+  can come; whether ternary attention is what hurts copying.
 - Length generalization on the curriculum.
 - Faster GPU training: fused attention, bf16.
 - Benchmark the inference engine against bitnet.cpp at equal model size.

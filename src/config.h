@@ -23,8 +23,14 @@ struct Config {
     int expert_hidden = 0;  // per expert; 0 picks ffn_hidden / top_k
     int n_shared = 0;       // always-on shared experts, each of expert_hidden
     bool ternary = false;   // BitLinear projections in the blocks
+    bool fp_attention = false;  // with ternary: attention stays full precision
+    // Layers without position encoding (NoPE): 0 = RoPE in every layer; n =
+    // the last layer of every n skips RoPE (1: no layer uses it). Attention
+    // then sees order only through the causal mask.
+    int nope_every = 0;
 
     int head_size() const { return d_model / n_heads; }
+    bool rope_layer(int l) const { return nope_every == 0 || l % nope_every != nope_every - 1; }
     int dense_hidden() const {
         return ffn_hidden ? ffn_hidden : std::max(32, (d_model * 8 / 3 + 31) / 32 * 32);
     }
@@ -48,6 +54,8 @@ struct Config {
         CHECK(d_model % n_heads == 0, "d_model %d not divisible by n_heads %d", d_model, n_heads);
         CHECK(head_size() % 2 == 0, "head size must be even for RoPE");
         CHECK(!moe() || (top_k >= 1 && top_k <= n_experts), "top_k must be in [1, n_experts]");
+        CHECK(!fp_attention || ternary, "full-precision attention (--fp-attn) needs --ternary");
+        CHECK(nope_every >= 0, "--nope-every must be 0 or more");
     }
 };
 

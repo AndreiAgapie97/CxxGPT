@@ -21,7 +21,7 @@
 // fp32 activations. Router biases affect expert selection and must be copied.
 inline Model<float> make_fp32_decode_baseline(Model<float>& source) {
     source.quantize_weights();
-    Config cfg = source.cfg; cfg.ternary = false;
+    Config cfg = source.cfg; cfg.ternary = cfg.fp_attention = false;
     Model<float> out(cfg);
     for (const ParamInfo& p : source.infos)
         std::copy_n(&(p.ternary ? source.qparams : source.params)[p.offset], p.size, &out.params[p.offset]);
@@ -33,6 +33,7 @@ class TernaryEngine {
 public:
     explicit TernaryEngine(const Model<float>& m) : cfg_(m.cfg), kernel_(default_int8_kernel()) {
         CHECK(cfg_.ternary, "TernaryEngine needs a model trained with --ternary");
+        CHECK(!cfg_.fp_attention, "TernaryEngine runs all-ternary models, not --fp-attn ones (yet)");
         CHECK(cfg_.top_k <= 64, "top_k above 64 is not supported");
         CHECK(cfg_.d_model % 32 == 0, "d_model must be a multiple of 32 for the bitplane kernels");
         CHECK(cfg_.always_hidden() % 32 == 0 && cfg_.ehidden() % 32 == 0,
@@ -136,7 +137,7 @@ public:
             auto& L = layers_[l];
             rmsnorm(h_.data(), x_.data(), L.ln1.data(), C);
             gemv(L.wqkv, h_.data(), qkv_.data());
-            rope_apply(qkv_.data(), rope_, 1, 1, C, NH, false, pos_);
+            if (cfg_.rope_layer(l)) rope_apply(qkv_.data(), rope_, 1, 1, C, NH, false, pos_);
             float* kc = kcache_[l].data();
             float* vc = vcache_[l].data();
             std::copy(&qkv_[C], &qkv_[2 * C], kc + size_t(pos_) * C);

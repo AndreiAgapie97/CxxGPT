@@ -34,12 +34,17 @@ inline void test_masked_accumulation() {
     TokenLossMean mean;
     mean.add(NAN, 0); mean.add(10, 1); mean.add(2, 3);
     EXPECT(mean.value() == 4 && mean.count == 4, "token-weighted metric disagrees with scalar reference");
-    for (int variant = 0; variant < 4; ++variant) {
+    for (int variant = 0; variant < 8; ++variant) {
         Config cfg;
         cfg.vocab = 13; cfg.seq_len = 8; cfg.d_model = 8;
         cfg.n_heads = 2; cfg.n_layers = 1; cfg.ffn_hidden = 12;
-        cfg.ternary = variant % 2;
-        if (variant >= 2) { cfg.n_experts = 4; cfg.top_k = 2; cfg.expert_hidden = 6; cfg.n_shared = 1; }
+        cfg.ternary = variant % 2 || variant == 4;
+        cfg.fp_attention = variant == 4 || variant == 5;
+        if (variant >= 4) cfg.n_layers = 2;
+        if (variant >= 5) cfg.nope_every = variant == 6 ? 1 : 2;
+        if (variant == 2 || variant == 3 || variant == 5 || variant == 7) {
+            cfg.n_experts = 4; cfg.top_k = 2; cfg.expert_hidden = 6; cfg.n_shared = 1;
+        }
         Model<double> full(cfg), micro(cfg);
         full.init(57); micro.params = full.params;
         full.zero_grad();

@@ -27,8 +27,9 @@ Reasoning is the first capability we go after.
   (AVX2, AVX-512, VNNI). A trained ternary checkpoint runs on them.
 - `src/tokenizer.h`: byte-level BPE; digits are never merged.
 - `src/reasoning.h`: a synthetic reasoning curriculum with held-out harder
-  test levels. `cxxgpt prep-qa` turns GSM8K-style JSON Lines into the same
-  format.
+  test levels (`gen-reasoning --chain-plan`: chain solutions look the
+  variables up first, which more than doubles chain accuracy). `cxxgpt
+  prep-qa` turns GSM8K-style JSON Lines into the same format.
 - `src/gpu.cu` (interface `src/gpu.h`): the CUDA training backend, the
   same model op for op, fp32 with cuBLAS (TF32 by default).
   `tests/test_gpu.cpp` compares it with the CPU engine. Build with

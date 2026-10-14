@@ -61,6 +61,10 @@ inline void test_model_gradients() {
     dense.ffn_hidden = 12;
     model_gradcheck("dense", dense, 21);
 
+    Config nope = dense;  // layer 1 without RoPE
+    nope.nope_every = 2;
+    model_gradcheck("dense, half NoPE", nope, 24);
+
     Config moe = dense;
     moe.n_experts = 4;
     moe.top_k = 2;
@@ -186,22 +190,74 @@ inline void test_bitlinear() {
     EXPECT(gnorm > 0 && std::isfinite(gnorm), "ternary model has no gradient");
 }
 
+// --fp-attn: only the FFN is ternary. With the FFN's weights at zero, its
+// output is zero however it is quantized, so the model must compute exactly
+// what the full-precision model computes, gradients included, while the
+// all-ternary model (whose attention is quantized) computes something else.
+inline void test_fp_attention() {
+    Config cfg;
+    cfg.vocab = 23;
+    cfg.seq_len = 8;
+    cfg.d_model = 16;
+    cfg.n_layers = 2;
+    cfg.n_heads = 2;
+    cfg.ffn_hidden = 24;
+    cfg.ternary = cfg.fp_attention = true;
+    Config fp = cfg, all = cfg;
+    fp.ternary = fp.fp_attention = false;
+    all.fp_attention = false;
+    Model<double> m(cfg), mfp(fp), mall(all);
+    m.init(5);
+    auto is_ffn = [](const ParamInfo& p) { return p.name.ends_with("wfc") || p.name.ends_with("wproj"); };
+    for (const auto& p : m.infos) {
+        EXPECT(p.ternary == is_ffn(p), "%s: ternary is %d with --fp-attn", p.name.c_str(), int(p.ternary));
+        if (is_ffn(p)) std::fill_n(&m.params[p.offset], p.size, 0.0);
+    }
+    mfp.params = mall.params = m.params;
+    Rng rng(6);
+    const int B = 2, Tn = 8, N = B * Tn;
+    std::vector<int> tok(N), tgt(N);
+    for (int n = 0; n < N; ++n) tok[n] = int(rng.below(cfg.vocab)), tgt[n] = int(rng.below(cfg.vocab));
+    m.zero_grad();
+    mfp.zero_grad();
+    const double l = m.forward(tok.data(), tgt.data(), B, Tn), lfp = mfp.forward(tok.data(), tgt.data(), B, Tn);
+    m.backward();
+    mfp.backward();
+    EXPECT(std::abs(l - lfp) <= 1e-12 * lfp, "--fp-attn loss %.15g, full precision %.15g", l, lfp);
+    for (const auto& p : m.infos) {
+        // The FFN's gradients see quantized inputs; ln2 only feeds the FFN.
+        if (is_ffn(p) || p.name.ends_with("ln2")) continue;
+        double diff = 0, mx = 0;
+        for (size_t i = p.offset; i < p.offset + p.size; ++i) {
+            diff = std::max(diff, std::abs(m.grads[i] - mfp.grads[i]));
+            mx = std::max(mx, std::abs(mfp.grads[i]));
+        }
+        EXPECT(mx > 0 && diff <= 1e-12 * mx, "%s: --fp-attn gradient differs by %g (max %g)", p.name.c_str(),
+               diff, mx);
+    }
+    const double lall = mall.forward(tok.data(), tgt.data(), B, Tn);
+    EXPECT(std::abs(lall - lfp) > 1e-6, "all-ternary loss %g equals full-precision loss %g", lall, lfp);
+}
+
 // KV-cache decoding of left-padded sequences must give the logits the full
 // forward pass gives each sequence on its own.
 inline void test_decode_matches_forward() {
-    for (int variant = 0; variant < 2; ++variant) {
+    const char* names[] = {"dense", "ternary MoE", "ternary MoE, fp attention", "dense, half NoPE"};
+    for (int variant = 0; variant < 4; ++variant) {
         Config cfg;
         cfg.vocab = 29;
         cfg.seq_len = 16;
         cfg.d_model = 32;
         cfg.n_layers = 2;
         cfg.n_heads = 4;
-        if (variant == 1) {  // our architecture: ternary MoE with a shared expert
+        cfg.nope_every = variant == 3 ? 2 : 0;
+        if (variant == 1 || variant == 2) {  // our architecture: ternary MoE with a shared expert
             cfg.n_experts = 4;
             cfg.top_k = 2;
             cfg.n_shared = 1;
             cfg.expert_hidden = 24;
             cfg.ternary = true;
+            cfg.fp_attention = variant == 2;
         }
         Model<float> m(cfg);
         m.init(3);
@@ -239,15 +295,14 @@ inline void test_decode_matches_forward() {
                 worst = std::max(worst, diff / mx);
             }
         }
-        EXPECT(worst < 1e-4, "decode vs forward (%s): relative difference %g",
-               variant ? "ternary MoE" : "dense", worst);
+        EXPECT(worst < 1e-4, "decode vs forward (%s): relative difference %g", names[variant], worst);
     }
 }
 
 // A ternary model on the bitplane int8 kernels computes what the training
 // forward pass computes (which fake-quantizes with the same arithmetic).
 inline void test_ternary_engine() {
-    for (int variant = 0; variant < 2; ++variant) {
+    for (int variant = 0; variant < 3; ++variant) {
         Config cfg;
         cfg.vocab = 40;
         cfg.seq_len = 24;
@@ -255,12 +310,13 @@ inline void test_ternary_engine() {
         cfg.n_layers = 2;
         cfg.n_heads = 4;
         cfg.ternary = true;
-        if (variant == 1) {
+        if (variant >= 1) {
             cfg.n_experts = 4;
             cfg.top_k = 2;
             cfg.n_shared = 1;
             cfg.expert_hidden = 64;
         }
+        if (variant == 2) cfg.nope_every = 2;  // layer 1 without RoPE
         Model<float> m(cfg);
         m.init(17);
         // Larger weights than the init, so activations are far from zero
@@ -337,13 +393,16 @@ inline void test_eval_reasoning() {
 // matrix weights are identical. Compare decoding against an explicit clone,
 // with a zero-bias negative control that must produce different logits.
 inline void test_decode_baseline_routing_state() {
+  for (bool hybrid : {false, true}) {
     Config cfg; cfg.vocab = 32; cfg.seq_len = 8; cfg.d_model = 32;
     cfg.n_heads = 2; cfg.n_layers = 1; cfg.n_experts = 4;
     cfg.top_k = 2; cfg.expert_hidden = 32; cfg.ternary = true;
+    cfg.fp_attention = hybrid;
+    cfg.nope_every = hybrid ? 1 : 0;
     Model<float> source(cfg); source.init(7);
     source.router_bias[0] = {1000, -1000, -1000, 1000};
     auto baseline = make_fp32_decode_baseline(source);
-    Config fcfg = cfg; fcfg.ternary = false;
+    Config fcfg = cfg; fcfg.ternary = fcfg.fp_attention = false;
     Model<float> reference(fcfg), zero_bias(fcfg);
     for (const auto& p : source.infos)
         for (size_t i = p.offset; i < p.offset + p.size; ++i)
@@ -362,6 +421,7 @@ inline void test_decode_baseline_routing_state() {
         }
     }
     EXPECT(missing_bias_difference > 1e-6, "routing-state fixture cannot detect missing biases");
+  }
 }
 
 // generate gives exactly max_new tokens, or as many as the context allows
@@ -397,6 +457,7 @@ inline void test_model() {
     test_eval_reasoning();
     test_ternary_engine();
     test_decode_matches_forward();
+    test_fp_attention();
     test_model_gradients();
     test_model_float_vs_double();
     test_bitlinear();

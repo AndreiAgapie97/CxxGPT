@@ -428,7 +428,8 @@ constexpr char kCkptMagic[9] = "CXCKPT01";
 
 inline void write_config(FILE* f, const Config& c) {
     const int32_t v[] = {c.vocab, c.seq_len, c.d_model, c.n_layers, c.n_heads, c.ffn_hidden,
-                         c.n_experts, c.top_k, c.expert_hidden, c.n_shared, c.ternary ? 1 : 0};
+                         c.n_experts, c.top_k, c.expert_hidden, c.n_shared, c.ternary ? 1 : 0,
+                         c.fp_attention ? 1 : 0, c.nope_every};
     const int32_t n = int32_t(std::size(v));
     std::fwrite(&n, 4, 1, f);
     std::fwrite(v, 4, n, f);
@@ -438,11 +439,13 @@ inline Config read_config(FILE* f) {
     int32_t n = 0, v[64] = {};
     CHECK(std::fread(&n, 4, 1, f) == 1 && n > 0 && n <= 64, "bad config in checkpoint");
     CHECK(std::fread(v, 4, n, f) == size_t(n), "truncated config");
-    CHECK(n == 11, "checkpoint config has %d fields, expected 11", n);
+    // Older checkpoints have fewer fields: 11 before fp_attention, 12 before
+    // nope_every. The missing ones read as 0 (off).
+    CHECK(n >= 11 && n <= 13, "checkpoint config has %d fields, expected 13", n);
     Config c;
     c.vocab = v[0]; c.seq_len = v[1]; c.d_model = v[2]; c.n_layers = v[3]; c.n_heads = v[4];
     c.ffn_hidden = v[5]; c.n_experts = v[6]; c.top_k = v[7]; c.expert_hidden = v[8];
-    c.n_shared = v[9]; c.ternary = v[10] != 0;
+    c.n_shared = v[9]; c.ternary = v[10] != 0; c.fp_attention = v[11] != 0; c.nope_every = v[12];
     return c;
 }
 
