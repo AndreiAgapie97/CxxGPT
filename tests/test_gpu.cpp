@@ -10,9 +10,12 @@
 // the gradient (to half its norm), as training with --clip does. Attention
 // runs on the fused kernels (attention.cuh), except in one run that checks
 // the cuBLAS path (--no-fused-attn). Two runs check --fp-attn and
-// --nope-every. One run multiplies in bf16, against looser tolerances. A
-// last check trains on the GPU alone, with TF32 and with bf16, until a toy
-// pattern is learned.
+// --nope-every. One run multiplies in bf16, against looser tolerances, and
+// two in TF32, where attention runs on cuBLAS and on the tensor-core fused
+// kernels (attention_tc.cuh). Before all that, both sets of fused kernels
+// are checked alone against a double-precision reference. A last check
+// trains on the GPU alone, with TF32 and with bf16, until a toy pattern is
+// learned.
 #include <cmath>
 #include <cstdio>
 #include <string>
@@ -22,6 +25,7 @@
 #include "../src/model.h"
 #include "../src/train.h"
 #include "test_util.h"
+#include "attention_ref.h"
 #include "extreme_loss_fixture.h"
 #include "test_accumulation.h"
 
@@ -176,7 +180,7 @@ void masked_accumulation() {
 }
 
 // The GPU alone learns a repeating sequence.
-void learns_pattern(bool muon, Matmul matmul = Matmul::tf32) {
+void learns_pattern(bool muon, Matmul matmul = Matmul::tf32, bool fused = false) {
     Config cfg;
     cfg.vocab = 64;
     cfg.seq_len = 32;
@@ -188,7 +192,7 @@ void learns_pattern(bool muon, Matmul matmul = Matmul::tf32) {
     cfg.ternary = true;
     Model<float> host(cfg);
     host.init(7);
-    GpuTrainer gpu(cfg, host.infos, matmul);
+    GpuTrainer gpu(cfg, host.infos, matmul, fused);
     gpu.set_params(host.params.data());
     gpu.set_muon(muon);
     const int B = 8, N = B * cfg.seq_len;
@@ -208,8 +212,46 @@ void learns_pattern(bool muon, Matmul matmul = Matmul::tf32) {
     }
     const char* opt = muon ? "Muon" : "AdamW";
     const char* mm = matmul == Matmul::bf16 ? "bf16" : matmul == Matmul::fp32 ? "fp32" : "tf32";
-    std::printf("  learns pattern (%s, %s): loss %.3f -> %.3f\n", opt, mm, first, last);
+    std::printf("  learns pattern (%s, %s%s): loss %.3f -> %.3f\n", opt, mm, fused ? ", fused attention" : "", first,
+                last);
     EXPECT(last < 0.1 * first, "GPU training with %s did not learn the pattern: %.3f -> %.3f", opt, first, last);
+}
+
+// The fused attention kernels alone, against the double-precision reference
+// (attention_ref.h): attention.cuh's fp32 kernels, and attention_tc.cuh's
+// tensor-core ones, whose inputs are rounded to TF32 as cuBLAS rounds them:
+// 11 significant bits, about 5e-4 apart, which is the size of their errors
+// (2e-4 to 1e-3 on the RTX 4070), hence the bound of 3e-3.
+void fused_kernels() {
+    struct Shape {
+        int B, NH, HS, Tn;
+    };
+    const Shape shapes[] = {
+        {2, 2, 16, 5},    // shorter than a tile
+        {2, 3, 16, 33},   // one row past a tile
+        {1, 2, 64, 70},   // two blocks of rows, the second mostly padding
+        {2, 2, 64, 512},  // the night-1 shape
+        {2, 2, 32, 100},
+        {1, 2, 48, 130},
+        {1, 1, 128, 40},  // the largest head size
+    };
+    uint64_t seed = 11;
+    for (const Shape& s : shapes) {
+        const auto k = attention_ref::make_case(s.B, s.NH, s.HS, s.Tn, seed++);
+        for (bool tc : {false, true}) {
+            std::vector<float> out(k.out.size()), lse(k.lse.size()), dqkv = k.dqkv0;
+            gpu_fused_attention(k.qkv.data(), k.dout.data(), out.data(), lse.data(), dqkv.data(), s.B, s.Tn, s.NH,
+                                s.HS, tc);
+            const auto e = attention_ref::errors(k, out, lse, dqkv);
+            std::printf("  fused %s, %d x %d heads of %d, %d tokens: out %.1e, lse %.1e, dq %.1e, dk %.1e, dv %.1e\n",
+                        tc ? "tensor-core" : "fp32", s.B, s.NH, s.HS, s.Tn, e.out, e.lse, e.dq, e.dk, e.dv);
+            const double tol_out = tc ? 3e-3 : 1e-5, tol_grad = tc ? 3e-3 : 1e-4;
+            EXPECT(e.out < tol_out && e.lse < tol_out, "fused %s forward: out %g, lse %g", tc ? "tc" : "fp32", e.out,
+                   e.lse);
+            EXPECT(e.dq < tol_grad && e.dk < tol_grad && e.dv < tol_grad, "fused %s backward: dq %g, dk %g, dv %g",
+                   tc ? "tc" : "fp32", e.dq, e.dk, e.dv);
+        }
+    }
 }
 
 // Zero block projections make the residual stream equal the embedding.
@@ -294,6 +336,7 @@ int main() {
     std::printf("%s\n", GpuTrainer::device_name().c_str());
     extreme_cross_entropy();
     masked_accumulation();
+    fused_kernels();
 
     Config dense;
     dense.vocab = 61;
@@ -317,6 +360,16 @@ int main() {
     wide.seq_len = 40;
     wide.n_heads = 1;
     compare("head of 128", wide, 1e-5, 1e-4, 1e-4);
+
+    // TF32, as training runs: attention through cuBLAS, and fused on the
+    // tensor cores. Both round the same inputs the same way, so the fused
+    // kernels must stay as close to the CPU as cuBLAS does. The bounds are
+    // twice what cuBLAS measured on the RTX 4070 (loss 1.0e-4, gradients
+    // 6.1e-2 at worst, on a norm weight, weights 7.7e-3).
+    wide.seq_len = 70;
+    wide.n_heads = 2;
+    compare("tf32, cuBLAS attention", wide, 2e-4, 1.5e-1, 2e-2, {.fused = false, .matmul = Matmul::tf32});
+    compare("tf32, fused attention", wide, 2e-4, 1.5e-1, 2e-2, {.matmul = Matmul::tf32});
 
     Config tern = dense;
     tern.ternary = true;
@@ -355,6 +408,7 @@ int main() {
     learns_pattern(false);
     learns_pattern(true);
     learns_pattern(false, Matmul::bf16);
+    learns_pattern(false, Matmul::tf32, true);
     profile_regions();
     if (g_failures) return 1;
     std::printf("all passed\n");

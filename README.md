@@ -25,7 +25,7 @@ training memory.
 | part | state |
 |---|---|
 | training engine (CPU) | transformer with RoPE, RMSNorm, SwiGLU, tied embeddings; ternary BitLinear; top-k MoE with shared experts and bias-based load balancing; AdamW and Muon; checkpoints and resume |
-| training engine (GPU) | the same model in CUDA + cuBLAS, op for op; compiled in CI, tested against the CPU on the laptop's RTX 4070; fused attention kernels opt-in (`--fused-attn`) |
+| training engine (GPU) | the same model in CUDA + cuBLAS, op for op; compiled in CI, tested against the CPU on the laptop's RTX 4070; fused attention on the tensor cores by default (`--no-fused-attn` for cuBLAS) |
 | tokenizer | byte-level BPE, trained by our own code; parallel streaming encoder |
 | data | synthetic reasoning curriculum; GSM8K and other public math and text sets (`scripts/get_data.py`) |
 | evaluation | exact-answer accuracy on held-out problems, per task and difficulty |
@@ -169,7 +169,8 @@ The research CUDA stable-loss and masked-accumulation tests require
 | `src/train.h` | AdamW, Muon (Newton–Schulz), clipping, schedule, token data, checkpoints |
 | `src/config.h` | model shape and parameter layout, shared with the GPU code |
 | `src/gpu.cu`, `src/gpu.h` | the CUDA trainer |
-| `src/attention.cuh` | fused attention kernels for the GPU (tested on a CPU emulator, `tests/cuda_emu.h`) |
+| `src/attention.cuh` | fused attention kernels for the GPU in fp32 (tested on a CPU emulator, `tests/cuda_emu.h`) |
+| `src/attention_tc.cuh` | the same on the tensor cores, for TF32/bf16 training (tested on the GPU) |
 | `src/tokenizer.h` | byte-level BPE |
 | `src/reasoning.h` | the reasoning curriculum and its evaluation |
 | `src/ternary.h`, `src/infer.h` | bitplane int8 kernels and the ternary inference engine |
@@ -460,9 +461,11 @@ vocabulary that layer is under 1 MB.
   GPU): full-precision attention, and for length generalization layers
   without RoPE (`--nope-every`) and rewritten expressions
   (`gen-reasoning --expr-rewrite`).
-- Faster GPU training: fused attention and bf16 are written but opt-in;
-  on the laptop they still miss three GPU checks (docs/LAPTOP.md, "GPU
-  options"), and `--profile` says what to speed up next.
+- Faster GPU training: fused attention on the tensor cores is the default
+  (1.18x); bf16 is written but opt-in. On the laptop three GPU checks still
+  miss, all on a norm weight's gradient (docs/LAPTOP.md, "GPU options"),
+  and `--profile` says what to speed up next (docs/research-plan.md,
+  "Speed").
 - Benchmark the inference engine against bitnet.cpp at equal model size.
 
 ### CPU build portability

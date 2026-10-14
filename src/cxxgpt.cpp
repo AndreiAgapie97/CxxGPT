@@ -700,8 +700,9 @@ int cmd_train(Args& a) {
             "        --time-limit MINUTES --threads N --profile\n"
             "gpu:    --gpu (train on the GPU; needs cxxgpt-gpu, from make gpu)\n"
             "        --matmul tf32 (tensor cores; fp32: exact, slower; bf16: coarser, maybe faster)\n"
-            "        --no-tf32 is an alias for fp32; --fused-attn opts into experimental kernels\n"
-            "        default attention uses cuBLAS until NVIDIA runtime validation\n"
+            "        --no-tf32 is an alias for fp32\n"
+            "        attention is fused by default (no stored weight matrix; on the tensor cores\n"
+            "        with tf32/bf16); --no-fused-attn uses cuBLAS products instead\n"
             "reason: --reason-test FILE --reason-every STEPS --reason-limit 300 --max-new 200\n"
             "Ctrl-C saves a checkpoint and stops; --resume continues from --out, and\n"
             "takes precedence over --init once --out exists.\n");
@@ -751,7 +752,6 @@ int cmd_train(Args& a) {
     g_profiler.enabled = a.flag("profile");
     const bool use_gpu = a.flag("gpu"), request_fused = a.flag("fused-attn"), disable_fused = a.flag("no-fused-attn");
     CHECK(!request_fused || !disable_fused, "choose only one of --fused-attn and --no-fused-attn");
-    const bool fused_attn = request_fused;
     const bool no_tf32 = a.flag("no-tf32");
     const std::string matmul = a.str("matmul", no_tf32 ? "fp32" : "tf32");
     CHECK(!no_tf32 || matmul == "fp32", "--no-tf32 conflicts with --matmul %s", matmul.c_str());
@@ -785,11 +785,16 @@ int cmd_train(Args& a) {
     if (use_gpu) {
 #ifdef CXXGPT_CUDA
         const Matmul mm = matmul == "fp32" ? Matmul::fp32 : matmul == "bf16" ? Matmul::bf16 : Matmul::tf32;
+        // Fused attention by default, for the head sizes it takes; cuBLAS
+        // with --no-fused-attn (or larger heads).
+        const bool fused_attn = request_fused || (!disable_fused && fused_attention_fits(cfg.head_size()));
         backend = std::make_unique<GpuBackend>(model, opt, mm, fused_attn);
         std::printf("gpu: %s, %s matmuls, %s attention\n", GpuTrainer::device_name().c_str(), matmul.c_str(),
-                    fused_attn ? "fused" : "cuBLAS");
+                    !fused_attn                                              ? "cuBLAS"
+                    : fused_attention_on_tensor_cores(mm, cfg.head_size()) ? "fused tensor-core"
+                                                                           : "fused fp32");
 #else
-        (void)fused_attn;
+        (void)request_fused;
         CHECK(false, "this cxxgpt was built without CUDA; use cxxgpt-gpu (make gpu)");
 #endif
     } else {

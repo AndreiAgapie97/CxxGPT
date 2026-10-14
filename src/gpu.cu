@@ -24,6 +24,7 @@
 #include <cuda_runtime.h>
 
 #include "attention.cuh"
+#include "attention_tc.cuh"
 
 #define CUDA_CHECK(call)                                                                       \
     do {                                                                                       \
@@ -554,6 +555,75 @@ __global__ void moe_router_grad(float* drl, const float* gate, const float* dgat
     for (int i = 0; i < K; ++i) drl[size_t(n) * E + sel[size_t(n) * K + i]] = g[i] * (dg[i] - s);
 }
 
+// Fused attention, shared by GpuTrainer and gpu_fused_attention (tests):
+// the tensor-core kernels (attention_tc.cuh) when tc, else the fp32 ones
+// (attention.cuh). qkv [B·Tn, 3C], out [B·Tn, C], lse and dsum [B, NH, Tn].
+
+// Lets the kernels for this head size use the shared memory they need
+// (above 48 KB, CUDA wants to be told first).
+void fused_attention_prepare(int HS, bool tc) {
+    auto allow = [](const void* kernel, int floats) {
+        CUDA_CHECK(cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
+                                        floats * int(sizeof(float))));
+    };
+    if (tc) {
+        attn_tc::with_head_size(HS, [&]<int H>() {
+            allow((const void*)attn_tc::fwd<H>, attn_tc::fwd_smem(H));
+            allow((const void*)attn_tc::bwd_dq<H>, attn_tc::dq_smem(H));
+            allow((const void*)attn_tc::bwd_dkv<H>, attn_tc::dkv_smem(H));
+        });
+    } else {
+        allow((const void*)attn::fwd, attn::fwd_smem(HS));
+        allow((const void*)attn::bwd_dq, attn::dq_smem(HS));
+        allow((const void*)attn::bwd_dkv, attn::dkv_smem(HS));
+    }
+}
+
+void fused_attention_forward(bool tc, const float* qkv, float* out, float* lse, int B, int Tn, int C, int NH,
+                             int HS) {
+    const float scale = 1.0f / std::sqrt(float(HS));
+    if (tc) {
+        const dim3 grid((Tn + attn_tc::kBlockRows - 1) / attn_tc::kBlockRows, NH, B);
+        attn_tc::with_head_size(HS, [&]<int H>() {
+            attn_tc::fwd<H><<<grid, attn_tc::kThreads, attn_tc::fwd_smem(H) * sizeof(float)>>>(qkv, out, lse, Tn, C,
+                                                                                            NH, scale);
+        });
+    } else {
+        const dim3 grid((Tn + attn::kBlockRows - 1) / attn::kBlockRows, NH, B);
+        attn::fwd<<<grid, attn::kThreads, attn::fwd_smem(HS) * sizeof(float)>>>(qkv, out, lse, Tn, C, NH, HS,
+                                                                                scale);
+    }
+    LAUNCH_CHECK();
+}
+
+// dqkv += the backward of out (given dout); dsum is scratch, B·NH·Tn floats.
+void fused_attention_backward(bool tc, const float* qkv, const float* out, const float* dout, const float* lse,
+                              float* dsum, float* dqkv, int B, int Tn, int C, int NH, int HS) {
+    const float scale = 1.0f / std::sqrt(float(HS));
+    const int rows = B * NH * Tn;
+    attn::bwd_dsum<<<(rows + attn::kWarps - 1) / attn::kWarps, attn::kThreads>>>(out, dout, dsum, rows, Tn, C, NH,
+                                                                                 HS);
+    LAUNCH_CHECK();
+    if (tc) {
+        const dim3 grid((Tn + attn_tc::kBlockRows - 1) / attn_tc::kBlockRows, NH, B);
+        attn_tc::with_head_size(HS, [&]<int H>() {
+            attn_tc::bwd_dq<H><<<grid, attn_tc::kThreads, attn_tc::dq_smem(H) * sizeof(float)>>>(
+                qkv, dout, lse, dsum, dqkv, Tn, C, NH, scale);
+            LAUNCH_CHECK();
+            attn_tc::bwd_dkv<H><<<grid, attn_tc::kThreads, attn_tc::dkv_smem(H) * sizeof(float)>>>(
+                qkv, dout, lse, dsum, dqkv, Tn, C, NH, scale);
+        });
+    } else {
+        const dim3 grid((Tn + attn::kBlockRows - 1) / attn::kBlockRows, NH, B);
+        attn::bwd_dq<<<grid, attn::kThreads, attn::dq_smem(HS) * sizeof(float)>>>(qkv, dout, lse, dsum, dqkv, Tn, C,
+                                                                                  NH, HS, scale);
+        LAUNCH_CHECK();
+        attn::bwd_dkv<<<grid, attn::kThreads, attn::dkv_smem(HS) * sizeof(float)>>>(qkv, dout, lse, dsum, dqkv, Tn,
+                                                                                    C, NH, HS, scale);
+    }
+    LAUNCH_CHECK();
+}
+
 }  // namespace
 
 // ---------------------------------------------------------------------------
@@ -653,9 +723,11 @@ struct GpuTrainer::Impl {
         return out;
     }
 
-    // Attention: fused kernels (attention.cuh), which keep one number per
-    // row (lse), or cuBLAS products through the full matrix of weights (att).
+    // Attention: fused kernels (attention_tc.cuh, attention.cuh), which keep
+    // one number per row (lse), or cuBLAS products through the full matrix
+    // of weights (att).
     bool fused_attn = false;
+    bool tc_attn = false;  // the fused kernels on the tensor cores (attention_tc.cuh)
 
     struct LayerActs {
         DevBuf<float> ln1, rstd1, qkv, att, lse, atty, resid1, ln2, rstd2, resid2, fc, sw;
@@ -688,15 +760,10 @@ struct GpuTrainer::Impl {
             const int HS = cfg.head_size();
             CHECK(HS <= attn::kMaxHS, "fused attention takes heads of up to %d (this model: %d); use --no-fused-attn",
                   attn::kMaxHS, HS);
-            // Above 48 KB of shared memory per block (the backward kernels
-            // at head size 128), CUDA wants to be told first.
-            auto allow = [](const void* kernel, int floats) {
-                CUDA_CHECK(cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
-                                                floats * int(sizeof(float))));
-            };
-            allow((const void*)attn::fwd, attn::fwd_smem(HS));
-            allow((const void*)attn::bwd_dq, attn::dq_smem(HS));
-            allow((const void*)attn::bwd_dkv, attn::dkv_smem(HS));
+            // With TF32 or bf16 matmuls, attention multiplies on the tensor
+            // cores too; exact fp32 keeps the fp32 kernels.
+            tc_attn = fused_attention_on_tensor_cores(matmul, HS);
+            fused_attention_prepare(HS, tc_attn);
         }
         params.resize(n_params);
         grads.resize(n_params);
@@ -890,10 +957,7 @@ struct GpuTrainer::Impl {
         const int C = cfg.d_model, NH = cfg.n_heads, HS = cfg.head_size();
         const float scale = 1.0f / std::sqrt(float(HS));
         if (fused_attn) {
-            const dim3 grid((Tn + attn::kBlockRows - 1) / attn::kBlockRows, NH, B);
-            attn::fwd<<<grid, attn::kThreads, attn::fwd_smem(HS) * sizeof(float)>>>(a.qkv.p, a.atty.p, a.lse.p, Tn,
-                                                                                    C, NH, HS, scale);
-            LAUNCH_CHECK();
+            fused_attention_forward(tc_attn, a.qkv.p, a.atty.p, a.lse.p, B, Tn, C, NH, HS);
             return;
         }
         // Without: per sequence, the heads as one strided batch of cuBLAS
@@ -925,17 +989,7 @@ struct GpuTrainer::Impl {
         const int C = cfg.d_model, NH = cfg.n_heads, HS = cfg.head_size();
         const float scale = 1.0f / std::sqrt(float(HS));
         if (fused_attn) {
-            const int rows = B * NH * Tn;
-            attn::bwd_dsum<<<(rows + attn::kWarps - 1) / attn::kWarps, attn::kThreads>>>(a.atty.p, dout, dsum.p, rows,
-                                                                                         Tn, C, NH, HS);
-            LAUNCH_CHECK();
-            const dim3 grid((Tn + attn::kBlockRows - 1) / attn::kBlockRows, NH, B);
-            attn::bwd_dq<<<grid, attn::kThreads, attn::dq_smem(HS) * sizeof(float)>>>(a.qkv.p, dout, a.lse.p, dsum.p,
-                                                                                      dqkv_, Tn, C, NH, HS, scale);
-            LAUNCH_CHECK();
-            attn::bwd_dkv<<<grid, attn::kThreads, attn::dkv_smem(HS) * sizeof(float)>>>(
-                a.qkv.p, dout, a.lse.p, dsum.p, dqkv_, Tn, C, NH, HS, scale);
-            LAUNCH_CHECK();
+            fused_attention_backward(tc_attn, a.qkv.p, a.atty.p, dout, a.lse.p, dsum.p, dqkv_, B, Tn, C, NH, HS);
             return;
         }
         const float* att = a.att.p;
@@ -1375,6 +1429,40 @@ size_t GpuTrainer::device_bytes() const { return g_device_bytes; }
 
 void GpuTrainer::set_profile(bool on) { impl_->profiling = on; }
 std::vector<std::pair<std::string, double>> GpuTrainer::take_profile() { return impl_->take_profile(); }
+
+bool fused_attention_fits(int head_size) { return head_size <= attn::kMaxHS; }
+
+bool fused_attention_on_tensor_cores(Matmul matmul, int head_size) {
+    return matmul != Matmul::fp32 && head_size % 16 == 0 && head_size <= attn_tc::kMaxHS;
+}
+
+void gpu_fused_attention(const float* qkv, const float* dout, float* out, float* lse, float* dqkv, int B, int Tn,
+                         int NH, int HS, bool tensor_cores) {
+    CHECK(HS <= attn::kMaxHS && (!tensor_cores || fused_attention_on_tensor_cores(Matmul::tf32, HS)),
+          "no fused attention kernels for heads of %d", HS);
+    const int C = NH * HS;
+    const size_t N = size_t(B) * Tn, rows = size_t(B) * NH * Tn;
+    DevBuf<float> d_qkv, d_dout, d_out, d_lse, d_dsum, d_dqkv;
+    auto up = [](DevBuf<float>& d, const float* h, size_t n) {
+        d.resize(n);
+        CUDA_CHECK(cudaMemcpy(d.p, h, n * sizeof(float), cudaMemcpyHostToDevice));
+    };
+    auto down = [](float* h, const DevBuf<float>& d, size_t n) {
+        CUDA_CHECK(cudaMemcpy(h, d.p, n * sizeof(float), cudaMemcpyDeviceToHost));
+    };
+    up(d_qkv, qkv, N * 3 * C);
+    up(d_dout, dout, N * C);
+    up(d_dqkv, dqkv, N * 3 * C);
+    d_out.resize(N * C);
+    d_lse.resize(rows);
+    d_dsum.resize(rows);
+    fused_attention_prepare(HS, tensor_cores);
+    fused_attention_forward(tensor_cores, d_qkv.p, d_out.p, d_lse.p, B, Tn, C, NH, HS);
+    fused_attention_backward(tensor_cores, d_qkv.p, d_out.p, d_dout.p, d_lse.p, d_dsum.p, d_dqkv.p, B, Tn, C, NH, HS);
+    down(out, d_out, N * C);
+    down(lse, d_lse, rows);
+    down(dqkv, d_dqkv, N * 3 * C);
+}
 
 std::string GpuTrainer::device_name() {
     int dev = 0;

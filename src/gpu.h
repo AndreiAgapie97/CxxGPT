@@ -14,9 +14,12 @@
 //   rounded to 8 significant bits. The rounding happens inside cuBLAS, so
 //   whether it is faster overall is for the GPU to show (scripts/probe.sh).
 //
-// Fused attention (attention.cuh) is opt-in until NVIDIA runtime validation.
-// It never stores the Tn x Tn matrix of attention weights; the default
-// retains cuBLAS products through that matrix and supplies a second reference.
+// Fused attention (fused_attention) never stores the Tn x Tn matrix of
+// attention weights. With TF32 or bf16 matmuls it multiplies on the tensor
+// cores (attention_tc.cuh); with exact fp32, or a head size that is not a
+// multiple of 16, it runs the fp32 kernels (attention.cuh). train --gpu
+// uses it by default; GpuTrainer's own default is cuBLAS products through
+// the full matrix, the second reference the tests compare it with.
 //
 // This header is plain C++, so the rest of the code (built by g++ or
 // clang++) can use the GPU without including any CUDA header.
@@ -86,3 +89,18 @@ private:
     struct Impl;
     std::unique_ptr<Impl> impl_;
 };
+
+// Whether the fused attention kernels take this head size (up to 128).
+bool fused_attention_fits(int head_size);
+
+// Whether fused attention runs on the tensor cores (attention_tc.cuh): with
+// TF32 or bf16 matmuls, for head sizes that are a multiple of 16 up to 128.
+// Otherwise it runs attention.cuh's fp32 kernels.
+bool fused_attention_on_tensor_cores(Matmul matmul, int head_size);
+
+// The fused attention kernels on their own, on host arrays (for tests):
+// out and lse from qkv [B·Tn, 3·NH·HS], then dqkv += the backward pass of
+// dout, as GpuTrainer runs them. tensor_cores picks attention_tc.cuh's
+// kernels over attention.cuh's.
+void gpu_fused_attention(const float* qkv, const float* dout, float* out, float* lse, float* dqkv, int B, int Tn,
+                         int NH, int HS, bool tensor_cores);

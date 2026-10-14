@@ -670,6 +670,26 @@ What this says:
    most of the 22% and the memory that blocks 8-sequence micro-batches.
    Tested against the CPU engine like the current kernels. Estimate:
    1.3-1.6x overall, more with bf16 storage on top.
+   **Done** (`src/attention_tc.cuh`, the default since 2026-10-14),
+   measured on the same model:
+
+   | setting | tokens/s | attention (fwd + bwd) | GPU memory |
+   |---|---|---|---|
+   | cuBLAS attention, 4 x 32 (night 1) | 15,000 | 343 + 589 ms | 5.6 GB |
+   | tensor-core fused, 4 x 32 | 16,900 | 91 + 287 ms | 5.0 GB |
+   | tensor-core fused, 8 x 16 | 17,500 | 90 + 282 ms | 6.7 GB |
+
+   The probe (20 steps) measured 17,760 tokens/s at 8 x 16 for night 1's
+   model, 0.48 B tokens a night against 0.40 B, and 17,000 at 4 x 32 for
+   its ternary version. 1.13-1.18x, short of the estimate: attention was
+   22% of the step, so
+   even free attention would give 1.27x, and the 8-sequence micro-batch
+   helps less than it did with the slow kernels (+4%, against +33%). The
+   kernels run at about 7 TFLOPS, roughly a third of the tensor cores'
+   TF32 rate, so there is still room (bigger tiles, the backward pass in
+   one kernel with atomic adds, raw `mma` instructions), but attention is
+   now under 10% of the step and the matrix products are 50%: the next
+   gains are in items 2, 3 and 5.
 2. **bf16 storage** for weights and activations (the ladder's bf16 rung,
    after the norm-gradient question in the review).
 3. **Muon in bf16** (10% of the step).
