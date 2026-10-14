@@ -454,14 +454,15 @@ int cmd_eval_reasoning(Args& a) {
     const std::string ckpt = a.str("ckpt", "model.ckpt"), test_path = a.str("test", "data/reason.test.txt");
     const int batch = int(a.integer("batch", 64)), limit = int(a.integer("limit", 0));
     const bool show = a.flag("show-failures");
-    // As TernaryEngine runs a --fp-attn model: attention weights in int8 rows.
-    const bool int8_attn = a.flag("int8-attn");
+    // As TernaryEngine runs it: the embedding (and --fp-attn attention) in
+    // int8 rows.
+    const bool as_engine = a.flag("as-engine");
     const std::string bpe = a.str("bpe");
     a.done();
     const Tokenizer tok = load_tokenizer(bpe);
     Model<float> model(peek_checkpoint_config(ckpt));
     load_checkpoint(ckpt, model, nullptr, nullptr);
-    if (int8_attn) round_attention_int8(model);
+    if (as_engine) round_to_engine_int8(model);
     std::vector<Problem> test = load_problems(test_path);
     if (limit > 0 && size_t(limit) < test.size()) {
         // An even sample across the file, which is ordered by task.

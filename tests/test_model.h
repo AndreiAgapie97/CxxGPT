@@ -298,8 +298,9 @@ inline void test_decode_matches_forward() {
     }
 }
 
-// Int8 rows (the engine's full-precision attention): each weight within half
-// a step of the original, and dot_f32_i8 (SIMD) against a double sum.
+// Int8 rows (the engine's embedding and full-precision attention): each
+// weight within half a step of the original, and dot_f32_i8 (SIMD) against
+// a double sum.
 inline void test_int8_rows() {
     Rng rng(41);
     for (const int cols : {32, 70, 256}) {
@@ -331,8 +332,8 @@ inline void test_int8_rows() {
 
 // A ternary model on the bitplane int8 kernels computes what the training
 // forward pass computes (which fake-quantizes with the same arithmetic).
-// With --fp-attn, attention runs on int8 rows: the reference model then gets
-// the same rounded attention weights.
+// The embedding (and, with --fp-attn, attention) runs on int8 rows: the
+// reference model gets the same rounded weights.
 inline void test_ternary_engine() {
     const char* names[] = {"dense", "MoE", "MoE, half NoPE", "MoE, fp attention"};
     for (int variant = 0; variant < 4; ++variant) {
@@ -358,7 +359,7 @@ inline void test_ternary_engine() {
         Rng rng(18);
         for (auto& w : m.params) w = float(rng.normal() * 0.3);
         m.weights_dirty = true;
-        if (cfg.fp_attention) round_attention_int8(m);
+        round_to_engine_int8(m);
         TernaryEngine eng(m);
         std::vector<int> toks(cfg.seq_len);
         for (auto& t : toks) t = int(rng.below(cfg.vocab));
