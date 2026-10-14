@@ -408,9 +408,9 @@ Stats bench(F&& f, int iters) {
     std::vector<double> t;
     t.reserve(size_t(iters));
     for (int i = 0; i < iters; ++i) {
-        auto a = std::chrono::high_resolution_clock::now();
+        auto a = std::chrono::steady_clock::now();
         f();
-        auto b = std::chrono::high_resolution_clock::now();
+        auto b = std::chrono::steady_clock::now();
         t.push_back(std::chrono::duration<double, std::milli>(b - a).count());
     }
     std::sort(t.begin(), t.end());
@@ -423,6 +423,31 @@ Stats bench(F&& f, int iters) {
     for (double x : t) v += (x - s.mean) * (x - s.mean);
     s.sd = std::sqrt(v / double(t.size()));
     return s;
+}
+
+
+// Each candidate owns an alternating A/B reference rather than comparing
+// independently timed runs across a drifting shared-VM workload.
+template <class A, class B>
+std::pair<Stats,Stats> bench_pair(A&& a, B&& b, int iters) {
+    for (int i=0;i<3;++i) { a(); b(); }
+    std::vector<double> ta,tb;
+    auto measured = [](auto& fn, auto& times) {
+        const auto start=std::chrono::steady_clock::now(); fn();
+        times.push_back(std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-start).count());
+    };
+    for (int i=0;i<iters;++i) {
+        if (i%2==0) { measured(a,ta); measured(b,tb); }
+        else { measured(b,tb); measured(a,ta); }
+    }
+    auto summary = [](std::vector<double> t) {
+        std::sort(t.begin(),t.end()); Stats s{};
+        s.min=t.front(); s.max=t.back(); s.median=t[t.size()/2];
+        s.mean=std::accumulate(t.begin(),t.end(),0.0)/t.size();
+        for (double v:t) s.sd+=(v-s.mean)*(v-s.mean);
+        s.sd=std::sqrt(s.sd/t.size()); return s;
+    };
+    return {summary(std::move(ta)),summary(std::move(tb))};
 }
 
 int main(int argc, char** argv) {
@@ -442,6 +467,10 @@ int main(int argc, char** argv) {
     g_pool = &p;
 
     run_tests();
+    std::vector<int> schedule;
+    const auto timing=bench_pair([&] { schedule.push_back(0); },[&] { schedule.push_back(1); },3);
+    check(schedule==std::vector<int>({0,1,0,1,0,1,0,1,1,0,0,1}) &&
+          timing.first.min>=0 && timing.second.min>=0, "benchmark warmup/interleaving schedule is wrong");
     if (tests_only) return g_failures == 0 ? 0 : 1;
 
     constexpr int M = 4096, K = 4096;
@@ -466,6 +495,7 @@ int main(int argc, char** argv) {
     std::vector<float> X(K);
     for (auto& v : X) v = nd(rng);
 
+    printf("Each speedup uses its own alternating fp32 reference; the reference row is standalone.\n");
     printf("  %-24s %9s %9s %9s %9s %8s  %s\n",
            "kernel", "median", "mean", "sd", "min", "vs fp32", "error");
 
@@ -475,17 +505,21 @@ int main(int argc, char** argv) {
            "fp32 dense (reference)", s_f32.median, s_f32.mean, s_f32.sd, s_f32.min, 1.0, "-");
 
     std::vector<float> y_i(M);
-    const Stats s_i = bench([&] { gemv_interleaved(X.data(), Wi, y_i.data()); }, iters);
+    const auto pair_i = bench_pair([&] { gemv_fp32(X.data(),Wf.data(),M,K,y_ref.data()); },
+                                   [&] { gemv_interleaved(X.data(),Wi,y_i.data()); },iters);
+    const Stats& s_i=pair_i.second;
     printf("  %-24s %8.3f %8.3f %8.3f %8.3f %7.2fx  %.1e\n",
            "A: interleaved 2-bit", s_i.median, s_i.mean, s_i.sd, s_i.min,
-           s_f32.median / s_i.median, rel_err(y_ref, y_i));
+           pair_i.first.median / s_i.median, rel_err(y_ref, y_i));
 
     for (const auto& k : all_kernels()) {
         std::vector<float> y(size_t(M), 0.0f);
-        const Stats s = bench([&] { k.fn(X.data(), Wb, y.data()); }, iters);
+        const auto paired=bench_pair([&] { gemv_fp32(X.data(),Wf.data(),M,K,y_ref.data()); },
+                                     [&] { k.fn(X.data(),Wb,y.data()); },iters);
+        const Stats& s=paired.second;
         printf("  %-24s %8.3f %8.3f %8.3f %8.3f %7.2fx  %.1e\n",
                k.name, s.median, s.mean, s.sd, s.min,
-               s_f32.median / s.median, rel_err(y_ref, y));
+               paired.first.median / s.median, rel_err(y_ref, y));
     }
 
     const double mb_f32 = double(M) * K * 4 / (1024.0 * 1024.0);
@@ -501,19 +535,16 @@ int main(int argc, char** argv) {
     std::vector<float> tok(d_model), out(d_model);
     for (auto& v : tok) v = nd(rng);
 
-    const Stats s_moe = bench([&] { moe.forward(tok.data(), out.data()); }, 200);
-    printf("\nMoE  d_model=%d experts=%d top_k=%d  kernel=%s\n", d_model, num_experts, top_k,
-           moe.kernel.name);
-    printf("  same token:     %.3f ms/token (median)   routed to experts %d, %d   out[0]=%.6f  out[15]=%.6f\n",
-           s_moe.median, moe.idx[0], moe.idx[1], out[0], out[15]);
-
-    // Repeating one token keeps the same two experts hot in cache. A stream
-    // of different tokens spreads routing over all experts, as decoding does.
+    // Same/varying tokens share one alternating trial budget too.
     std::vector<std::vector<float>> toks(256, std::vector<float>(size_t(d_model)));
-    for (auto& t : toks)
-        for (auto& v : t) v = nd(rng);
+    for (auto& t : toks) for (auto& value : t) value = nd(rng);
     size_t next_tok = 0;
-    const Stats s_vary = bench([&] { moe.forward(toks[next_tok++ % toks.size()].data(), out.data()); }, 512);
+    const auto pair_moe=bench_pair([&] { moe.forward(tok.data(),out.data()); },
+                                  [&] { moe.forward(toks[next_tok++ % toks.size()].data(),out.data()); },512);
+    const Stats& s_moe=pair_moe.first; const Stats& s_vary=pair_moe.second;
+    printf("\nMoE  d_model=%d experts=%d top_k=%d  kernel=%s\n", d_model,num_experts,top_k,moe.kernel.name);
+    printf("  same token:     %.3f ms/token (median)   routed to experts %d, %d   out[0]=%.6f  out[15]=%.6f\n",
+           s_moe.median,moe.idx[0],moe.idx[1],out[0],out[15]);
     printf("  varying tokens: %.3f ms/token (median)\n", s_vary.median);
 
     return g_failures == 0 ? 0 : 1;
