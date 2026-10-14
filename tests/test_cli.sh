@@ -34,6 +34,11 @@ status=0
 [[ "$status" == 1 ]] && grep -q 'one-logit softmax has zero task gradient' "$TEST_DIR/top1.log"
 
 ./test_training_cli generate "$TEST_DIR"
+for target in 1 -1; do
+    status=0
+    ./test_training_cli repeat-backward "$target" > "$TEST_DIR/repeat-backward.log" 2>&1 || status=$?
+    [[ "$status" == 1 ]] && grep -q 'needs a new forward' "$TEST_DIR/repeat-backward.log"
+done
 for command in bad-target bad-target-backward; do
   for target in -2 3; do
     status=0

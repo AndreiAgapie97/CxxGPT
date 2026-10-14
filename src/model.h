@@ -183,7 +183,8 @@ public:
     // Call zero_grad() first (once per optimizer step, so that gradient
     // accumulation over micro-batches is just several backward calls).
     void backward(double loss_scale = 1.0) {
-        CHECK(has_targets_, "backward() needs a forward() with targets");
+        CHECK(has_targets_, "backward() needs a new forward() with targets");
+        has_targets_ = false;  // probabilities are consumed, even for an all-ignored batch
         const int B = B_cur, Tn = T_cur, N = B * Tn, C = cfg.d_model, V = cfg.vocab;
         if (n_valid_ == 0) return;
         T* dlogits = logits.data();  // in place: probabilities become gradients

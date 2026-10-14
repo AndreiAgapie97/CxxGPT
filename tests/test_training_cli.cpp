@@ -5,6 +5,14 @@
 #include "../src/reasoning.h"
 
 int main(int argc, char** argv) {
+    if (argc == 3 && std::string(argv[1]) == "repeat-backward") {
+        Config cfg; cfg.vocab = 3; cfg.seq_len = 2; cfg.d_model = 4; cfg.n_heads = 1; cfg.n_layers = 1;
+        Model<float> m(cfg); m.init(7);
+        const int token = 1, target = std::stoi(argv[2]);
+        m.forward(&token, &target, 1, 1); m.zero_grad(); m.backward(); m.backward();
+        return 2;
+    }
+
     if (argc == 3 && std::string(argv[1]) == "bad-target") {
         float logits[] = {1,2,3}, loss = 0, gradient[3];
         const int target = std::stoi(argv[2]);
