@@ -21,6 +21,7 @@ class TernaryEngine {
 public:
     explicit TernaryEngine(const Model<float>& m) : cfg_(m.cfg), kernel_(default_int8_kernel()) {
         CHECK(cfg_.ternary, "TernaryEngine needs a model trained with --ternary");
+        CHECK(!cfg_.fp_attention, "TernaryEngine runs all-ternary models, not --fp-attn ones (yet)");
         CHECK(cfg_.top_k <= 64, "top_k above 64 is not supported");
         CHECK(cfg_.d_model % 32 == 0, "d_model must be a multiple of 32 for the bitplane kernels");
         CHECK(cfg_.always_hidden() % 32 == 0 && cfg_.ehidden() % 32 == 0,

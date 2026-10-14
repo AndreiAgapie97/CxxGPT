@@ -9,7 +9,8 @@
 // experts with top-k routing (optionally plus always-on shared experts).
 // With ternary = true, every projection inside the blocks is a BitLinear:
 // ternary weights and int8 activations in the forward pass, which is what
-// the inference kernels run.
+// the inference kernels run. fp_attention keeps the attention projections
+// (wqkv, wo) in full precision; only the FFN is ternary then.
 #pragma once
 
 #include <algorithm>
@@ -129,10 +130,10 @@ public:
             auto& a = acts[l];
             const auto& o = layer_[l];
             rmsnorm_forward(a.ln1.data(), a.rstd1.data(), x, P(o.ln1), N, C);
-            proj_forward(a.qkv.data(), a.ln1.data(), o.wqkv, N, C, 3 * C);
+            proj_forward(a.qkv.data(), a.ln1.data(), o.wqkv, N, C, 3 * C, attn_ternary());
             rope_forward(a.qkv.data(), rope, B, Tn, C, cfg.n_heads);
             attention_forward(a.atty.data(), a.att.data(), a.qkv.data(), B, Tn, C, cfg.n_heads);
-            proj_forward(out_tmp.data(), a.atty.data(), o.wo, N, C, C);
+            proj_forward(out_tmp.data(), a.atty.data(), o.wo, N, C, C, attn_ternary());
             add_forward(a.resid1.data(), x, out_tmp.data(), long(N) * C);
             rmsnorm_forward(a.ln2.data(), a.rstd2.data(), a.resid1.data(), P(o.ln2), N, C);
             ffn_forward(l, out_tmp.data(), N, training);
@@ -178,13 +179,13 @@ public:
                              a.rstd2.data(), N, C);
             // resid1 = x_in + wo(attention(rope(wqkv(rmsnorm(x_in)))))
             zero(datty, size_t(N) * C);
-            proj_backward(datty.data(), dresid.data(), a.atty.data(), o.wo, N, C, C);
+            proj_backward(datty.data(), dresid.data(), a.atty.data(), o.wo, N, C, C, attn_ternary());
             zero(dqkv, size_t(N) * 3 * C);
             attention_backward(dqkv.data(), datty.data(), a.att.data(), a.qkv.data(), B, Tn, C,
                                cfg.n_heads);
             rope_backward(dqkv.data(), rope, B, Tn, C, cfg.n_heads);
             zero(dC, size_t(N) * C);
-            proj_backward(dC.data(), dqkv.data(), a.ln1.data(), o.wqkv, N, C, 3 * C);
+            proj_backward(dC.data(), dqkv.data(), a.ln1.data(), o.wqkv, N, C, 3 * C, attn_ternary());
             rmsnorm_backward(dresid.data(), G(o.ln1), dC.data(), x_in, P(o.ln1), a.rstd1.data(), N, C);
         }
         embedding_backward(G(wte_), dresid.data(), tokens_.data(), N, C);
@@ -266,7 +267,7 @@ public:
             auto& a = acts[l];
             const auto& o = layer_[l];
             rmsnorm_forward(a.ln1.data(), a.rstd1.data(), x, P(o.ln1), N, C);
-            proj_forward(a.qkv.data(), a.ln1.data(), o.wqkv, N, C, 3 * C);
+            proj_forward(a.qkv.data(), a.ln1.data(), o.wqkv, N, C, 3 * C, attn_ternary());
             rope_apply(a.qkv.data(), rope, B, 1, C, NH, false, pos);
             T* kc = kcache_[l].data();
             T* vc = vcache_[l].data();
@@ -297,7 +298,7 @@ public:
                     }
                 }
             }, 1);
-            proj_forward(out_tmp.data(), a.atty.data(), o.wo, N, C, C);
+            proj_forward(out_tmp.data(), a.atty.data(), o.wo, N, C, C, attn_ternary());
             add_into(x, out_tmp.data(), long(N) * C);
             rmsnorm_forward(a.ln2.data(), a.rstd2.data(), x, P(o.ln2), N, C);
             ffn_forward(l, out_tmp.data(), N, false);
@@ -343,15 +344,15 @@ private:
 
     void build_layout() {
         const int C = cfg.d_model, V = cfg.vocab, F = cfg.always_hidden(), Fe = cfg.ehidden();
-        const bool q = cfg.ternary;
+        const bool q = cfg.ternary, qa = attn_ternary();
         wte_ = add_param("wte", V, C, true, false);
         layer_.resize(cfg.n_layers);
         for (int l = 0; l < cfg.n_layers; ++l) {
             const std::string p = "l" + std::to_string(l) + ".";
             auto& o = layer_[l];
             o.ln1 = add_param(p + "ln1", 1, C, false, false);
-            o.wqkv = add_param(p + "wqkv", 3 * C, C, true, q);
-            o.wo = add_param(p + "wo", C, C, true, q);
+            o.wqkv = add_param(p + "wqkv", 3 * C, C, true, qa);
+            o.wo = add_param(p + "wo", C, C, true, qa);
             o.ln2 = add_param(p + "ln2", 1, C, false, false);
             if (F > 0) {
                 o.wfc = add_param(p + "wfc", 2 * F, C, true, q);
@@ -368,30 +369,31 @@ private:
 
     T* P(size_t off) { return &params[off]; }
     T* G(size_t off) { return &grads[off]; }
+    bool attn_ternary() const { return cfg.ternary && !cfg.fp_attention; }
     // The weights a projection multiplies by: quantized copies if ternary.
-    const T* W(size_t off) const { return cfg.ternary ? &qparams[off] : &params[off]; }
+    const T* W(size_t off, bool q) const { return q ? &qparams[off] : &params[off]; }
 
     static void zero(std::vector<T>& v, size_t n) { zero_fill(v.data(), n); }
 
-    // y = x · Wᵀ, or for BitLinear y = q8(x) · ternary(W)ᵀ.
-    void proj_forward(T* y, const T* x, size_t woff, int N, int IC, int OC) {
-        if (cfg.ternary) {
+    // y = x · Wᵀ, or for a BitLinear (q) y = q8(x) · ternary(W)ᵀ.
+    void proj_forward(T* y, const T* x, size_t woff, int N, int IC, int OC, bool q) {
+        if (q) {
             act_quantize(xq.data(), x, N, IC);
             x = xq.data();
         }
-        linear_forward(y, x, W(woff), N, IC, OC);
+        linear_forward(y, x, W(woff, q), N, IC, OC);
     }
 
     // dx += dy · W, dW += dyᵀ · x. For BitLinear, the straight-through
     // estimator: the same products with the quantized x and W (x is
     // re-quantized here instead of being stored), with gradients landing on
     // the full-precision master weights and on x unchanged.
-    void proj_backward(T* dx, const T* dy, const T* x, size_t woff, int N, int IC, int OC) {
-        if (cfg.ternary) {
+    void proj_backward(T* dx, const T* dy, const T* x, size_t woff, int N, int IC, int OC, bool q) {
+        if (q) {
             act_quantize(xq.data(), x, N, IC);
             x = xq.data();
         }
-        linear_backward(dx, G(woff), dy, x, W(woff), N, IC, OC);
+        linear_backward(dx, G(woff), dy, x, W(woff, q), N, IC, OC);
     }
 
     // out[N, C] = FFN(ln2) for layer l.
@@ -400,9 +402,9 @@ private:
         const auto& o = layer_[l];
         const int C = cfg.d_model, F = cfg.always_hidden();
         if (F > 0) {  // dense FFN, or the shared experts
-            proj_forward(a.fc.data(), a.ln2.data(), o.wfc, N, C, 2 * F);
+            proj_forward(a.fc.data(), a.ln2.data(), o.wfc, N, C, 2 * F, cfg.ternary);
             swiglu_forward(a.sw.data(), a.fc.data(), N, F);
-            proj_forward(out, a.sw.data(), o.wproj, N, F, C);
+            proj_forward(out, a.sw.data(), o.wproj, N, F, C, cfg.ternary);
         } else {
             std::fill(out, out + size_t(N) * C, T(0));
         }
@@ -415,10 +417,10 @@ private:
         const int C = cfg.d_model, F = cfg.always_hidden();
         if (F > 0) {
             zero(dsw, size_t(N) * F);
-            proj_backward(dsw.data(), dout, a.sw.data(), o.wproj, N, F, C);
+            proj_backward(dsw.data(), dout, a.sw.data(), o.wproj, N, F, C, cfg.ternary);
             zero(dfc, size_t(N) * 2 * F);
             swiglu_backward(dfc.data(), dsw.data(), a.fc.data(), N, F);
-            proj_backward(dx, dfc.data(), a.ln2.data(), o.wfc, N, C, 2 * F);
+            proj_backward(dx, dfc.data(), a.ln2.data(), o.wfc, N, C, 2 * F, cfg.ternary);
         }
         if (cfg.moe()) moe_backward(l, dx, dout, N);
     }
@@ -480,9 +482,11 @@ private:
         for (int e = 0; e < E; ++e) {
             const int r0 = a.expert_start[e], n = a.expert_start[e + 1] - r0;
             if (n == 0) continue;
-            proj_forward(&a.efc[size_t(r0) * 2 * Fe], &a.xg[size_t(r0) * C], o.efc + e * efc_per, n, C, 2 * Fe);
+            proj_forward(&a.efc[size_t(r0) * 2 * Fe], &a.xg[size_t(r0) * C], o.efc + e * efc_per, n, C,
+                         2 * Fe, cfg.ternary);
             swiglu_forward(&a.esw[size_t(r0) * Fe], &a.efc[size_t(r0) * 2 * Fe], n, Fe);
-            proj_forward(&a.ey[size_t(r0) * C], &a.esw[size_t(r0) * Fe], o.eproj + e * eproj_per, n, Fe, C);
+            proj_forward(&a.ey[size_t(r0) * C], &a.esw[size_t(r0) * Fe], o.eproj + e * eproj_per, n, Fe,
+                         C, cfg.ternary);
         }
         // Weighted sum back into token order.
         for_rows(N, [&](int n0, int n1) {
@@ -524,11 +528,11 @@ private:
             if (n == 0) continue;
             zero(dsw, size_t(n) * Fe);
             proj_backward(dsw.data(), &dey[size_t(r0) * C], &a.esw[size_t(r0) * Fe],
-                          o.eproj + e * eproj_per, n, Fe, C);
+                          o.eproj + e * eproj_per, n, Fe, C, cfg.ternary);
             zero(dfc, size_t(n) * 2 * Fe);
             swiglu_backward(dfc.data(), dsw.data(), &a.efc[size_t(r0) * 2 * Fe], n, Fe);
             proj_backward(&dxg[size_t(r0) * C], dfc.data(), &a.xg[size_t(r0) * C],
-                          o.efc + e * efc_per, n, C, 2 * Fe);
+                          o.efc + e * efc_per, n, C, 2 * Fe, cfg.ternary);
         }
         // Scatter the gathered input gradients back to their tokens.
         for_rows(N, [&](int n0, int n1) {

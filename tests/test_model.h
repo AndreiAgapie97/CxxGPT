@@ -185,22 +185,73 @@ inline void test_bitlinear() {
     EXPECT(gnorm > 0 && std::isfinite(gnorm), "ternary model has no gradient");
 }
 
+// --fp-attn: only the FFN is ternary. With the FFN's weights at zero, its
+// output is zero however it is quantized, so the model must compute exactly
+// what the full-precision model computes, gradients included, while the
+// all-ternary model (whose attention is quantized) computes something else.
+inline void test_fp_attention() {
+    Config cfg;
+    cfg.vocab = 23;
+    cfg.seq_len = 8;
+    cfg.d_model = 16;
+    cfg.n_layers = 2;
+    cfg.n_heads = 2;
+    cfg.ffn_hidden = 24;
+    cfg.ternary = cfg.fp_attention = true;
+    Config fp = cfg, all = cfg;
+    fp.ternary = fp.fp_attention = false;
+    all.fp_attention = false;
+    Model<double> m(cfg), mfp(fp), mall(all);
+    m.init(5);
+    auto is_ffn = [](const ParamInfo& p) { return p.name.ends_with("wfc") || p.name.ends_with("wproj"); };
+    for (const auto& p : m.infos) {
+        EXPECT(p.ternary == is_ffn(p), "%s: ternary is %d with --fp-attn", p.name.c_str(), int(p.ternary));
+        if (is_ffn(p)) std::fill_n(&m.params[p.offset], p.size, 0.0);
+    }
+    mfp.params = mall.params = m.params;
+    Rng rng(6);
+    const int B = 2, Tn = 8, N = B * Tn;
+    std::vector<int> tok(N), tgt(N);
+    for (int n = 0; n < N; ++n) tok[n] = int(rng.below(cfg.vocab)), tgt[n] = int(rng.below(cfg.vocab));
+    m.zero_grad();
+    mfp.zero_grad();
+    const double l = m.forward(tok.data(), tgt.data(), B, Tn), lfp = mfp.forward(tok.data(), tgt.data(), B, Tn);
+    m.backward();
+    mfp.backward();
+    EXPECT(std::abs(l - lfp) <= 1e-12 * lfp, "--fp-attn loss %.15g, full precision %.15g", l, lfp);
+    for (const auto& p : m.infos) {
+        // The FFN's gradients see quantized inputs; ln2 only feeds the FFN.
+        if (is_ffn(p) || p.name.ends_with("ln2")) continue;
+        double diff = 0, mx = 0;
+        for (size_t i = p.offset; i < p.offset + p.size; ++i) {
+            diff = std::max(diff, std::abs(m.grads[i] - mfp.grads[i]));
+            mx = std::max(mx, std::abs(mfp.grads[i]));
+        }
+        EXPECT(mx > 0 && diff <= 1e-12 * mx, "%s: --fp-attn gradient differs by %g (max %g)", p.name.c_str(),
+               diff, mx);
+    }
+    const double lall = mall.forward(tok.data(), tgt.data(), B, Tn);
+    EXPECT(std::abs(lall - lfp) > 1e-6, "all-ternary loss %g equals full-precision loss %g", lall, lfp);
+}
+
 // KV-cache decoding of left-padded sequences must give the logits the full
 // forward pass gives each sequence on its own.
 inline void test_decode_matches_forward() {
-    for (int variant = 0; variant < 2; ++variant) {
+    const char* names[] = {"dense", "ternary MoE", "ternary MoE, fp attention"};
+    for (int variant = 0; variant < 3; ++variant) {
         Config cfg;
         cfg.vocab = 29;
         cfg.seq_len = 16;
         cfg.d_model = 32;
         cfg.n_layers = 2;
         cfg.n_heads = 4;
-        if (variant == 1) {  // our architecture: ternary MoE with a shared expert
+        if (variant >= 1) {  // our architecture: ternary MoE with a shared expert
             cfg.n_experts = 4;
             cfg.top_k = 2;
             cfg.n_shared = 1;
             cfg.expert_hidden = 24;
             cfg.ternary = true;
+            cfg.fp_attention = variant == 2;
         }
         Model<float> m(cfg);
         m.init(3);
@@ -238,8 +289,7 @@ inline void test_decode_matches_forward() {
                 worst = std::max(worst, diff / mx);
             }
         }
-        EXPECT(worst < 1e-4, "decode vs forward (%s): relative difference %g",
-               variant ? "ternary MoE" : "dense", worst);
+        EXPECT(worst < 1e-4, "decode vs forward (%s): relative difference %g", names[variant], worst);
     }
 }
 
@@ -363,6 +413,7 @@ inline void test_model() {
     test_eval_reasoning();
     test_ternary_engine();
     test_decode_matches_forward();
+    test_fp_attention();
     test_model_gradients();
     test_model_float_vs_double();
     test_bitlinear();

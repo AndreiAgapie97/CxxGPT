@@ -63,6 +63,7 @@ Config config_from_args(Args& a, int vocab) {
     c.expert_hidden = int(a.integer("ehidden", 0));
     c.n_shared = int(a.integer("shared", 0));
     c.ternary = a.flag("ternary");
+    c.fp_attention = a.flag("fp-attn");
     return c;
 }
 
@@ -74,7 +75,8 @@ void print_config(const Config& c, const Model<float>& m) {
                     c.ehidden(), c.n_shared);
     else
         std::printf("dense FFN %d", c.dense_hidden());
-    std::printf("%s\n", c.ternary ? ", ternary BitLinear" : "");
+    std::printf("%s\n", !c.ternary ? "" : c.fp_attention ? ", ternary BitLinear FFN, full-precision attention"
+                                                          : ", ternary BitLinear");
     std::printf("params: %.3f M total, %.3f M active per token\n", m.num_params() / 1e6,
                 m.active_params() / 1e6);
 }
@@ -571,6 +573,7 @@ int cmd_train(Args& a) {
             "        --bpe tok.bpe (the tokenizer the data was made with, for --reason-test)\n"
             "model:  --seq 256 --dim 256 --layers 4 --heads 4 --ffn 0(auto)\n"
             "        --experts 0 --topk 2 --ehidden 0(auto) --shared 0 --ternary\n"
+            "        --fp-attn (with --ternary: attention stays full precision)\n"
             "train:  --batch 16 --accum 1 --steps 2000 --lr 1e-3 --min-lr-frac 0.1\n"
             "        --warmup 100 --wd 0.1 --clip 1.0 --bias-rate 1e-3 --seed 1\n"
             "        --muon (Muon instead of AdamW for the matrices in the blocks)\n"
@@ -601,10 +604,12 @@ int cmd_train(Args& a) {
         cfg = peek_checkpoint_config(out);
     } else if (!init.empty()) {
         // The model comes from the checkpoint, but --ternary can turn its
-        // weights ternary from here on: the same weights, used differently.
-        const bool to_ternary = cfg.ternary;
+        // weights ternary from here on: the same weights, used differently
+        // (and --fp-attn keeps attention in full precision).
+        const bool to_ternary = cfg.ternary, fp_attn = cfg.fp_attention;
         cfg = peek_checkpoint_config(init);
         cfg.ternary = cfg.ternary || to_ternary;
+        cfg.fp_attention = cfg.fp_attention || fp_attn;
     }
     const int B = int(a.integer("batch", 16)), accum = int(a.integer("accum", 1));
     const int Tn = std::min(cfg.seq_len, int(a.integer("seq", cfg.seq_len)));
@@ -856,7 +861,7 @@ int cmd_bench_infer(Args& a) {
     // quantization.
     model.quantize_weights();
     Config fcfg = cfg;
-    fcfg.ternary = false;
+    fcfg.ternary = fcfg.fp_attention = false;
     Model<float> fp32(fcfg);
     for (const ParamInfo& p : model.infos)
         std::copy_n(&(p.ternary ? model.qparams : model.params)[p.offset], p.size, &fp32.params[p.offset]);

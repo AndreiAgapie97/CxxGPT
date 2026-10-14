@@ -23,6 +23,7 @@ struct Config {
     int expert_hidden = 0;  // per expert; 0 picks ffn_hidden / top_k
     int n_shared = 0;       // always-on shared experts, each of expert_hidden
     bool ternary = false;   // BitLinear projections in the blocks
+    bool fp_attention = false;  // with ternary: attention stays full precision
 
     int head_size() const { return d_model / n_heads; }
     int dense_hidden() const {
@@ -43,6 +44,7 @@ struct Config {
         CHECK(d_model % n_heads == 0, "d_model %d not divisible by n_heads %d", d_model, n_heads);
         CHECK(head_size() % 2 == 0, "head size must be even for RoPE");
         CHECK(!moe() || (top_k >= 1 && top_k <= n_experts), "top_k must be in [1, n_experts]");
+        CHECK(!fp_attention || ternary, "full-precision attention (--fp-attn) needs --ternary");
     }
 };
 

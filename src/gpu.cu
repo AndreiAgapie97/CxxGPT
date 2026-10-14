@@ -605,6 +605,7 @@ struct GpuTrainer::Impl {
 
     Impl(const Config& c, const std::vector<ParamInfo>& in, bool tf32) : cfg(c), infos(in) {
         cfg.validate();
+        CHECK(!cfg.fp_attention, "full-precision attention (--fp-attn) is not on the GPU yet");
         int devices = 0;
         const cudaError_t err = cudaGetDeviceCount(&devices);
         CHECK(err == cudaSuccess && devices > 0, "no CUDA GPU available (%s)",

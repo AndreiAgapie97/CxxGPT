@@ -175,6 +175,30 @@ inline void checkpoint_keeps_muon_state() {
            "Muon state changed in a checkpoint round trip");
 }
 
+// The model's shape survives a checkpoint, and checkpoints from before
+// fp_attention existed (11 config fields) still load, without it.
+inline void checkpoint_config_fields() {
+    Config c;
+    c.vocab = 300;
+    c.n_experts = 8;
+    c.n_shared = 1;
+    c.ternary = c.fp_attention = true;
+    FILE* f = std::tmpfile();
+    write_config(f, c);
+    std::rewind(f);
+    const Config r = read_config(f);
+    EXPECT(r.vocab == 300 && r.n_experts == 8 && r.n_shared == 1 && r.ternary && r.fp_attention,
+           "config changed in a round trip");
+    std::rewind(f);
+    const int32_t old[] = {11, 300, 256, 256, 4, 4, 0, 8, 2, 0, 1, 1};  // the count, then 11 fields
+    std::fwrite(old, 4, std::size(old), f);
+    std::rewind(f);
+    const Config o = read_config(f);
+    EXPECT(o.vocab == 300 && o.n_experts == 8 && o.n_shared == 1 && o.ternary && !o.fp_attention,
+           "an 11-field config read wrong");
+    std::fclose(f);
+}
+
 // Muon trains: a small model learns a repeating sequence.
 inline void muon_learns() {
     Config cfg;
@@ -231,5 +255,6 @@ inline void test_optim() {
     step_matches_reference(true, false);
     step_matches_reference(true, true);
     checkpoint_keeps_muon_state();
+    checkpoint_config_fields();
     muon_learns();
 }
