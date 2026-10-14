@@ -812,8 +812,7 @@ int cmd_train(Args& a) {
         }
         if (save_every > 0 && (step + 1) % save_every == 0) {
             be.sync();
-            save_checkpoint(out, model, opt, data_rng);
-            saved_step = opt.step;
+            if (save_checkpoint(out, model, opt, data_rng, true)) saved_step = opt.step;
         }
         if (reason_every > 0 && (step + 1) % reason_every == 0 && !last) reason_eval(step + 1);
         ++step;

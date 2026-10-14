@@ -133,6 +133,15 @@ int main(int argc, char** argv) {
         EXPECT(opt.step == 0 && opt.m.empty() && opt.v.empty(), "skipped attempt advanced optimizer");
         return g_failures ? 1 : 0;
     }
+    if (argc == 3 && std::string(argv[1]) == "recover-save") {
+        Model<float> m(peek_checkpoint_config(argv[2])); AdamW opt; Rng rng(0);
+        load_checkpoint(argv[2], m, &opt, &rng);
+        // /dev/full accepts fopen but fails writes/flush: the old file must survive.
+        std::filesystem::create_symlink("/dev/full", std::string(argv[2]) + ".tmp");
+        EXPECT(!save_checkpoint(argv[2], m, opt, rng, true), "failed write reported success");
+        EXPECT(!std::filesystem::exists(std::string(argv[2]) + ".tmp"), "failed temporary file remained");
+        return g_failures ? 1 : 0;
+    }
     if (argc == 4 && std::string(argv[1]) == "bad-save") {
         Model<float> model(peek_checkpoint_config(argv[2]));
         AdamW opt; Rng rng(0);

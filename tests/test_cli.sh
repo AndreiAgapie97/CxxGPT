@@ -143,6 +143,19 @@ status=0
 ./test_training_cli same-sampler "$TEST_DIR/model.ckpt" "$TEST_DIR/fresh.ckpt" > "$TEST_DIR/rng-different.log" 2>&1 || status=$?
 [[ "$status" == 1 ]] && grep -q 'different samples' "$TEST_DIR/rng-different.log"
 cp "$TEST_DIR/model.ckpt" "$TEST_DIR/protected.ckpt"
+./test_training_cli recover-save "$TEST_DIR/protected.ckpt" > "$TEST_DIR/recover-save.log" 2>&1
+cmp "$TEST_DIR/model.ckpt" "$TEST_DIR/protected.ckpt"
+# Rename failures during periodic saves must not abort the three updates.
+mkdir "$TEST_DIR/failing.ckpt"
+printf 'keep' > "$TEST_DIR/failing.ckpt/marker"
+status=0
+"$CXXGPT" train "${COMMON[@]}" --steps 3 --save-every 1 --log-every 1 --eval-every 0 \
+    --out "$TEST_DIR/failing.ckpt" > "$TEST_DIR/failing-save.log" 2>&1 || status=$?
+[[ "$status" == 1 ]]  # final failure is still a checked error
+[[ $(grep -c 'periodic checkpoint failed' "$TEST_DIR/failing-save.log") == 3 ]]
+grep -q '^step *3 |' "$TEST_DIR/failing-save.log"
+[[ $(cat "$TEST_DIR/failing.ckpt/marker") == keep ]]
+[[ ! -e "$TEST_DIR/failing.ckpt.tmp" ]]
 "$CXXGPT" train "${COMMON[@]}" --resume --init "$TEST_DIR/does-not-exist.ckpt" > "$TEST_DIR/resume.log"
 cmp "$TEST_DIR/model.ckpt" "$TEST_DIR/protected.ckpt"
 # A skipped seek must still detect a truncated moment array in weight-only loads.

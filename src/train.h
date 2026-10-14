@@ -2,6 +2,12 @@
 #pragma once
 
 #include <algorithm>
+#include <cerrno>
+#ifdef _WIN32
+#include <io.h>
+#else
+#include <unistd.h>
+#endif
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -449,8 +455,8 @@ inline Config read_config(FILE* f) {
     return c;
 }
 
-inline void save_checkpoint(const std::string& path, const Model<float>& model, const AdamW& opt,
-                            const Rng& data_rng) {
+inline bool save_checkpoint(const std::string& path, const Model<float>& model, const AdamW& opt,
+                            const Rng& data_rng, bool recover_io_errors = false) {
     auto finite = [](const auto& values) {
         return std::all_of(values.begin(), values.end(), [](float x) { return std::isfinite(x); });
     };
@@ -459,8 +465,13 @@ inline void save_checkpoint(const std::string& path, const Model<float>& model, 
     CHECK(opt.m.empty() ? opt.v.empty() : opt.m.size() == model.params.size() && opt.v.size() == opt.m.size(),
           "invalid checkpoint optimizer size");
     const std::string tmp = path + ".tmp";
+    auto fail = [&](const char* operation) {
+        CHECK(recover_io_errors, "%s %s", operation, tmp.c_str());
+        std::fprintf(stderr, "periodic checkpoint failed: %s %s\n", operation, tmp.c_str());
+        return false;
+    };
     FILE* f = create_file(tmp, "wb");
-    CHECK(f, "cannot write %s", tmp.c_str());
+    if (!f) return fail("cannot write");
     std::fwrite(kCkptMagic, 1, 8, f);
     write_config(f, model.cfg);
     const int64_t step = opt.step;
@@ -476,10 +487,29 @@ inline void save_checkpoint(const std::string& path, const Model<float>& model, 
         std::fwrite(opt.v.data(), 4, n, f);
     }
     for (const auto& b : model.router_bias) std::fwrite(b.data(), 4, b.size(), f);
-    const bool write_failed = std::ferror(f) != 0;  // a full disk, say: keep the last good checkpoint
-    CHECK(std::fclose(f) == 0 && !write_failed, "error writing %s", tmp.c_str());
-    // Replace atomically, so an interrupted save never destroys the last good one.
-    CHECK(std::rename(tmp.c_str(), path.c_str()) == 0, "cannot rename %s", tmp.c_str());
+    bool failed = std::ferror(f) != 0;
+    if (std::fflush(f) != 0) failed = true;
+    if (!failed) {
+        // Put the bytes on disk before replacing the previous checkpoint.
+#ifdef _WIN32
+        if (_commit(_fileno(f)) != 0) failed = true;
+#else
+        int status;
+        do { status = ::fsync(::fileno(f)); } while (status != 0 && errno == EINTR);
+        if (status != 0) failed = true;
+#endif
+    }
+    if (std::fclose(f) != 0) failed = true;
+    if (failed) {
+        std::remove(tmp.c_str());
+        return fail("error writing or syncing");
+    }
+    // Rename is atomic; no directory-fsync/power-loss guarantee is claimed.
+    if (std::rename(tmp.c_str(), path.c_str()) != 0) {
+        std::remove(tmp.c_str());
+        return fail("cannot rename");
+    }
+    return true;
 }
 
 // Reads a checkpoint's config only (to build the model before loading).
