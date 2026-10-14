@@ -628,7 +628,34 @@ architecture, not a ranking or matched compute between architectures.
 GCC/Clang, native/CLI, ASan/UBSan and TSan fixtures pass for the tools. The
 independent Python standard-library checker validates split exclusions,
 arithmetic answers, budgets and generated native counts; model execution
-itself remains native C++. Results will be recorded after the fixed run.
+itself remains native C++. The completed fixed run is recorded in
+`docs/results/2026-10-14/curriculum`.
+
+Twelve continued-training tails consumed 3,072,000 sampled tokens, with
+256,000 per tail. Control/expanded valid targets differ (about 152k/156k),
+so matched updates and sampled tokens do not imply matched supervision.
+Four-digit exact counts out of 200 rose from zero in every control to
+132/186/184 for dense and 154/134/151 for ternary MoE across three seeds.
+That is 66–93% and 67–77% on newly trained operand lengths, respectively.
+All eighteen initial/control/expanded models still answered zero of 200
+five-digit questions. All six expanded tails scored below their controls
+on old lengths; five improved over their initializer. Reduced old-length
+frequency and the fixed budget prevent attributing this solely to forgetting.
+
+Generated trace audits distinguish exact final answers from valid intermediate
+arithmetic. Expanded totals out of 800 are 441/573/575 dense and 541/501/524
+MoE; exact answers with complete grounded traces are 434/573/575 and
+541/494/518. Real completions sometimes give a correct final answer after
+false statements such as `6<6` or `2>2`. Independent parsing reproduces all
+14,400 completions' native per-cell metrics. This strict format metric does
+not validate an internal reasoning algorithm or every possible proof format.
+
+Completed-run recovery preserved eighteen checkpoints, audits, trace CSVs
+and complete transcripts, plus the protocol and summary, byte-for-byte.
+The 800-question probe is now development data: future independent final
+holdouts must exclude it, all three earlier 600-question probes, original
+tests and every new/prior corpus. Dense/MoE recipes and compute differ;
+these results do not rank architectures or establish length extrapolation.
 
 ## CUDA side-branch integration and warm-start precision
 
@@ -658,17 +685,27 @@ state for both conversions, and reject contradictory precision/fused flags.
 
 ## Publishing and continuation status
 
-The local research branch preserves all earlier work and ordinary Claude
-merges through main `cf183cd` and active Claude branch `892a286`. There are no unresolved merge conflicts. GitHub
-reads and fetches work, but Git HTTPS still denies push with HTTP 403 and
-the GitHub app's tree-write check returns `Resource not accessible by
-integration` (403). No remote `gpt/research` branch or research PR exists.
-The PR description is prepared in `docs/research-pr.md`, targeting `main`
-and remaining draft until NVIDIA runtime validation is recorded.
+Local `gpt/research` integrates Claude main through `cf183cd` and active
+Claude branch through `892a286`, using ordinary merges (integration tip
+`803d7b9`). There are no unresolved merge conflicts. A final fetch found
+both upstream refs at `ae1399d`, including new int8 attention and
+embedding/output inference changes (`6fb1539`, `5c11968`). These are fetched
+but deliberately not merged after the user's request to wrap up. Before
+future integration, validate packed inference references and update memory
+accounting; the completed measurements describe their recorded source,
+not those incoming inference changes.
 
-The local bundle and binary patch in `/workspace` are refreshed after the
-final documentation commit. The existing hourly follow-up remains enabled;
-its context tracks completed token weighting, CPU-quota-aware benchmarks,
-pending GPU loss/accumulation/Muon validation, seed variation and hard-level
-reasoning, mixed supervision, resource measurements, and access checks. It must inspect the preserved artifacts before recreating missing
-remote work and must never force-push or alter Claude's branches.
+On 2026-10-14, GitHub confirms `main` is the default branch and reports
+push permissions, but ordinary Git HTTPS push still returns HTTP 403.
+The app's harmless identical-tree write check returns HTTP 403,
+`Resource not accessible by integration`. Reads/fetches work. No remote
+`gpt/research` branch or research PR exists. The prepared description in
+`docs/research-pr.md` targets `main`; any eventual PR must remain draft
+until NVIDIA runtime validation is recorded.
+
+The complete-history bundle, binary patch and base SHA in `/workspace`
+are refreshed and verified after the final documentation commit. The
+existing hourly follow-up is paused at the user's request; no new task
+was scheduled. A future manual continuation must inspect the preserved
+artifacts before recreating missing remote work and must never force-push
+or alter Claude's branches.

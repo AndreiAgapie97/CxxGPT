@@ -1,0 +1,6 @@
+f55463a51b73a57919f798217606f2ca128c12f6ab7c430fd33112cfdce6e5d2  runs/reasoning-curriculum-20261014/dense-seed1-initial.ckpt
+e8953d5288be638bf2bd072b9ae719c9801d4191bca4b6477d4bdabd2c146fdd  runs/reasoning-curriculum-20261014/dense-seed2-initial.ckpt
+fd8655779ca1e5e6fd37f09022f087f56ca847e960c5711181d9210e90de43fc  runs/reasoning-curriculum-20261014/dense-seed3-initial.ckpt
+dbfc1ecd4b9d5cb85662381dc198642f2a559365fc66690f7a58b2cb1f08f5a2  runs/reasoning-curriculum-20261014/moe-ternary-seed1-initial.ckpt
+bc46204aa218e67ad05ddeeb95779243690d0fb54115f408e08dbcd861db832d  runs/reasoning-curriculum-20261014/moe-ternary-seed2-initial.ckpt
+d6f303099963c061e7c1083c2acae2faac3976a85b7bcaf08a315711f0a659fd  runs/reasoning-curriculum-20261014/moe-ternary-seed3-initial.ckpt

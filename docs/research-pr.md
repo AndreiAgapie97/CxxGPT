@@ -44,6 +44,18 @@ harder digit-length questions. Muon costs more computation; these recipes
 do not establish an architecture ranking. Immutable selection, finite-score
 and interruption-recovery checks preserve the evaluation split.
 
+A paired digit-support curriculum continues six frozen initial models with
+12 fixed 1,000-update tails (3,072,000 sampled tokens). Four-digit exact
+accuracy rises from zero in controls to 66–93% dense and 67–77% ternary MoE
+when that length receives supervision. All 18 models still fail all 200
+five-digit questions; expanded tails underperform controls on old lengths.
+Native generated-trace audits expose correct answers with false intermediate
+arithmetic. Independent parsing reproduces all 14,400 completions' metrics;
+recovery preserves all 18 models and scoring evidence byte-for-byte.
+The fresh 800-question probe is now development data and excluded from
+future independent holdouts. These findings show added-support learning,
+not length extrapolation or an architecture ranking.
+
 Claude's CUDA backend, streaming pipeline, laptop/overnight setup, Muon
 optimizer, evaluation/loading updates, and compact GPU optimizer state are
 merged into this branch. Compatible conflicts preserve both changes; no
@@ -67,3 +79,10 @@ Validation:
   draft until that validation is recorded.**
 
 The branch targets `main`, now also the GitHub default branch.
+
+Ordinary merges integrate Claude main `cf183cd` and side branch `892a286`.
+Newest upstream `ae1399d` is fetched but its int8 inference changes remain
+unmerged after the wrap-up request. Fused CUDA attention is opt-in on this
+branch; its actual kernel code passes CPU-emulated double-reference checks,
+which do not replace NVIDIA validation. Explicit warm-start precision/NoPE
+overrides retain unchanged master weights and reset optimizer/sampler state.

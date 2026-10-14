@@ -1,0 +1,2 @@
+Independent exclusions: 4223 prior questions, 800 fresh final, 360 validation; 1600 paired examples shared
+Every new gold answer and complete grounded trace agrees with independent arithmetic

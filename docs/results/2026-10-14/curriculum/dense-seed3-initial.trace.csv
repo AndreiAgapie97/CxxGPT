@@ -1,0 +1,10 @@
+checkpoint,task,difficulty,problems,exact,full_grounded_trace,exact_and_grounded,expected_statements,generated_statements,local_correct,grounded_correct
+dense-seed3-initial,add,1,100,99,99,99,200,200,199,199
+dense-seed3-initial,add,2,100,93,93,93,300,300,293,293
+dense-seed3-initial,add,3,100,0,0,0,400,300,293,94
+dense-seed3-initial,add,4,100,0,0,0,500,265,241,3
+dense-seed3-initial,cmp,1,100,100,100,100,138,138,138,138
+dense-seed3-initial,cmp,2,100,100,100,100,202,202,202,202
+dense-seed3-initial,cmp,3,100,0,51,0,245,221,213,164
+dense-seed3-initial,cmp,4,100,0,4,0,305,134,126,31
+dense-seed3-initial,overall,0,800,392,447,392,2290,1760,1705,1124
