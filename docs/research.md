@@ -591,6 +591,45 @@ that ternary attention causes copying mistakes or improve digit-length
 generalization. Integration evidence is retained in
 `docs/results/2026-10-14/integration-cf183cd`.
 
+## Declared digit-support experiment and generated traces
+
+`reasoning_traces` retains optional production greedy completions and checks
+the native add/cmp trace format against each question. Addition checks column
+operands (allowing commutation), propagated carry and arithmetic; comparison
+checks the equal prefix and first differing digit or differing lengths.
+Metrics separate local arithmetic, grounding, complete traces, exact final
+answers, and their intersection. These are strict curriculum-format checks,
+not a general proof checker or evidence of the model's internal algorithm.
+Missing/extra statements and correct final answers with wrong copied digits
+do not pass a complete grounded trace. Native fixtures cover those failures,
+overflowing text and 800 independently recomputed gold traces.
+
+`reasoning_curriculum` prepares two paired 2,400-question corpora: a balanced
+difficulty 1/2 control and balanced difficulty 1/2/3 expansion. Exactly 1,600
+questions are shared at the same problem positions; replacing one third also
+changes the relative frequency of old lengths. Every archived available
+corpus/test/probe, including all three 600-question research probes, is
+excluded from new questions. A fresh 800-question final probe spans add/cmp
+difficulties 1–4; a separate 360-question validation split is development only.
+All new training, validation and final questions are disjoint except the
+declared shared training examples. Question exclusion does not isolate templates.
+
+The fixed script starts both arms from the selected 2,000-update optimizer
+checkpoints, three seeds each, with fresh Muon state and a declared lr 0.0005,
+warmup 20, clipping 1 and 1,000 successful B2/T128 updates per tail. Each tail
+consumes 256,000 sampled tokens; actual valid target counts are replayed and
+recorded. The streams differ, so matched sampler draws do not imply identical
+windows or supervised-token counts. There is no checkpoint selection or early
+stopping. All six initial and twelve final hashes freeze before final scoring.
+Within the expanded arm difficulty 3 is trained support; difficulty 4 remains
+unseen digit length. This is a recipe/curriculum comparison within each
+architecture, not a ranking or matched compute between architectures.
+
+GCC/Clang, native/CLI, ASan/UBSan and TSan fixtures pass for the tools. The
+independent Python standard-library checker validates split exclusions,
+arithmetic answers, budgets and generated native counts; model execution
+itself remains native C++. Results will be recorded after the fixed run.
+
 ## Publishing and continuation status
 
 The local research branch preserves all earlier work and ordinary Claude

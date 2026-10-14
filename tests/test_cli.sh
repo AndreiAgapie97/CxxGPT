@@ -4,6 +4,8 @@ set -euo pipefail
 CXXGPT=${CXXGPT:-./cxxgpt}
 CXXGPT_AUDIT=${CXXGPT_AUDIT:-./reasoning_audit}
 CXXGPT_TARGETS=${CXXGPT_TARGETS:-./reasoning_targets}
+CXXGPT_TRACES=${CXXGPT_TRACES:-./reasoning_traces}
+CXXGPT_CURRICULUM=${CXXGPT_CURRICULUM:-./reasoning_curriculum}
 cd "$(dirname "$0")/.."
 TEST_DIR=$(mktemp -d)
 trap 'rm -rf -- "$TEST_DIR"' EXIT
@@ -115,3 +117,13 @@ printf 'CLI: reasoning audit covers the gold completion and preserves weighted s
     --exclude-test "$TEST_DIR/audit.txt" --out "$TEST_DIR/targets" --per-cell 3 > "$TEST_DIR/targets.log"
 ./test_training_cli targets "$TEST_DIR/targets.tok" "$TEST_DIR/targets/train-final.tok" "$TEST_DIR/targets/probe.txt"
 printf 'CLI: final-digit masks preserve tokens and fresh probes exclude known questions\n'
+"$CXXGPT_CURRICULUM" --out "$TEST_DIR/curriculum" --exclude-corpora "$TEST_DIR/targets.tok" \
+    --exclude-problems "$TEST_DIR/audit.txt" --train 24 --per-cell 2 --val-per-cell 2 > "$TEST_DIR/curriculum.log"
+./test_training_cli curriculum "$TEST_DIR/curriculum"
+"$CXXGPT_CURRICULUM" --mode budget --data "$TEST_DIR/curriculum/control.tok" --seq 8 --steps 4 > "$TEST_DIR/budget.csv"
+grep -q '^4,64,' "$TEST_DIR/budget.csv"
+"$CXXGPT_TRACES" --ckpt "$TEST_DIR/audit.ckpt" --problems "$TEST_DIR/audit.txt" \
+    --transcripts "$TEST_DIR/trace.tsv" > "$TEST_DIR/trace.csv"
+grep -q 'overall,0,1,' "$TEST_DIR/trace.csv"
+[[ $(wc -l < "$TEST_DIR/trace.tsv") == 2 ]]
+printf 'CLI: paired curriculum excludes known questions; sampled budget and generated trace audit passed\n'

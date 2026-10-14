@@ -85,6 +85,7 @@ struct EvalResult {
     std::map<std::pair<std::string, int>, std::pair<int, int>> by_task;
     int correct = 0, total = 0;
     std::vector<std::pair<Problem, std::string>> failures;  // a few, for inspection
+    std::vector<std::string> completions;  // optional, in input order for trace audits
 };
 
 // The tokens a problem's prompt is fed as: BOS, then "Q: ...\nA: ". The
@@ -100,7 +101,8 @@ inline std::vector<int> prompt_tokens(const Problem& p, const Tokenizer& tok) {
 // The default Tokenizer (no merges) is byte-level.
 template <class T>
 EvalResult eval_reasoning(Model<T>& model, const std::vector<Problem>& problems, const Tokenizer& tok = {},
-                          int batch = 64, int max_new = 200, size_t keep_failures = 8) {
+                          int batch = 64, int max_new = 200, size_t keep_failures = 8,
+                          bool keep_completions = false) {
     CHECK(model.cfg.vocab >= tok.vocab_size(), "model vocab %d < tokenizer vocab %d", model.cfg.vocab,
           tok.vocab_size());
     // Ids the tokenizer cannot decode (model vocab padding) end a completion.
@@ -142,5 +144,6 @@ EvalResult eval_reasoning(Model<T>& model, const std::vector<Problem>& problems,
         r.total += 1;
         if (!ok && r.failures.size() < keep_failures) r.failures.push_back({p, texts[i]});
     }
+    if (keep_completions) r.completions = std::move(texts);
     return r;
 }

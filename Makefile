@@ -12,7 +12,13 @@ SANFLAGS  = -O1 -g -march=$(MARCH) -std=c++20 -pthread $(CLANG_WARN) $(EXTRA)
 HEADERS := $(wildcard src/*.h)
 TEST_HEADERS := $(wildcard tests/*.h)
 
-all: ternary_moe test_engine cxxgpt test_training_cli reasoning_audit reasoning_targets
+all: ternary_moe test_engine cxxgpt test_training_cli reasoning_audit reasoning_targets reasoning_traces reasoning_curriculum
+
+reasoning_traces: experiments/reasoning_traces.cpp $(HEADERS)
+	$(CXX) $(CXXFLAGS) $< -o $@
+
+reasoning_curriculum: experiments/reasoning_curriculum.cpp $(HEADERS)
+	$(CXX) $(CXXFLAGS) $< -o $@
 
 memory_probe: experiments/memory_probe.cpp $(HEADERS)
 	$(CXX) $(CXXFLAGS) $< -o $@
@@ -68,7 +74,7 @@ optimizer-protocol-test:
 test_training_cli: tests/test_training_cli.cpp $(HEADERS) $(TEST_HEADERS)
 	$(CXX) $(CXXFLAGS) $< -o $@
 
-test: ternary_moe test_engine cxxgpt test_training_cli reasoning_audit reasoning_targets
+test: ternary_moe test_engine cxxgpt test_training_cli reasoning_audit reasoning_targets reasoning_traces reasoning_curriculum
 	./ternary_moe --tests
 	./test_engine
 	bash tests/test_cli.sh
@@ -92,9 +98,13 @@ asan: ternary_moe.cpp tests/test_engine.cpp experiments/toy_world.cpp src/cxxgpt
 	    experiments/reasoning_targets.cpp -o reasoning_targets_asan
 	$(CXX) $(SANFLAGS) -fsanitize=address,undefined -fno-sanitize-recover=undefined \
 	    experiments/memory_probe.cpp -o memory_probe_asan
+	$(CXX) $(SANFLAGS) -fsanitize=address,undefined -fno-sanitize-recover=undefined \
+	    experiments/reasoning_traces.cpp -o reasoning_traces_asan
+	$(CXX) $(SANFLAGS) -fsanitize=address,undefined -fno-sanitize-recover=undefined \
+	    experiments/reasoning_curriculum.cpp -o reasoning_curriculum_asan
 	./ternary_moe_asan --tests
 	./test_engine_asan
-	CXXGPT=./cxxgpt_asan CXXGPT_AUDIT=./reasoning_audit_asan CXXGPT_TARGETS=./reasoning_targets_asan bash tests/test_cli.sh
+	CXXGPT=./cxxgpt_asan CXXGPT_AUDIT=./reasoning_audit_asan CXXGPT_TARGETS=./reasoning_targets_asan CXXGPT_TRACES=./reasoning_traces_asan CXXGPT_CURRICULUM=./reasoning_curriculum_asan bash tests/test_cli.sh
 	./research_experiment_asan --steps 5 --seeds 1 --threads 2 --continual --rl-steps 5 --out runs/asan-smoke-$$$$.csv
 	./memory_probe_asan --mode train --ternary --experts 4 --muon --batch 2 --seq 8 --steps 1 > /dev/null
 	./memory_probe_asan --mode packed --ternary --experts 4 --batch 1 > /dev/null
@@ -107,12 +117,14 @@ tsan: ternary_moe.cpp tests/test_engine.cpp experiments/toy_world.cpp src/cxxgpt
 	$(CXX) $(SANFLAGS) -fsanitize=thread experiments/reasoning_audit.cpp -o reasoning_audit_tsan
 	$(CXX) $(SANFLAGS) -fsanitize=thread experiments/reasoning_targets.cpp -o reasoning_targets_tsan
 	$(CXX) $(SANFLAGS) -fsanitize=thread experiments/memory_probe.cpp -o memory_probe_tsan
+	$(CXX) $(SANFLAGS) -fsanitize=thread experiments/reasoning_traces.cpp -o reasoning_traces_tsan
+	$(CXX) $(SANFLAGS) -fsanitize=thread experiments/reasoning_curriculum.cpp -o reasoning_curriculum_tsan
 	./ternary_moe_tsan --tests
 	./test_engine_tsan
-	CXXGPT=./cxxgpt_tsan CXXGPT_AUDIT=./reasoning_audit_tsan CXXGPT_TARGETS=./reasoning_targets_tsan bash tests/test_cli.sh
+	CXXGPT=./cxxgpt_tsan CXXGPT_AUDIT=./reasoning_audit_tsan CXXGPT_TARGETS=./reasoning_targets_tsan CXXGPT_TRACES=./reasoning_traces_tsan CXXGPT_CURRICULUM=./reasoning_curriculum_tsan bash tests/test_cli.sh
 	./research_experiment_tsan --steps 5 --seeds 1 --threads 2 --continual --rl-steps 5 --out runs/tsan-smoke-$$$$.csv
 	./memory_probe_tsan --mode train --ternary --experts 4 --muon --batch 2 --seq 8 --steps 1 > /dev/null
 	./memory_probe_tsan --mode packed --ternary --experts 4 --batch 1 > /dev/null
 
 clean:
-	rm -f ternary_moe test_engine cxxgpt research_experiment reasoning_audit reasoning_targets memory_probe test_training_cli *_asan *_tsan gpu.o cxxgpt-gpu test_gpu
+	rm -f ternary_moe test_engine cxxgpt research_experiment reasoning_audit reasoning_targets reasoning_traces reasoning_curriculum memory_probe test_training_cli *_asan *_tsan gpu.o cxxgpt-gpu test_gpu

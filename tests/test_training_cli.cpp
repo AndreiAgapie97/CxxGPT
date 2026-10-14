@@ -5,6 +5,28 @@
 #include "../src/reasoning.h"
 
 int main(int argc, char** argv) {
+    if (argc == 3 && std::string(argv[1]) == "curriculum") {
+        const std::string dir(argv[2]);
+        const auto control = load_problems(dir + "/control.txt"), expanded = load_problems(dir + "/expanded.txt");
+        const auto probe = load_problems(dir + "/probe.txt"), validation = load_problems(dir + "/validation.txt");
+        EXPECT(control.size() == 24 && expanded.size() == 24 && probe.size() == 16 && validation.size() == 12,
+               "curriculum fixture has unexpected split sizes");
+        std::set<std::string> reserved, c, e;
+        Rng rng(20261014); reserved.insert(make_problem("add", 1, rng).question); reserved.insert("1+1");
+        for (const auto* split : {&probe, &validation})
+            for (const auto& p : *split) EXPECT(reserved.insert(p.question).second, "curriculum holdout leaked");
+        for (const auto& p : control) {
+            EXPECT(p.difficulty <= 2 && !reserved.contains(p.question), "control leaked or changed difficulty support");
+            EXPECT(c.insert(p.question).second, "duplicate control question");
+        }
+        size_t harder = 0, shared = 0;
+        for (const auto& p : expanded) {
+            EXPECT(!reserved.contains(p.question) && e.insert(p.question).second, "expanded question leaked/duplicated");
+            harder += p.difficulty == 3; shared += c.contains(p.question);
+        }
+        EXPECT(harder == 8 && shared == 16, "paired curriculum did not replace exactly one third of problems");
+        return g_failures ? 1 : 0;
+    }
     if (argc == 3 && std::string(argv[1]) == "generate") {
         const std::filesystem::path dir(argv[2]);
         TokenData data;

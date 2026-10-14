@@ -14,6 +14,7 @@
 #include "test_numerics.h"
 #include "test_train.h"
 #include "test_optim.h"
+#include "test_reasoning_traces.h"
 
 int main(int argc, char** argv) {
     int threads = int(std::thread::hardware_concurrency());
@@ -34,6 +35,7 @@ int main(int argc, char** argv) {
         {"policy gradient", test_policy_gradient_expectation},
         {"train", test_train},
         {"optim", test_optim},
+        {"generated traces", test_reasoning_traces},
     };
     for (auto& s : suites) {
         const int before = g_failures;
