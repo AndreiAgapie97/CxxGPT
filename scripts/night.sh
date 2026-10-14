@@ -14,6 +14,8 @@
 #   HOURS=7.5   RUN=night1 (outputs runs/$RUN.*)   DATA=data
 #   INIT: a checkpoint to start from (for example runs/night1.ckpt), with a
 #         fresh optimizer and schedule; its model replaces MODEL.
+#   TERNARY=1 (with INIT): turn the checkpoint's weights ternary from this
+#         night on (full-precision nights first, ternary ones at the end).
 #   MIX: the training files, comma-separated, "*N" repeats one N times;
 #        by default web text, stories, OpenMath, MetaMath and GSM8K train x4.
 # Validation is on the GSM8K test set, which training never sees: the loss
@@ -46,11 +48,19 @@ resume=()
 [ -f "runs/$RUN.ckpt" ] && resume=(--resume)
 # Once runs/$RUN.ckpt exists, --resume wins over --init.
 [ -n "${INIT:-}" ] && resume+=(--init "$INIT")
+# A new model is built from MODEL; with INIT, the model is the checkpoint's
+# (MODEL's --ternary must not switch it by accident: that is TERNARY=1).
+if [ -n "${INIT:-}" ]; then
+  model=()
+  [ "${TERNARY:-0}" = 1 ] && model=(--ternary)
+else
+  read -ra model <<< "$MODEL"
+fi
 echo "$RUN: $steps steps of $per_step tokens; stops after $minutes minutes at the latest" | tee -a "runs/$RUN.log"
 # tee -i: Ctrl-C reaches only the trainer, which saves before it stops.
 # shellcheck disable=SC2086
 "$CX" train $GPU --data "$MIX" --val "$DATA/gsm8k/test.tok" --bpe "$DATA/tok.bpe" \
   --reason-test "$DATA/gsm8k/test.txt" --reason-every 2000 --reason-limit 250 \
-  $MODEL $OPT --seq "$SEQ" --batch "$BATCH" --accum "$ACCUM" --steps "$steps" --warmup 500 --lr "$LR" \
+  "${model[@]}" $OPT --seq "$SEQ" --batch "$BATCH" --accum "$ACCUM" --steps "$steps" --warmup 500 --lr "$LR" \
   --eval-every 500 --eval-batches 20 --save-every 1000 --log-every 50 --time-limit "$minutes" \
   --out "runs/$RUN.ckpt" --log "runs/$RUN.csv" "${resume[@]}" "$@" 2>&1 | tee -ia "runs/$RUN.log"
