@@ -179,6 +179,7 @@ int cmd_text2tok(Args& a) {
             buf.resize(old + kBlock);
             f.read(buf.data() + old, std::streamsize(kBlock));
             buf.resize(old + size_t(f.gcount()));
+            buf.erase(std::remove(buf.begin()+std::ptrdiff_t(old),buf.end(),char(kBos)),buf.end());
             eof = !f;
             starved = false;
             CHECK(buf.size() <= kBlock*size_t(threads) + (64u<<20),
@@ -405,6 +406,9 @@ int cmd_prep_qa(Args& a) {
             if (fin->type == Json::String) p.answer = strip_digit_commas(trim(fin->str));
             else if (fin->type == Json::Number) p.answer = format_number(*fin);
         }
+        // Raw control BOS in source prose is reserved; only append_problem inserts it.
+        for (auto* text : {&p.question,&p.steps,&p.answer})
+            text->erase(std::remove(text->begin(),text->end(),char(kBos)),text->end());
         // One line only: the format ends the answer at the first newline.
         if (p.answer.empty() || p.answer.find('\n') != std::string::npos || p.question.empty()) {
             ++skipped;
@@ -894,7 +898,9 @@ int cmd_train(Args& a) {
 int cmd_sample(Args& a) {
     ThreadPool tp(threads_arg(a));
     g_pool = &tp;
-    const std::string ckpt = a.str("ckpt", "model.ckpt"), prompt = a.str("prompt"), bpe = a.str("bpe");
+    const std::string ckpt = a.str("ckpt", "model.ckpt"), bpe = a.str("bpe");
+    std::string prompt = a.str("prompt");
+    prompt.erase(std::remove(prompt.begin(),prompt.end(),char(kBos)),prompt.end());
     const int n = a.integer_int("n", 500);
     const double temp = a.real("temp", 0.8);
     const bool answer = a.flag("answer");  // stop after the "#### answer" line, as eval-reasoning does

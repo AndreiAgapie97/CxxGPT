@@ -6,6 +6,14 @@
 #include "../src/tokenizer.h"
 
 int main(int argc, char** argv) {
+    if (argc == 4 && std::string(argv[1]) == "clean-bos") {
+        const auto text=TokenData::load(argv[2]), qa=TokenData::load(argv[3]);
+        EXPECT(text.tokens==std::vector<uint16_t>({97,98}), "raw text BOS remained");
+        EXPECT(std::count(qa.tokens.begin(),qa.tokens.end(),uint16_t(kBos))==1,
+               "QA source injected extra document BOS tokens");
+        return g_failures ? 1 : 0;
+    }
+
     if (argc == 3 && std::string(argv[1]) == "numeric-labels") {
         const auto ps=load_problems(argv[2]);
         EXPECT(ps.size()==3 && ps[0].answer=="9007199254740993" && ps[1].answer=="1200" && ps[2].answer=="-0.0012",
