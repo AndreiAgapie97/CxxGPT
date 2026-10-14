@@ -618,18 +618,72 @@ to get more from the same memory.
 **Test.** The result must match the all-GPU update exactly (same numbers,
 tested like every other GPU change).
 
-## Speed, in parallel
+## Speed: more tokens per second
 
-The 2026-10-14 code review (kept locally by the owner) ranks GPU speed items.
-The cheapest to try:
+A night reads about 350 M tokens (night 1: 5,352 steps of 65,536 tokens at
+~15,000 tokens/s). That is roughly 9-10 trillion operations per second,
+around 40% of what the GPU can do in TF32. Faster training means more
+reading per night, which is what the model needs most.
 
-- run the attention softmax per sequence;
-- drop memsets in front of accumulations;
-- Muon in bf16.
+**Where a step goes.** Measured on 2026-10-14 after night 1, night-1 model
+and settings (4 sequences of 512 per micro-batch, 32 micro-batches),
+`cxxgpt-gpu train --profile`, 4.4 s per step:
 
-The exams cost time too. Each one runs on the CPU while the GPU waits: 5.5
-minutes for 250 problems at step 2000 of night 1, so about 15 minutes per
-night with the final exam. Run them on the GPU, or less often.
+| part | share |
+|---|---|
+| matrix products (forward + backward) | 47% |
+| attention (forward + backward, cuBLAS) | 22% |
+| Muon | 10% |
+| output layer and loss | 7% |
+| MoE routing (including the per-layer host sync) | 6% |
+| norms, RoPE, adds, SwiGLU | 7% |
 
-Do the zero-code check first: `GPU="--gpu --matmul bf16" scripts/probe.sh`. It
-measures what bf16 is actually worth here.
+**Settings tried** (10 steps each, same model):
+
+| setting | tokens/s | GPU memory |
+|---|---|---|
+| night 1 as run: TF32, 4 x 32 | 14,900 | 5.6 GB |
+| `--matmul bf16`, 4 x 32 | 15,050 | 5.6 GB |
+| `--fused-attn`, 4 x 32 | 7,700-9,500 | 5.0 GB |
+| `--fused-attn`, 8 x 16 | 10,200 | 6.7 GB |
+| `--fused-attn --matmul bf16`, 8 x 16 | 11,500 | 6.7 GB |
+| cuBLAS attention, 8 x 16 | 2,900 (spills out of GPU memory) | 7.9 of 8.2 GB |
+
+What this says:
+- `--matmul bf16` only asks cuBLAS to round fp32 inputs internally
+  (`CUBLAS_COMPUTE_32F_FAST_16BF`); the data stays fp32 in memory. At this
+  micro-batch the products are limited by moving data, not by arithmetic,
+  so it gains nothing. Storing weights and activations in bf16 is the real
+  version: the bf16 rung of the ladder above.
+- Our fused attention is slow (plain fp32 loops, no tensor cores) but uses
+  less memory.
+- Bigger micro-batches pay: with the same attention, 8 sequences instead of
+  4 is 33% faster, and bf16 starts to help (+12%) at that size.
+- 8 sequences do not fit with the cuBLAS attention: the Windows driver
+  spills into system RAM and the step is 5x slower. That is why the probe
+  picks 4.
+
+**Order of work.**
+1. **A fast fused attention kernel** on the tensor cores (the
+   FlashAttention design: tiles of queries and keys in shared memory, the
+   softmax computed on the fly, no stored attention matrix). It removes
+   most of the 22% and the memory that blocks 8-sequence micro-batches.
+   Tested against the CPU engine like the current kernels. Estimate:
+   1.3-1.6x overall, more with bf16 storage on top.
+2. **bf16 storage** for weights and activations (the ladder's bf16 rung,
+   after the norm-gradient question in the review).
+3. **Muon in bf16** (10% of the step).
+4. **Exams on the GPU.** Each one runs on the CPU while the GPU waits: about
+   5 minutes for 250 problems, about 15 minutes per night with the final
+   exam. Run them on the GPU, or less often.
+5. **No host sync in MoE routing:** fixed-capacity expert slots and one
+   batched product for all experts, which also allows CUDA graphs. Only 6%
+   today, more once the rest is faster.
+6. The review's smaller items: the attention softmax per sequence, no
+   memsets in front of accumulations.
+
+**Size nights by the real speed.** `night.sh` sizes a night from the probe's
+tokens/s with a 10% margin, but night 1 lost about 30 minutes to the exams,
+the validation passes and slow stretches, and stopped at step 5,352 of 5,700
+(the learning rate was 99% of the way down, so little was lost). Pass the
+speed measured on the previous night as `TOKS`.

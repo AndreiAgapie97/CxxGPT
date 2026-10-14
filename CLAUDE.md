@@ -61,10 +61,16 @@ Reasoning is the first capability we go after.
   backwards inside the model, planted mistakes, cloning dead experts,
   experts that compute exactly, and more), a ladder for growing past
   8 GB to 1-2 B parameters (recompute, bf16, 8-bit optimizer state, the
-  optimizer in CPU RAM, streaming layers), and the seed-repeat funnel an
-  idea passes before it gets a laptop night. Decisions are made on a dev
-  set held out of GSM8K train (and out of MetaMath and OpenMath2), never
-  on the GSM8K test set, which gives headline numbers only.
+  optimizer in CPU RAM, streaming layers), where a GPU step's time goes and
+  the speed work in order (a fast fused attention kernel first), and the
+  seed-repeat funnel an idea passes before it gets a laptop night.
+  Decisions are made on a dev set held out of GSM8K train (and out of
+  MetaMath and OpenMath2), never on the GSM8K test set, which gives
+  headline numbers only.
+- `src/wordgen.h` (`cxxgpt gen-word`): GSM8K-style word problems with exact
+  answers, worked solutions with calculator notes, and sentence patterns
+  held out for the test split. First version: one quantity changed step by
+  step; the review on PR 4 lists what a second version needs.
 - `src/cxxgpt.cpp`: the CLI (train, sample, eval, data prep, benchmarks).
 - `scripts/get_data.py`: downloads public datasets (GSM8K, TinyStories,
   FineWeb-Edu, OpenMathInstruct-2, MetaMathQA) into `data/`, as text with
