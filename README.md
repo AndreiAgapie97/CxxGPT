@@ -160,11 +160,11 @@ norms and routers stay on AdamW. Same learning rate and steps.
 - **Ternary weights cost 10–13% of validation loss** once training is
   good (with Muon: dense 0.0894 → 0.0988, MoE 0.0863 → 0.0974). With
   AdamW, dense seemed to pay almost nothing; the weaker training hid it.
-  BitNet-style work reports that the gap shrinks as models grow, and
-  that training in full precision first and switching to ternary for the
-  last part (`train --init FILE --ternary`) beats ternary from the
-  start; both are still to be tested here. A ternary MoE with Muon does
-  match a full-precision MoE with AdamW (0.0974 vs 0.0986).
+  BitNet-style work reports that the gap shrinks as models grow (not
+  tested here yet), and that training in full precision first and
+  switching to ternary at the end beats ternary throughout, which holds
+  here (below). A ternary MoE with Muon does match a full-precision MoE
+  with AdamW (0.0974 vs 0.0986).
 - **MoE's gain shrinks with Muon:** 13% lower validation loss than dense
   with AdamW, 3.5% with Muon (1.4% when both are ternary). These MoE
   models have three times the parameters for the same compute per token;
@@ -174,7 +174,7 @@ norms and routers stay on AdamW. Same learning rate and steps.
 - **Its cost** is the Newton–Schulz iterations on every matrix, which
   grow with the number of parameters, not of tokens: here (4096 tokens
   per step) 10% of the step time on dense and 15% on ternary MoE, whose
-  experts all go through it every step. For the laptop's d768 ternary MoE
+  experts all go through it every step. For the laptop's d768 MoE
   at 65536 tokens per step it comes to about 13% of the arithmetic;
   `scripts/probe.sh` measures the speed with Muon on.
 - On ternary MoE, Muon starts slower (validation 0.50 vs 0.43 at step
@@ -199,6 +199,33 @@ Ternary MoE, otherwise the same runs:
   `scripts/night.sh` keeps 1.5e-3 for now: the best learning rate
   usually drops as models get wider, and a diverged run costs a night.
 - **Weight decay makes no measurable difference.**
+
+### Full precision first, ternary at the end
+
+The laptop trains in nights, and each night starts a new learning-rate
+schedule from the previous night's weights (`night.sh` with `INIT=`).
+These runs do the same after 1700 of 2500 steps: MoE with Muon, the last
+800 steps either kept as they were or switched to ternary
+(`train --init FILE --ternary`).
+
+| first 1700 steps | last 800 steps | val loss | accuracy | d = 1–3 | d = 4 |
+|---|---|---:|---:|---:|---:|
+| full precision | full precision | **0.0940** | **63.1%** | **81.5%** | **7.9%** |
+| full precision | ternary | 0.0982 | 60.9% | 78.9% | 7.1% |
+| ternary | ternary | 0.1033 | 58.6% | 76.8% | 4.2% |
+
+- **Switching to ternary for the last third halves its cost:** 4.5%
+  higher validation loss than staying in full precision, against 9.9%
+  for ternary throughout. Right after the switch the training loss jumps
+  (1.9 at its 50th step), and it is back level with the others by step
+  200.
+- **So the laptop's first nights train in full precision**, and the last
+  ones switch to ternary (`INIT=... TERNARY=1`, see
+  [docs/LAPTOP.md](docs/LAPTOP.md)). Full precision also leaves the GPU
+  about 1 GB more at d768: no ternary copy of the weights.
+- Restarting the schedule costs something by itself (0.0940 here,
+  against 0.0863 for one 2500-step schedule); every night pays that,
+  ternary or not.
 
 ### Inference kernels
 
@@ -254,8 +281,8 @@ flips between near-equal candidates.
 
 - Train on the laptop GPU: language first, then worked math solutions,
   checked on the GSM8K test set ([docs/LAPTOP.md](docs/LAPTOP.md)).
-- Ternary's cost: whether it shrinks with model size, and whether
-  switching to ternary only for the last part of training avoids it.
+- Ternary's cost at larger sizes, and how late the switch to ternary
+  can come.
 - Length generalization on the curriculum.
 - Faster GPU training: fused attention, bf16.
 - Benchmark the inference engine against bitnet.cpp at equal model size.

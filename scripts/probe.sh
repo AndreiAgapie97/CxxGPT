@@ -22,10 +22,13 @@ GPU=${GPU---gpu}
 [ -x "$CX" ] || { echo "build it first: make gpu"; exit 1; }
 [ -f data/reason.train.tok ] || "$CX" gen-reasoning --out data/reason > /dev/null
 
+# Full precision for the first nights; the ternary size is what the last
+# nights train at, once night.sh's TERNARY=1 has switched the model.
 DEFAULT_SIZES="d512-dense:--dim 512 --layers 8 --heads 8
-d512-moe-ternary:--dim 512 --layers 8 --heads 8 --experts 8 --topk 2 --ternary
-d640-moe-ternary:--dim 640 --layers 10 --heads 10 --experts 8 --topk 2 --ternary
+d512-moe:--dim 512 --layers 8 --heads 8 --experts 8 --topk 2
+d640-moe:--dim 640 --layers 10 --heads 10 --experts 8 --topk 2
 d768-dense:--dim 768 --layers 12 --heads 12
+d768-moe:--dim 768 --layers 12 --heads 12 --experts 8 --topk 2
 d768-moe-ternary:--dim 768 --layers 12 --heads 12 --experts 8 --topk 2 --ternary"
 SIZES=${SIZES:-$DEFAULT_SIZES}
 
