@@ -429,7 +429,55 @@ ways to turn more time into better answers, each with its own effort knob:
 - 4 as a research bet. It is the most promising for "smart on a laptop",
   since it adds thinking without adding memory.
 
-## Growing past 8 GB: the optimizer's memory in the CPU's RAM
+## Growing past 8 GB: a ladder to 1-2 B parameters
+
+**Where night 1's 5.6 GB goes.** About 3.4 GB is fixed: weights, gradients and
+optimizer state, all fp32. About 2.2 GB is activations (intermediate results
+kept for the backward pass).
+
+**The ladder, cheapest first.**
+
+| Step | What it does | Frees on the GPU |
+|---|---|---|
+| 1. Recompute (activation checkpointing) | drop activations and recompute them in the backward pass | most of the 2.2 GB, for ~30% more compute |
+| 2. bf16 storage | keep the GPU's working weights and gradients in 16 bits | half of those |
+| 3. 8-bit optimizer state | store Adam/Muon state in 8 bits (Dettmers et al., 2021) | about ¾ of that state |
+| 4. Optimizer in RAM | fp32 master weights and optimizer state in the laptop's RAM; the CPU does the update (below) | all of it |
+| 5. Stream layers | all weights in RAM; each layer goes to the GPU just before it is needed | the GPU holds 1-2 layers at a time |
+
+- Step 2 is review item E1. It first needs the norm-gradient question behind
+  the failing `dense bf16` GPU check (review C2).
+- With steps 4 and 5, the limit moves from the GPU's 8 GB to WSL's RAM.
+  - `.wslconfig` gives WSL 16 GB today. Night 1 uses about 12 GB of it, mostly
+    for the token files and the host copy of the model.
+  - Raised to about 24 GB, that leaves maybe 18 GB for the master weights and
+    optimizer state.
+  - At 12-16 bytes per parameter (fp32 master and state) that is about
+    1.1-1.5 B parameters. With 8-bit state (about 8 bytes), about 2 B.
+
+**Why it suits our MoE.**
+- The work per token depends on the active parameters, and memory on the
+  total. Grow the total to 1-2 B (more and bigger experts) while each token
+  still uses about 100 M, and the GPU does about the same work per step as in
+  night 1.
+- The new cost is moving weights in and gradients out each step: roughly
+  10-12 GB at 2 B parameters. That is maybe 0.5-1 s per step on a laptop PCIe
+  link, against about 4.7 s today. It is partly hidden behind compute.
+- More total parameters at the same compute per token lower the loss in
+  published MoE scaling studies, with diminishing returns.
+
+**Limits.**
+- Data: a 2 B model fills slowly at 0.37 B tokens per night. It is better than
+  267 M, not 7× better.
+- Engineering: each step takes days to weeks, and each is tested against the
+  CPU engine. Streaming is the largest.
+- Running it afterwards is easy: 2 B ternary parameters are about 0.5 GB.
+
+**When.** Steps 1 and 2 pay off anyway (memory and speed). Steps 3-5 only once
+we know we want a model bigger than 8 GB allows. Bets 2 and 5 are cheaper ways
+to get more from the same memory.
+
+### Step 4 in detail: the optimizer's memory in the CPU's RAM
 
 **Why not split the computing work between CPU and GPU instead?**
 - The CPU is about 20× slower at this work: roughly 1 TFLOP/s at its best,
@@ -452,9 +500,6 @@ ways to turn more time into better answers, each with its own effort knob:
 
 **Test.** The result must match the all-GPU update exactly (same numbers,
 tested like every other GPU change).
-
-**When.** Only once we know we want a model bigger than 8 GB allows. Bets 2
-and 5 are cheaper ways to get more from the same memory.
 
 ## Speed, in parallel
 
