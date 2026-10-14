@@ -28,13 +28,13 @@ if [ ! -f "$tok" ]; then
   # separators (they are not text the model reads).
   mb=$BPE_SAMPLE_MB
   {
-    head -c "$((mb * 6 / 10))M" "$DATA/fineweb-edu/000.txt"
-    head -c "$((mb * 2 / 10))M" "$DATA/tinystories/train.txt"
+    head -c "$((mb * 1024 * 6 / 10))K" "$DATA/fineweb-edu/000.txt"
+    head -c "$((mb * 1024 * 2 / 10))K" "$DATA/tinystories/train.txt"
     { "$PY" -c 'import json, sys
 for line in sys.stdin:
     j = json.loads(line)
     print(j["question"]); print(j["answer"])' < "$DATA/openmath2/train_1M.jsonl" 2> /dev/null || true; } |
-      head -c "$((mb * 2 / 10))M"
+      head -c "$((mb * 1024 * 2 / 10))K"
   } | grep -v -x '<|endoftext|>' > "$DATA/bpe-sample.txt"
   "$CX" bpe-train --in "$DATA/bpe-sample.txt" --vocab "$VOCAB" --out "$tok.part"
   mv "$tok.part" "$tok"

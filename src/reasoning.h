@@ -9,6 +9,8 @@
 // Task families, each with a difficulty knob d = 1..5:
 //   chain  multi-hop variable resolution: definitions in shuffled order,
 //          with distractors; the solution resolves them in dependency order
+//          (with chain_plan, it first looks them up backward from the
+//          question: "c=h+8; h=6 => h=6; c=h+8=6+8=14")
 //   add    multi-digit addition, column by column with carries
 //   mul    multi-digit multiplication via partial products
 //   expr   nested arithmetic expression, innermost operation first
@@ -56,10 +58,19 @@ inline std::string join(const std::vector<std::string>& parts, const std::string
     return s;
 }
 
-inline Problem chain(Rng& rng, int d) {
+inline Problem chain(Rng& rng, int d, bool plan) {
     // Variables v[0..n): v[0] is a literal; v[i] = v[j] op (number or v[k])
     // with j, k < i. The question asks for v[n-1]; distractors use the same
     // variables but nothing depends on them.
+    //
+    // The plain solution computes v[0], v[1], ... in order, so its first
+    // step already has to know which of the variables defined from v[0]
+    // leads to the question. With plan, the solution first copies the
+    // definitions backward from the question: v[n-1]'s, then that of the
+    // first variable on its right-hand side (v[n-2]), and so on down to
+    // v[0]. Every step is then a lookup of the variable just written.
+    // Both versions draw the same random numbers: same questions, same
+    // answers.
     const int hops = d + 1, distract = (d + 1) / 2 + 1;
     std::string letters = "abcdefghijklmnopqrstuvwxyz";
     for (int i = 25; i > 0; --i) std::swap(letters[i], letters[rng.below(i + 1)]);
@@ -112,6 +123,10 @@ inline Problem chain(Rng& rng, int d) {
     p.difficulty = d;
     p.question = join(shuffled, "; ") + "; " + name(hops - 1) + "?";
     p.steps = join(solution, "; ");
+    if (plan) {
+        std::vector<std::string> lookup(defs.rbegin() + int(defs.size()) - hops, defs.rend());
+        p.steps = join(lookup, "; ") + " => " + p.steps;
+    }
     p.answer = std::to_string(val[hops - 1]);
     return p;
 }
@@ -281,9 +296,11 @@ inline const std::vector<std::string>& reasoning_tasks() {
     return t;
 }
 
-inline Problem make_problem(const std::string& task, int difficulty, Rng& rng) {
+// chain_plan: chain solutions look the variables up before computing (see
+// chain()); the other tasks ignore it.
+inline Problem make_problem(const std::string& task, int difficulty, Rng& rng, bool chain_plan = false) {
     using namespace reasoning_detail;
-    if (task == "chain") return chain(rng, difficulty);
+    if (task == "chain") return chain(rng, difficulty, chain_plan);
     if (task == "add") return add(rng, difficulty);
     if (task == "mul") return mul(rng, difficulty);
     if (task == "expr") return expr(rng, difficulty);
@@ -323,7 +340,7 @@ inline std::string unescape_field(const std::string& s) {
 }
 
 inline void save_problems(const std::string& path, const std::vector<Problem>& ps) {
-    FILE* f = std::fopen(path.c_str(), "w");
+    FILE* f = create_file(path, "w");
     CHECK(f, "cannot write %s", path.c_str());
     for (const auto& p : ps)
         std::fprintf(f, "%s\t%d\t%s\t%s\t%s\n", escape_field(p.task).c_str(), p.difficulty,

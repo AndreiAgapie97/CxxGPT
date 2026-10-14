@@ -1,5 +1,5 @@
 // common.h — small utilities shared by the training engine: RNG, timer,
-// aligned buffers, error checks.
+// aligned buffers, error checks, creating files.
 #pragma once
 
 #include <chrono>
@@ -8,7 +8,9 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <new>
+#include <string>
 
 // Fails loudly in every build type (unlike assert, which NDEBUG removes).
 // For conditions that depend on input: files, configs, command lines.
@@ -22,6 +24,16 @@
             std::exit(1);                                                   \
         }                                                                   \
     } while (0)
+
+// Opens a file for writing (mode "w", "wb" or "a"), first creating the
+// folders on its path that are missing, so "--out data/reason" works in a
+// fresh clone. Returns nullptr if the file cannot be opened.
+inline FILE* create_file(const std::string& path, const char* mode) {
+    const std::filesystem::path dir = std::filesystem::path(path).parent_path();
+    std::error_code ec;  // on failure, fopen below fails and the caller says so
+    if (!dir.empty()) std::filesystem::create_directories(dir, ec);
+    return std::fopen(path.c_str(), mode);
+}
 
 // Our own RNG, so runs are reproducible across compilers and standard
 // libraries (std::normal_distribution is not). xoshiro256**, seeded with

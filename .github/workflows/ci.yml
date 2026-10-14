@@ -90,3 +90,30 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: NO_GPU=1 scripts/setup_wsl.sh
+
+  # The laptop scripts: lint them, and run the GPU probe end to end on the
+  # CPU build (a tiny model, a few steps).
+  scripts:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - run: shellcheck scripts/*.sh
+      - run: python3 -m py_compile scripts/get_data.py
+      - run: make cxxgpt
+      - name: probe.sh on the CPU build
+        run: |
+          CX=./cxxgpt GPU= SEQ=32 BATCH=4 ACCUM=1 VOCAB=256 \
+            SIZES="tiny:--dim 32 --layers 1 --heads 2" scripts/probe.sh 5 | tee probe.out
+          grep -q "scripts/night.sh" probe.out
+
+  # The download sources, checked against the real servers: each file
+  # scripts/get_data.py fetches is where it expects it, with the columns it
+  # reads. A few MB (byte ranges and Parquet footers), no full downloads.
+  data-sources:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - run: python3 -m venv /tmp/venv && /tmp/venv/bin/pip install -q pyarrow
+      - run: /tmp/venv/bin/python scripts/get_data.py --check gsm8k tinystories fineweb-edu openmath2 metamath

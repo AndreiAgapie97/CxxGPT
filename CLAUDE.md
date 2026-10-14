@@ -38,14 +38,16 @@ Reasoning is the first capability we go after.
   FineWeb-Edu, OpenMathInstruct-2, MetaMathQA) into `data/`, as text with
   `<|endoftext|>` between documents (for `text2tok --doc-sep`) or as
   GSM8K-style JSON Lines (for `prep-qa`). Tested against a local fake of
-  the Hugging Face endpoints, since huggingface.co is blocked here.
+  the Hugging Face endpoints, since huggingface.co is blocked here; CI's
+  `data-sources` job checks the real files and columns (`--check`).
 - `scripts/compare.sh`: the architecture comparison on the curriculum.
 - For the laptop: `scripts/setup_wsl.sh` (toolchain, build, all tests),
   `scripts/probe.sh` (GPU speed and memory per model size; prints the
   night.sh command for each), `scripts/prepare_data.sh` (downloads, our
   tokenizer, token files) and `scripts/night.sh` (one night of training,
   validated on the GSM8K test set; `INIT=` starts from an earlier night's
-  weights). `docs/LAPTOP.md` is the runbook.
+  weights); `scripts/report.sh` sums up a night's log. `docs/LAPTOP.md`
+  is the runbook.
 - Overnight safety: a step with a non-finite gradient is skipped, ten in a
   row stop the run without overwriting the last checkpoint, and
   checkpoints are written to a temporary file and renamed.

@@ -94,6 +94,41 @@ inline std::string solve(const Problem& p) {
 
 }  // namespace reasoning_check
 
+// chain_plan changes only how chain solutions are written: the same random
+// draws give the same questions and answers, and the plan, rebuilt here from
+// the question alone, follows the definitions back from the queried variable.
+inline void test_chain_plan() {
+    Rng plain_rng(43), plan_rng(43);
+    int planned = 0;
+    for (const auto& task : reasoning_tasks())
+        for (int d = 1; d <= 5; ++d)
+            for (int i = 0; i < 100; ++i) {
+                const Problem p = make_problem(task, d, plain_rng);
+                const Problem q = make_problem(task, d, plan_rng, true);
+                EXPECT(p.question == q.question && p.answer == q.answer, "%s d=%d: chain_plan changed the problem",
+                       task.c_str(), d);
+                if (task != "chain") {
+                    EXPECT(p.steps == q.steps, "%s: chain_plan changed its steps", task.c_str());
+                    continue;
+                }
+                // "h=6; a=c*5; m=h+a; c=h+8; c?" -> plan "c=h+8; h=6".
+                std::map<char, std::string> defs;
+                size_t at = 0;
+                for (size_t semi; (semi = q.question.find("; ", at)) != std::string::npos; at = semi + 2)
+                    defs[q.question[at]] = q.question.substr(at, semi - at);
+                std::string want;
+                for (char v = q.question[at]; defs.count(v);) {
+                    const std::string& def = defs[v];
+                    want += (want.empty() ? "" : "; ") + def;
+                    v = std::isalpha(static_cast<unsigned char>(def[2])) ? def[2] : 0;  // "c=h+8": next is h
+                }
+                EXPECT(q.steps == want + " => " + p.steps, "chain plan for %s: '%s', expected '%s => %s'",
+                       q.question.c_str(), q.steps.c_str(), want.c_str(), p.steps.c_str());
+                ++planned;
+            }
+    std::printf("  %d chain plans rebuilt from their questions\n", planned);
+}
+
 inline void test_reasoning() {
     Rng rng(41);
     int checked = 0;
@@ -127,4 +162,5 @@ inline void test_reasoning() {
             }
     }
     std::printf("  %d problems verified by an independent solver\n", checked);
+    test_chain_plan();
 }

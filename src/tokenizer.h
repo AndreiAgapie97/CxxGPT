@@ -186,7 +186,7 @@ public:
 
     // Text file: a header line, the merge count, then one "a b" pair per line.
     void save(const std::string& path) const {
-        FILE* f = std::fopen(path.c_str(), "w");
+        FILE* f = create_file(path, "w");
         CHECK(f, "cannot write %s", path.c_str());
         std::fprintf(f, "cxxgpt-bpe 1\n%zu\n", merges_.size());
         for (auto [a, b] : merges_) std::fprintf(f, "%d %d\n", a, b);

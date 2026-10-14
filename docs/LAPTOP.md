@@ -30,9 +30,11 @@ and can do everything else from there.
 ### In Ubuntu
 
 5. Check that the GPU is visible: `nvidia-smi` should list the RTX 4070.
-6. Get the code, in the Linux home folder (much faster than `/mnt/c`):
+6. Get the code, in the Linux home folder (much faster than `/mnt/c`).
+   `-b main` picks the branch the work is on; without it, git takes the
+   repository's default branch, which may be an older one:
    ```sh
-   git clone https://github.com/AndreiAgapie97/CxxGPT.git ~/CxxGPT
+   git clone -b main https://github.com/AndreiAgapie97/CxxGPT.git ~/CxxGPT
    cd ~/CxxGPT
    ```
 7. Run the setup script. It installs the compilers, the CUDA compiler and
@@ -87,7 +89,10 @@ and can do everything else from there.
    ```sh
    scripts/prepare_data.sh
    ```
-   About 10 GB of downloads; everything fits well under 50 GB.
+   About 5.5 GB of downloads (each extra FineWeb-Edu file, `FINEWEB_FILES=2`
+   and up, adds 2.2 GB); everything fits well under 50 GB. CI checks on
+   every push that these files are still where the script expects them
+   (`get_data.py --check`).
 
 ### Night 1
 
@@ -102,7 +107,9 @@ math, and checks itself on the GSM8K test set, which training never sees:
 validation loss every 500 steps, exact answers every 2000. Its settings
 (model size, optimizer, batch, data mix) are at the top of the script.
 Run the same command again to resume after an interruption. The log is
-`runs/night1.log`.
+`runs/night1.log`; in the morning, `scripts/report.sh night1` sums it up on
+one screen (validation loss and exact answers over the night, speed, how
+it ended, and one answer the model got wrong).
 
 ### Following nights
 

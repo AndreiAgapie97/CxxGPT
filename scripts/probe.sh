@@ -48,7 +48,7 @@ while IFS= read -r line; do
   b=$BATCH a=$ACCUM ok=0
   while :; do
     if run "$b" "$a" "$args"; then ok=1; break; fi
-    grep -qiE "out of memory|ALLOC_FAILED" "$tmp/log" && [ "$b" -gt 1 ] || break
+    if ! grep -qiE "out of memory|ALLOC_FAILED" "$tmp/log" || [ "$b" -le 1 ]; then break; fi
     b=$((b / 2)) a=$((a * 2))
   done
   if [ $ok = 1 ]; then
