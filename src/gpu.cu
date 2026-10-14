@@ -667,8 +667,6 @@ struct GpuTrainer::Impl {
     Impl(const Config& c, const std::vector<ParamInfo>& in, Matmul matmul, bool fused)
         : cfg(c), infos(in), fused_attn(fused) {
         cfg.validate();
-        CHECK(!cfg.fp_attention, "full-precision attention (--fp-attn) is not on the GPU yet");
-        CHECK(cfg.nope_every == 0, "layers without RoPE (--nope-every) are not on the GPU yet");
         int devices = 0;
         const cudaError_t err = cudaGetDeviceCount(&devices);
         CHECK(err == cudaSuccess && devices > 0, "no CUDA GPU available (%s)",
@@ -783,7 +781,9 @@ struct GpuTrainer::Impl {
 
     float* P(size_t o) { return params.p + o; }
     float* G(size_t o) { return grads.p + o; }
-    const float* W(size_t o) const { return cfg.ternary ? qparams.p + o : params.p + o; }
+    // Weights as the products use them: their ternary copy when q.
+    const float* W(size_t o, bool q) const { return q ? qparams.p + o : params.p + o; }
+    bool attn_ternary() const { return cfg.ternary && !cfg.fp_attention; }
 
     // Row-major C[M, N] = op(A)[M, K] · op(B)[K, N] + beta * C. With ta, A is
     // stored as [K, M] (row stride lda); likewise B with tb. cuBLAS is
@@ -825,22 +825,23 @@ struct GpuTrainer::Impl {
         LAUNCH_CHECK();
     }
 
-    // Model::proj_forward / proj_backward: BitLinear when ternary.
-    void proj_forward(float* y, const float* x, size_t woff, int N, int IC, int OC) {
+    // Model::proj_forward / proj_backward: BitLinear when q (ternary weights,
+    // int8 activations).
+    void proj_forward(float* y, const float* x, size_t woff, int N, int IC, int OC, bool q) {
         Region r(*this, "matmul fwd");
-        if (cfg.ternary) {
+        if (q) {
             act_quantize(xq.p, x, N, IC);
             x = xq.p;
         }
-        linear_forward(y, x, W(woff), N, IC, OC);
+        linear_forward(y, x, W(woff, q), N, IC, OC);
     }
-    void proj_backward(float* dx, const float* dy, const float* x, size_t woff, int N, int IC, int OC) {
+    void proj_backward(float* dx, const float* dy, const float* x, size_t woff, int N, int IC, int OC, bool q) {
         Region r(*this, "matmul bwd");
-        if (cfg.ternary) {
+        if (q) {
             act_quantize(xq.p, x, N, IC);
             x = xq.p;
         }
-        linear_backward(dx, G(woff), dy, x, W(woff), N, IC, OC);
+        linear_backward(dx, G(woff), dy, x, W(woff, q), N, IC, OC);
     }
 
     void rmsnorm_forward(float* out, float* rstd, const float* x, const float* w, int N, int C) {
@@ -1022,9 +1023,9 @@ struct GpuTrainer::Impl {
         const auto& o = layer[l];
         const int C = cfg.d_model, F = cfg.always_hidden();
         if (F > 0) {
-            proj_forward(a.fc.p, a.ln2.p, o.wfc, N, C, 2 * F);
+            proj_forward(a.fc.p, a.ln2.p, o.wfc, N, C, 2 * F, cfg.ternary);
             swiglu_forward(a.sw.p, a.fc.p, N, F);
-            proj_forward(out, a.sw.p, o.wproj, N, F, C);
+            proj_forward(out, a.sw.p, o.wproj, N, F, C, cfg.ternary);
         } else {
             CUDA_CHECK(cudaMemsetAsync(out, 0, size_t(N) * C * sizeof(float)));
         }
@@ -1037,10 +1038,10 @@ struct GpuTrainer::Impl {
         const int C = cfg.d_model, F = cfg.always_hidden();
         if (F > 0) {
             dsw.zero(size_t(N) * F);
-            proj_backward(dsw.p, dout, a.sw.p, o.wproj, N, F, C);
+            proj_backward(dsw.p, dout, a.sw.p, o.wproj, N, F, C, cfg.ternary);
             dfc.zero(size_t(N) * 2 * F);
             swiglu_backward(dfc.p, dsw.p, a.fc.p, N, F);
-            proj_backward(dx, dfc.p, a.ln2.p, o.wfc, N, C, 2 * F);
+            proj_backward(dx, dfc.p, a.ln2.p, o.wfc, N, C, 2 * F, cfg.ternary);
         }
         if (cfg.moe()) moe_backward(l, dx, dout, N);
     }
@@ -1071,9 +1072,11 @@ struct GpuTrainer::Impl {
         for (int e = 0; e < E; ++e) {
             const int r0 = a.expert_start[e], n = a.expert_start[e + 1] - r0;
             if (n == 0) continue;
-            proj_forward(a.efc.p + size_t(r0) * 2 * Fe, a.xg.p + size_t(r0) * C, o.efc + e * efc_per, n, C, 2 * Fe);
+            proj_forward(a.efc.p + size_t(r0) * 2 * Fe, a.xg.p + size_t(r0) * C, o.efc + e * efc_per, n, C, 2 * Fe,
+                         cfg.ternary);
             swiglu_forward(a.esw.p + size_t(r0) * Fe, a.efc.p + size_t(r0) * 2 * Fe, n, Fe);
-            proj_forward(a.ey.p + size_t(r0) * C, a.esw.p + size_t(r0) * Fe, o.eproj + e * eproj_per, n, Fe, C);
+            proj_forward(a.ey.p + size_t(r0) * C, a.esw.p + size_t(r0) * Fe, o.eproj + e * eproj_per, n, Fe, C,
+                         cfg.ternary);
         }
         Region combine(*this, "moe routing");
         moe_combine<<<blocks_for(size_t(N) * C), kBlock>>>(out, a.ey.p, a.gate.p, a.row_of.p, N, C, K);
@@ -1096,10 +1099,12 @@ struct GpuTrainer::Impl {
             const int r0 = a.expert_start[e], n = a.expert_start[e + 1] - r0;
             if (n == 0) continue;
             dsw.zero(size_t(n) * Fe);
-            proj_backward(dsw.p, dey.p + size_t(r0) * C, a.esw.p + size_t(r0) * Fe, o.eproj + e * eproj_per, n, Fe, C);
+            proj_backward(dsw.p, dey.p + size_t(r0) * C, a.esw.p + size_t(r0) * Fe, o.eproj + e * eproj_per, n, Fe, C,
+                          cfg.ternary);
             dfc.zero(size_t(n) * 2 * Fe);
             swiglu_backward(dfc.p, dsw.p, a.efc.p + size_t(r0) * 2 * Fe, n, Fe);
-            proj_backward(dxg.p + size_t(r0) * C, dfc.p, a.xg.p + size_t(r0) * C, o.efc + e * efc_per, n, C, 2 * Fe);
+            proj_backward(dxg.p + size_t(r0) * C, dfc.p, a.xg.p + size_t(r0) * C, o.efc + e * efc_per, n, C, 2 * Fe,
+                          cfg.ternary);
         }
         Region r(*this, "moe routing");
         moe_scatter<<<blocks_for(size_t(N) * C), kBlock>>>(dx, dxg.p, a.row_of.p, N, C, K);
@@ -1128,10 +1133,10 @@ struct GpuTrainer::Impl {
             auto& a = acts[l];
             const auto& o = layer[l];
             rmsnorm_forward(a.ln1.p, a.rstd1.p, x, P(o.ln1), N, C);
-            proj_forward(a.qkv.p, a.ln1.p, o.wqkv, N, C, 3 * C);
-            rope_apply(a.qkv.p, B, Tn, false);
+            proj_forward(a.qkv.p, a.ln1.p, o.wqkv, N, C, 3 * C, attn_ternary());
+            if (cfg.rope_layer(l)) rope_apply(a.qkv.p, B, Tn, false);
             attention_forward(a, B, Tn);
-            proj_forward(out_tmp.p, a.atty.p, o.wo, N, C, C);
+            proj_forward(out_tmp.p, a.atty.p, o.wo, N, C, C, attn_ternary());
             add(a.resid1.p, x, out_tmp.p, size_t(N) * C);
             rmsnorm_forward(a.ln2.p, a.rstd2.p, a.resid1.p, P(o.ln2), N, C);
             ffn_forward(l, out_tmp.p, N, training);
@@ -1177,12 +1182,12 @@ struct GpuTrainer::Impl {
             ffn_backward(l, dC.p, dresid.p, N);
             rmsnorm_backward(dresid.p, G(o.ln2), dC.p, a.resid1.p, P(o.ln2), a.rstd2.p, N, C);
             datty.zero(size_t(N) * C);
-            proj_backward(datty.p, dresid.p, a.atty.p, o.wo, N, C, C);
+            proj_backward(datty.p, dresid.p, a.atty.p, o.wo, N, C, C, attn_ternary());
             dqkv.zero(size_t(N) * 3 * C);
             attention_backward(dqkv.p, datty.p, a, B, Tn);
-            rope_apply(dqkv.p, B, Tn, true);
+            if (cfg.rope_layer(l)) rope_apply(dqkv.p, B, Tn, true);
             dC.zero(size_t(N) * C);
-            proj_backward(dC.p, dqkv.p, a.ln1.p, o.wqkv, N, C, 3 * C);
+            proj_backward(dC.p, dqkv.p, a.ln1.p, o.wqkv, N, C, 3 * C, attn_ternary());
             rmsnorm_backward(dresid.p, G(o.ln1), dC.p, x_in, P(o.ln1), a.rstd1.p, N, C);
         }
         embedding_bwd<<<blocks_for(size_t(N) * C), kBlock>>>(G(wte), dresid.p, tokens.p, N, C);

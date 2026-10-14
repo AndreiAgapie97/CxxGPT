@@ -9,9 +9,10 @@
 // Muon runs the same comparison on the dense and MoE models. Some runs clip
 // the gradient (to half its norm), as training with --clip does. Attention
 // runs on the fused kernels (attention.cuh), except in one run that checks
-// the cuBLAS path (--no-fused-attn). One run multiplies in bf16, against
-// looser tolerances. A last check trains on the GPU alone, with TF32 and
-// with bf16, until a toy pattern is learned.
+// the cuBLAS path (--no-fused-attn). Two runs check --fp-attn and
+// --nope-every. One run multiplies in bf16, against looser tolerances. A
+// last check trains on the GPU alone, with TF32 and with bf16, until a toy
+// pattern is learned.
 #include <cmath>
 #include <cstdio>
 #include <string>
@@ -249,6 +250,15 @@ int main() {
     Config ours = moe;
     ours.ternary = true;
     compare("ternary moe", ours, 1e-3, 3e-2, 1e-2);
+
+    // Ternary FFN with full-precision attention (--fp-attn), and layers
+    // without RoPE (--nope-every 2: the second of every two).
+    Config fpa = ours;
+    fpa.fp_attention = true;
+    compare("ternary moe, fp attention", fpa, 1e-3, 3e-2, 1e-2);
+    Config nope = dense;
+    nope.nope_every = 2;
+    compare("dense, half NoPE", nope, 1e-5, 1e-4, 1e-4);
 
     // Muon moves the weights about as much as the gradients differ, ten
     // times more than AdamW does, hence the looser weight tolerance.
