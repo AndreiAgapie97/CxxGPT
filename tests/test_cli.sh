@@ -2,6 +2,7 @@
 # Exercise the real CLI after config parsing and backend selection.
 set -euo pipefail
 CXXGPT=${CXXGPT:-./cxxgpt}
+CXXGPT_TRAINING_CLI=${CXXGPT_TRAINING_CLI:-./test_training_cli}
 CXXGPT_AUDIT=${CXXGPT_AUDIT:-./reasoning_audit}
 CXXGPT_TARGETS=${CXXGPT_TARGETS:-./reasoning_targets}
 CXXGPT_TRACES=${CXXGPT_TRACES:-./reasoning_traces}
@@ -45,7 +46,7 @@ status=0
 "$CXXGPT" train "${COMMON[@]}" --experts 4 --topk 1 > "$TEST_DIR/top1.log" 2>&1 || status=$?
 [[ "$status" == 1 ]] && grep -q 'one-logit softmax has zero task gradient' "$TEST_DIR/top1.log"
 
-./test_training_cli generate "$TEST_DIR"
+"$CXXGPT_TRAINING_CLI" generate "$TEST_DIR"
 for batch in 0 -1; do
     status=0
     "$CXXGPT" eval-reasoning --ckpt "$TEST_DIR/audit.ckpt" --test "$TEST_DIR/audit.txt" --batch "$batch" \
@@ -63,18 +64,18 @@ status=0
 [[ "$status" == 1 ]] && grep -q 'requires a ternary model' "$TEST_DIR/engine-config.log"
 for target in 1 -1; do
     status=0
-    ./test_training_cli repeat-backward "$target" > "$TEST_DIR/repeat-backward.log" 2>&1 || status=$?
+    "$CXXGPT_TRAINING_CLI" repeat-backward "$target" > "$TEST_DIR/repeat-backward.log" 2>&1 || status=$?
     [[ "$status" == 1 ]] && grep -q 'needs a new forward' "$TEST_DIR/repeat-backward.log"
 done
 for command in bad-target bad-target-backward; do
   for target in -2 3; do
     status=0
-    ./test_training_cli "$command" "$target" > "$TEST_DIR/target-range.log" 2>&1 || status=$?
+    "$CXXGPT_TRAINING_CLI" "$command" "$target" > "$TEST_DIR/target-range.log" 2>&1 || status=$?
     [[ "$status" == 1 ]] && grep -q 'target .* out of range' "$TEST_DIR/target-range.log"
   done
 done
 printf 'qa\t1\tq\twork\t14\r\nqa\t2\ttail\twork\t1080' > "$TEST_DIR/line-endings.txt"
-./test_training_cli problems "$TEST_DIR/line-endings.txt"
+"$CXXGPT_TRAINING_CLI" problems "$TEST_DIR/line-endings.txt"
 "$CXXGPT" eval-reasoning --ckpt "$TEST_DIR/audit.ckpt" --test "$TEST_DIR/line-endings.txt" --max-new 1 --threads 2 > "$TEST_DIR/line-endings.log"
 grep -q '^overall .* / 2)' "$TEST_DIR/line-endings.log"
 for difficulty in '' 1junk 999999999999999999999999 -1; do
@@ -141,7 +142,7 @@ grep -q 'saved .* at step 1' "$TEST_DIR/timed.log"
 grep -q 'time limit reached' "$TEST_DIR/bad-timed.log"
 grep -q 'saved .* at step 0' "$TEST_DIR/bad-timed.log"
 ! grep -q 'diverged\|lower --lr' "$TEST_DIR/bad-timed.log"
-./test_training_cli unchanged-zero-step "$TEST_DIR/unstable.ckpt" "$TEST_DIR/bad-timed.ckpt"
+"$CXXGPT_TRAINING_CLI" unchanged-zero-step "$TEST_DIR/unstable.ckpt" "$TEST_DIR/bad-timed.ckpt"
 printf 'CLI: good/bad-attempt time limits preserve progress; divergence protection remains separate\n'
 "$CXXGPT" train "${COMMON[@]}" --steps 20 --time-limit 0.000000000001 --eval-every 999 \
     --out "$TEST_DIR/final-val.ckpt" --log "$TEST_DIR/final-val.csv" > "$TEST_DIR/final-val.log"
@@ -169,7 +170,7 @@ for variant in dense ternary moe ternary-moe hybrid hybrid-moe nope nope-ternary
             --out "$TEST_DIR/macro.ckpt" --log "$TEST_DIR/macro.csv" > "$TEST_DIR/macro.log"
         "$CXXGPT" train "${TRAIN[@]}" "${ARCH[@]}" "${OPT[@]}" --batch 1 --accum 4 --eval-batches 4 \
             --out "$TEST_DIR/micro.ckpt" --log "$TEST_DIR/micro.csv" > "$TEST_DIR/micro.log"
-        ./test_training_cli compare "$TEST_DIR/macro.ckpt" "$TEST_DIR/micro.ckpt" "${OPT[@]}"
+        "$CXXGPT_TRAINING_CLI" compare "$TEST_DIR/macro.ckpt" "$TEST_DIR/micro.ckpt" "${OPT[@]}"
         # Identical eval samples must give the same token-weighted metric,
         # including all-ignored eval batches. Ignore timing columns.
         awk -F, 'NR>1 {print $1 "," $2 "," $3}' "$TEST_DIR/macro.csv" > "$TEST_DIR/macro.loss"
@@ -196,10 +197,10 @@ status=0
 printf 'CLI: benchmark emits alternating raw trials and rejects zero repeats\n'
 
 "$CXXGPT" train "${COMMON[@]}" --steps 0 --init "$TEST_DIR/model.ckpt" --out "$TEST_DIR/fresh.ckpt" > "$TEST_DIR/init.log"
-./test_training_cli fresh "$TEST_DIR/model.ckpt" "$TEST_DIR/fresh.ckpt"
+"$CXXGPT_TRAINING_CLI" fresh "$TEST_DIR/model.ckpt" "$TEST_DIR/fresh.ckpt"
 "$CXXGPT" train "${COMMON[@]}" --steps 0 --seed 2 --init "$TEST_DIR/model.ckpt" --out "$TEST_DIR/night2.ckpt" > "$TEST_DIR/night2.log"
-./test_training_cli fresh "$TEST_DIR/model.ckpt" "$TEST_DIR/night2.ckpt" 2
-./test_training_cli different-order "$TEST_DIR/fresh.ckpt" "$TEST_DIR/night2.ckpt"
+"$CXXGPT_TRAINING_CLI" fresh "$TEST_DIR/model.ckpt" "$TEST_DIR/night2.ckpt" 2
+"$CXXGPT_TRAINING_CLI" different-order "$TEST_DIR/fresh.ckpt" "$TEST_DIR/night2.ckpt"
 # Capture night.sh arguments without reading real data or touching night1 files.
 printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$@" > "$MOCK_ARGS"\n' > "$TEST_DIR/night-mock"
 chmod +x "$TEST_DIR/night-mock"
@@ -211,13 +212,13 @@ for night in 1 2; do
     rm "runs/$run.log"
 done
 "$CXXGPT" train "${COMMON[@]}" --steps 0 --ternary --init "$TEST_DIR/model.ckpt" --out "$TEST_DIR/fresh-ternary.ckpt" > "$TEST_DIR/init-ternary.log"
-./test_training_cli fresh-ternary "$TEST_DIR/model.ckpt" "$TEST_DIR/fresh-ternary.ckpt"
+"$CXXGPT_TRAINING_CLI" fresh-ternary "$TEST_DIR/model.ckpt" "$TEST_DIR/fresh-ternary.ckpt"
 "$CXXGPT" train "${COMMON[@]}" --steps 0 --ternary --fp-attn --init "$TEST_DIR/model.ckpt" --out "$TEST_DIR/fresh-hybrid.ckpt" > "$TEST_DIR/init-hybrid.log"
-./test_training_cli fresh-hybrid "$TEST_DIR/model.ckpt" "$TEST_DIR/fresh-hybrid.ckpt"
+"$CXXGPT_TRAINING_CLI" fresh-hybrid "$TEST_DIR/model.ckpt" "$TEST_DIR/fresh-hybrid.ckpt"
 "$CXXGPT" train "${COMMON[@]}" --steps 0 --ternary --fp-attn 0 --init "$TEST_DIR/fresh-hybrid.ckpt" --out "$TEST_DIR/fresh-all.ckpt" > "$TEST_DIR/init-all.log"
-./test_training_cli fresh-all-ternary "$TEST_DIR/fresh-hybrid.ckpt" "$TEST_DIR/fresh-all.ckpt"
+"$CXXGPT_TRAINING_CLI" fresh-all-ternary "$TEST_DIR/fresh-hybrid.ckpt" "$TEST_DIR/fresh-all.ckpt"
 "$CXXGPT" train "${COMMON[@]}" --steps 0 --nope-every 1 --init "$TEST_DIR/model.ckpt" --out "$TEST_DIR/fresh-nope.ckpt" > "$TEST_DIR/init-nope.log"
-./test_training_cli fresh-nope "$TEST_DIR/model.ckpt" "$TEST_DIR/fresh-nope.ckpt"
+"$CXXGPT_TRAINING_CLI" fresh-nope "$TEST_DIR/model.ckpt" "$TEST_DIR/fresh-nope.ckpt"
 for options in '--matmul invalid' '--no-tf32 --matmul bf16' '--fused-attn --no-fused-attn'; do
     status=0
     # Fixed literal cases, no user-supplied option splitting.
@@ -227,10 +228,10 @@ for options in '--matmul invalid' '--no-tf32 --matmul bf16' '--fused-attn --no-f
 done
 "$CXXGPT" train "${COMMON[@]}" --steps 0 --no-tf32 --out "$TEST_DIR/legacy-precision.ckpt" > "$TEST_DIR/legacy-precision.log"
 status=0
-./test_training_cli same-sampler "$TEST_DIR/model.ckpt" "$TEST_DIR/fresh.ckpt" > "$TEST_DIR/rng-different.log" 2>&1 || status=$?
+"$CXXGPT_TRAINING_CLI" same-sampler "$TEST_DIR/model.ckpt" "$TEST_DIR/fresh.ckpt" > "$TEST_DIR/rng-different.log" 2>&1 || status=$?
 [[ "$status" == 1 ]] && grep -q 'different samples' "$TEST_DIR/rng-different.log"
 cp "$TEST_DIR/model.ckpt" "$TEST_DIR/protected.ckpt"
-./test_training_cli recover-save "$TEST_DIR/protected.ckpt" > "$TEST_DIR/recover-save.log" 2>&1
+"$CXXGPT_TRAINING_CLI" recover-save "$TEST_DIR/protected.ckpt" > "$TEST_DIR/recover-save.log" 2>&1
 cmp "$TEST_DIR/model.ckpt" "$TEST_DIR/protected.ckpt"
 # Rename failures during periodic saves must not abort the three updates.
 mkdir "$TEST_DIR/failing.ckpt"
@@ -247,13 +248,13 @@ grep -q '^step *3 |' "$TEST_DIR/failing-save.log"
 cmp "$TEST_DIR/model.ckpt" "$TEST_DIR/protected.ckpt"
 # A skipped seek must still detect a truncated moment array in weight-only loads.
 cp "$TEST_DIR/model.ckpt" "$TEST_DIR/truncated.ckpt"
-./test_training_cli truncate "$TEST_DIR/truncated.ckpt"
+"$CXXGPT_TRAINING_CLI" truncate "$TEST_DIR/truncated.ckpt"
 status=0
 "$CXXGPT" train "${COMMON[@]}" --steps 0 --init "$TEST_DIR/truncated.ckpt" > "$TEST_DIR/truncated.log" 2>&1 || status=$?
 [[ "$status" == 1 ]] && grep -q 'truncated optimizer state' "$TEST_DIR/truncated.log"
 for kind in params m v short-v; do
     status=0
-    ./test_training_cli bad-save "$TEST_DIR/protected.ckpt" "$kind" > "$TEST_DIR/bad-save.log" 2>&1 || status=$?
+    "$CXXGPT_TRAINING_CLI" bad-save "$TEST_DIR/protected.ckpt" "$kind" > "$TEST_DIR/bad-save.log" 2>&1 || status=$?
     [[ "$status" == 1 ]] && grep -q 'check failed' "$TEST_DIR/bad-save.log"
     cmp "$TEST_DIR/model.ckpt" "$TEST_DIR/protected.ckpt"
 done
@@ -274,11 +275,11 @@ printf 'CLI: reasoning audit covers the gold completion and preserves weighted s
 
 "$CXXGPT_TARGETS" --train "$TEST_DIR/targets.tok" --val "$TEST_DIR/targets.tok" \
     --exclude-test "$TEST_DIR/audit.txt" --out "$TEST_DIR/targets" --per-cell 3 > "$TEST_DIR/targets.log"
-./test_training_cli targets "$TEST_DIR/targets.tok" "$TEST_DIR/targets/train-final.tok" "$TEST_DIR/targets/probe.txt"
+"$CXXGPT_TRAINING_CLI" targets "$TEST_DIR/targets.tok" "$TEST_DIR/targets/train-final.tok" "$TEST_DIR/targets/probe.txt"
 printf 'CLI: final-digit masks preserve tokens and fresh probes exclude known questions\n'
 "$CXXGPT_CURRICULUM" --out "$TEST_DIR/curriculum" --exclude-corpora "$TEST_DIR/targets.tok" \
     --exclude-problems "$TEST_DIR/audit.txt" --train 24 --per-cell 2 --val-per-cell 2 > "$TEST_DIR/curriculum.log"
-./test_training_cli curriculum "$TEST_DIR/curriculum"
+"$CXXGPT_TRAINING_CLI" curriculum "$TEST_DIR/curriculum"
 "$CXXGPT_CURRICULUM" --mode budget --data "$TEST_DIR/curriculum/control.tok" --seq 8 --steps 4 > "$TEST_DIR/budget.csv"
 grep -q '^4,64,' "$TEST_DIR/budget.csv"
 "$CXXGPT_TRACES" --ckpt "$TEST_DIR/audit.ckpt" --problems "$TEST_DIR/audit.txt" \

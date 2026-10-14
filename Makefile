@@ -102,9 +102,11 @@ asan: ternary_moe.cpp tests/test_engine.cpp experiments/toy_world.cpp src/cxxgpt
 	    experiments/reasoning_traces.cpp -o reasoning_traces_asan
 	$(CXX) $(SANFLAGS) -fsanitize=address,undefined -fno-sanitize-recover=undefined \
 	    experiments/reasoning_curriculum.cpp -o reasoning_curriculum_asan
+	$(CXX) $(SANFLAGS) -fsanitize=address,undefined -fno-sanitize-recover=undefined \
+	    tests/test_training_cli.cpp -o test_training_cli_asan
 	./ternary_moe_asan --tests
 	./test_engine_asan
-	CXXGPT=./cxxgpt_asan CXXGPT_AUDIT=./reasoning_audit_asan CXXGPT_TARGETS=./reasoning_targets_asan CXXGPT_TRACES=./reasoning_traces_asan CXXGPT_CURRICULUM=./reasoning_curriculum_asan bash tests/test_cli.sh
+	CXXGPT_TRAINING_CLI=./test_training_cli_asan CXXGPT=./cxxgpt_asan CXXGPT_AUDIT=./reasoning_audit_asan CXXGPT_TARGETS=./reasoning_targets_asan CXXGPT_TRACES=./reasoning_traces_asan CXXGPT_CURRICULUM=./reasoning_curriculum_asan bash tests/test_cli.sh
 	./research_experiment_asan --steps 5 --seeds 1 --threads 2 --continual --rl-steps 5 --out runs/asan-smoke-$$$$.csv
 	./memory_probe_asan --mode train --ternary --experts 4 --muon --batch 2 --seq 8 --steps 1 > /dev/null
 	./memory_probe_asan --mode packed --ternary --experts 4 --batch 1 > /dev/null
@@ -119,9 +121,10 @@ tsan: ternary_moe.cpp tests/test_engine.cpp experiments/toy_world.cpp src/cxxgpt
 	$(CXX) $(SANFLAGS) -fsanitize=thread experiments/memory_probe.cpp -o memory_probe_tsan
 	$(CXX) $(SANFLAGS) -fsanitize=thread experiments/reasoning_traces.cpp -o reasoning_traces_tsan
 	$(CXX) $(SANFLAGS) -fsanitize=thread experiments/reasoning_curriculum.cpp -o reasoning_curriculum_tsan
+	$(CXX) $(SANFLAGS) -fsanitize=thread tests/test_training_cli.cpp -o test_training_cli_tsan
 	./ternary_moe_tsan --tests
 	./test_engine_tsan
-	CXXGPT=./cxxgpt_tsan CXXGPT_AUDIT=./reasoning_audit_tsan CXXGPT_TARGETS=./reasoning_targets_tsan CXXGPT_TRACES=./reasoning_traces_tsan CXXGPT_CURRICULUM=./reasoning_curriculum_tsan bash tests/test_cli.sh
+	CXXGPT_TRAINING_CLI=./test_training_cli_tsan CXXGPT=./cxxgpt_tsan CXXGPT_AUDIT=./reasoning_audit_tsan CXXGPT_TARGETS=./reasoning_targets_tsan CXXGPT_TRACES=./reasoning_traces_tsan CXXGPT_CURRICULUM=./reasoning_curriculum_tsan bash tests/test_cli.sh
 	./research_experiment_tsan --steps 5 --seeds 1 --threads 2 --continual --rl-steps 5 --out runs/tsan-smoke-$$$$.csv
 	./memory_probe_tsan --mode train --ternary --experts 4 --muon --batch 2 --seq 8 --steps 1 > /dev/null
 	./memory_probe_tsan --mode packed --ternary --experts 4 --batch 1 > /dev/null
