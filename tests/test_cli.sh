@@ -260,6 +260,36 @@ status=0
 "$CXXGPT" eval-reasoning --ckpt "$TEST_DIR/audit.ckpt" --test "$TEST_DIR/audit.txt" --max-new 0 > "$TEST_DIR/bad-cap.log" 2>&1 || status=$?
 [[ "$status" == 1 ]]
 grep -q 'max-new must be positive' "$TEST_DIR/bad-cap.log"
+
+# The vote: --tries N with --temp samples each problem N times and reports
+# single-try, vote and any-try accuracies; --effort is a shorthand for N.
+# '--tries 2' without --temp, non-positive tries and an unknown effort all
+# fail with a checked error.
+for options in '--tries 2' '--tries 0 --temp 1.0' '--tries 1junk --temp 1.0' '--effort huge'; do
+    status=0
+    "$CXXGPT" eval-reasoning --ckpt "$TEST_DIR/audit.ckpt" --test "$TEST_DIR/audit.txt" \
+        $options --threads 2 > "$TEST_DIR/invalid-tries.log" 2>&1 || status=$?
+    [[ "$status" == 1 ]]
+    grep -q 'check failed' "$TEST_DIR/invalid-tries.log"
+done
+"$CXXGPT" eval-reasoning --ckpt "$TEST_DIR/audit.ckpt" --test "$TEST_DIR/audit.txt" \
+    --tries 4 --temp 0.9 --seed 3 --max-new 6 --threads 2 > "$TEST_DIR/vote-a.log"
+"$CXXGPT" eval-reasoning --ckpt "$TEST_DIR/audit.ckpt" --test "$TEST_DIR/audit.txt" \
+    --tries 4 --temp 0.9 --seed 3 --max-new 6 --threads 2 > "$TEST_DIR/vote-b.log"
+cmp "$TEST_DIR/vote-a.log" "$TEST_DIR/vote-b.log"
+grep -q '^effort: tries 4, temperature 0.9, seed 3$' "$TEST_DIR/vote-a.log"
+grep -q 'single-try / vote maj@4 / any-try pass@4 / mean distinct answers' "$TEST_DIR/vote-a.log"
+"$CXXGPT" eval-reasoning --ckpt "$TEST_DIR/audit.ckpt" --test "$TEST_DIR/audit.txt" \
+    --effort medium --temp 0.5 --max-new 6 --threads 2 > "$TEST_DIR/vote-effort.log"
+grep -q '^effort: tries 8, temperature 0.5, seed 1$' "$TEST_DIR/vote-effort.log"
+"$CXXGPT" eval-reasoning --ckpt "$TEST_DIR/audit.ckpt" --test "$TEST_DIR/audit.txt" \
+    --effort high --temp 0.5 --max-new 6 --threads 2 > "$TEST_DIR/vote-effort-high.log"
+grep -q '^effort: tries 32, temperature 0.5, seed 1$' "$TEST_DIR/vote-effort-high.log"
+"$CXXGPT" eval-reasoning --ckpt "$TEST_DIR/audit.ckpt" --test "$TEST_DIR/audit.txt" \
+    --effort low --threads 2 > "$TEST_DIR/vote-effort-low.log"
+require_absent -q 'effort:' "$TEST_DIR/vote-effort-low.log"
+printf 'CLI: eval-reasoning tries/vote options passed\n'
+
 # Vocab compatibility must fail before constructing/training the model.
 for kind in val reason; do
     EXTRA=(--data "$TEST_DIR/masked.tok")

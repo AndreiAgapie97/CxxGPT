@@ -17,6 +17,7 @@
 #include "test_train.h"
 #include "test_optim.h"
 #include "test_reasoning_traces.h"
+#include "test_vote.h"
 
 int main(int argc, char** argv) {
     int threads = int(std::thread::hardware_concurrency());
@@ -39,6 +40,7 @@ int main(int argc, char** argv) {
         {"train", test_train},
         {"optim", test_optim},
         {"generated traces", test_reasoning_traces},
+        {"vote", test_vote},
         {"attention", test_attention},
     };
     for (auto& s : suites) {

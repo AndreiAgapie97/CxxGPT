@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <functional>
 #include <map>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -34,8 +35,10 @@ int pick_token(const T* logits, int V, double temperature, Rng* rng) {
 // seq_len - L + 1 (the last token is never fed back, so it needs no slot).
 // done(generated) is asked after each new token; a sequence that is done
 // stops growing (its slot keeps computing until the batch finishes).
-template <class T>
-std::vector<std::vector<int>> generate(Model<T>& model, const std::vector<std::vector<int>>& prompts,
+// The model only needs cfg (vocab, seq_len), decode_begin and decode_step,
+// so tests can pass a scripted fake instead of a real Model.
+template <class M>
+std::vector<std::vector<int>> generate(M& model, const std::vector<std::vector<int>>& prompts,
                                        int max_new,
                                        const std::function<bool(const std::vector<int>&)>& done,
                                        double temperature = 0.0, Rng* rng = nullptr) {
@@ -63,7 +66,7 @@ std::vector<std::vector<int>> generate(Model<T>& model, const std::vector<std::v
             if (pos < L) cur[b] = pos < start[b] ? prompts[b][0] : prompts[b][pos - start[b]];
             // else cur[b] holds the token picked at the previous step
         }
-        const T* logits = model.decode_step(cur.data(), pos);
+        const auto* logits = model.decode_step(cur.data(), pos);
         if (pos < L - 1) continue;
         for (int b = 0; b < B; ++b) {
             if (finished[b]) continue;  // stopped slots consume no further random draws
@@ -82,14 +85,69 @@ inline bool completion_done(const std::string& text) {
     return !text.empty() && text.back() == '\n' && text.find("#### ") != std::string::npos;
 }
 
+struct EvalResult;
+
+// The answer the model gave, normalized the way scoring normalizes it:
+// the text after "#### " up to the end of the line, trimmed, with digit-
+// grouping commas removed.
+inline std::string normalized_answer(const std::string& completion) {
+    return strip_digit_commas(trim(extract_answer(completion)));
+}
+
+// How many times each problem is sampled. With tries > 1, every problem is
+// generated `tries` times at `temperature` (sampling needs a seeded Rng), and
+// the reported answer is the most common final answer. With tries == 1 the
+// evaluation is exactly what it was before votes existed.
+struct VoteOpts {
+    int tries = 1;
+    double temperature = 0.0;
+    Rng* rng = nullptr;
+};
+
+// One (task, difficulty) cell of the vote report: how many of the problems
+// the first try got right, the vote got right, any try got right, and the
+// summed number of distinct answers (divide by the cell's total for the mean).
+struct VoteCell {
+    int single_correct = 0, vote_correct = 0, any_correct = 0;
+    double distinct_answers = 0.0;
+};
+
+// The most common answer; on a tie, the one that appeared first.
+inline std::string vote_answer(const std::vector<std::string>& answers) {
+    std::map<std::string, std::pair<int, size_t>> seen;  // answer -> (count, first index)
+    for (size_t i = 0; i < answers.size(); ++i) {
+        auto it = seen.find(answers[i]);
+        if (it == seen.end()) seen[answers[i]] = {1, i};
+        else ++it->second.first;
+    }
+    const std::string* best = nullptr;
+    int best_count = 0;
+    size_t best_first = 0;
+    for (const auto& [ans, c] : seen) {
+        if (!best || c.first > best_count || (c.first == best_count && c.second < best_first)) {
+            best = &ans;
+            best_count = c.first;
+            best_first = c.second;
+        }
+    }
+    return best ? *best : "";
+}
+
 struct EvalResult {
-    // (task, difficulty) -> (correct, total)
+    // (task, difficulty) -> (correct, total); with votes, correctness is the
+    // vote's (maj@N), which is also what `correct` below holds.
     std::map<std::pair<std::string, int>, std::pair<int, int>> by_task;
     int correct = 0, total = 0;
     int max_new = 200;
     size_t gold_over_cap = 0;
     std::vector<std::pair<Problem, std::string>> failures;  // a few, for inspection
     std::vector<std::string> completions;  // optional, in input order for trace audits
+    // The effort report. With tries == 1, single, vote and any all equal the
+    // plain counts above.
+    int tries = 1;
+    int single_correct = 0, vote_correct = 0, any_correct = 0;
+    double distinct_answers = 0.0;  // summed over problems; divide by total
+    std::map<std::pair<std::string, int>, VoteCell> vote_by_task;
 };
 
 // The tokens a problem's prompt is fed as: BOS, then "Q: ...\nA: ". The
@@ -101,13 +159,20 @@ inline std::vector<int> prompt_tokens(const Problem& p, const Tokenizer& tok) {
     return t;
 }
 
-// Greedy-decodes every problem from "A: " and checks the answer exactly.
+// Decodes every problem from "A: " and checks the answer exactly. With
+// vote.tries == 1 (the default) this is the plain greedy evaluation. With
+// tries > 1, each problem is sampled `tries` times at vote.temperature (an
+// Rng must be given) and the reported answer is the most common one, ties
+// going to the answer that appeared first.
 // The default Tokenizer (no merges) is byte-level.
-template <class T>
-EvalResult eval_reasoning(Model<T>& model, const std::vector<Problem>& problems, const Tokenizer& tok = {},
+template <class M>
+EvalResult eval_reasoning(M& model, const std::vector<Problem>& problems, const Tokenizer& tok = {},
                           int batch = 64, int max_new = 200, size_t keep_failures = 8,
-                          bool keep_completions = false) {
+                          bool keep_completions = false, const VoteOpts& vote = {}) {
     CHECK(batch > 0 && max_new > 0, "evaluation batch and max_new must be positive");
+    CHECK(vote.tries > 0, "--tries must be positive");
+    CHECK(vote.tries == 1 || (vote.temperature > 0 && vote.rng),
+          "sampling more than one try needs --temp above 0 and a seed");
     CHECK(model.cfg.vocab >= tok.vocab_size(), "model vocab %d < tokenizer vocab %d", model.cfg.vocab,
           tok.vocab_size());
     // Ids the tokenizer cannot decode (model vocab padding) end a completion.
@@ -119,8 +184,11 @@ EvalResult eval_reasoning(Model<T>& model, const std::vector<Problem>& problems,
     // Batches of similar prompt lengths: prompts are padded to the longest
     // in their batch, and the context left after it is all the room any of
     // them has to answer in. A prompt that fills the whole context cannot be
-    // answered and counts as wrong.
+    // answered and counts as wrong. With tries > 1, a batch holds as many
+    // whole problems as fit: each contributes `tries` copies of its prompt,
+    // so one generate() call samples every try of those problems together.
     const size_t n = problems.size();
+    const size_t group_problems = std::max<size_t>(1, size_t(batch) / size_t(vote.tries));
     std::vector<std::vector<int>> prompts(n);
     std::vector<size_t> order;
     for (size_t i = 0; i < n; ++i) {
@@ -129,28 +197,71 @@ EvalResult eval_reasoning(Model<T>& model, const std::vector<Problem>& problems,
     }
     std::stable_sort(order.begin(), order.end(),
                      [&](size_t x, size_t y) { return prompts[x].size() < prompts[y].size(); });
-    std::vector<std::string> texts(n, "(the prompt does not fit in the context)");
-    for (size_t k0 = 0; k0 < order.size(); k0 += size_t(batch)) {
-        const size_t k1 = std::min(order.size(), k0 + size_t(batch));
+    std::vector<std::vector<std::string>> texts(n, std::vector<std::string>(size_t(vote.tries),
+                                                                            "(the prompt does not fit in the context)"));
+    for (size_t k0 = 0; k0 < order.size(); k0 += group_problems) {
+        const size_t k1 = std::min(order.size(), k0 + group_problems);
         std::vector<std::vector<int>> group;
-        for (size_t k = k0; k < k1; ++k) group.push_back(prompts[order[k]]);
+        for (size_t k = k0; k < k1; ++k)
+            for (int t = 0; t < vote.tries; ++t) group.push_back(prompts[order[k]]);
         const auto outs = generate(model, group, max_new,
-                                   [&](const std::vector<int>& gen) { return completion_done(text_of(gen)); });
-        for (size_t k = k0; k < k1; ++k) texts[order[k]] = text_of(outs[k - k0]);
+                                   [&](const std::vector<int>& gen) { return completion_done(text_of(gen)); },
+                                   vote.temperature, vote.temperature > 0 ? vote.rng : nullptr);
+        for (size_t k = k0; k < k1; ++k) {
+            auto& mine = texts[order[k]];
+            mine.assign(vote.tries, "");
+            for (int t = 0; t < vote.tries; ++t) mine[size_t(t)] = text_of(outs[(k - k0) * vote.tries + t]);
+        }
     }
     EvalResult r;
     r.max_new = max_new;
+    r.tries = vote.tries;
     for (size_t i = 0; i < n; ++i) {
         const Problem& p = problems[i];
         r.gold_over_cap += tok.encode(p.completion()).size() > size_t(max_new);
-        const bool ok = completion_done(texts[i]) && answer_matches(texts[i], p.answer);
+        // The answers the tries gave, normalized the way scoring normalizes
+        // them; a try that never finished its "#### answer" line (it ran out
+        // of tokens, or wrote no answer line at all) counts as the empty
+        // answer, so a single-try evaluation scores exactly as before.
+        std::vector<std::string> answers(vote.tries);
+        for (int t = 0; t < vote.tries; ++t)
+            answers[size_t(t)] =
+                completion_done(texts[i][size_t(t)]) ? normalized_answer(texts[i][size_t(t)]) : "";
+        const bool single_ok = completion_done(texts[i][0]) && answer_matches(texts[i][0], p.answer);
+        const std::string voted = vote_answer(answers);
+        const bool vote_ok = !voted.empty() && voted == p.answer;
+        bool any_ok = false;
+        for (int t = 0; t < vote.tries && !any_ok; ++t)
+            any_ok = completion_done(texts[i][size_t(t)]) && answer_matches(texts[i][size_t(t)], p.answer);
         auto& cell = r.by_task[{p.task, p.difficulty}];
-        cell.first += ok;
+        cell.first += vote_ok;  // the headline number is the vote's (maj@N)
         cell.second += 1;
-        r.correct += ok;
+        r.correct += vote_ok;
         r.total += 1;
-        if (!ok && r.failures.size() < keep_failures) r.failures.push_back({p, texts[i]});
+        r.single_correct += single_ok;
+        r.vote_correct += vote_ok;
+        r.any_correct += any_ok;
+        r.distinct_answers += double(std::set<std::string>(answers.begin(), answers.end()).size());
+        auto& vcell = r.vote_by_task[{p.task, p.difficulty}];
+        vcell.single_correct += single_ok;
+        vcell.vote_correct += vote_ok;
+        vcell.any_correct += any_ok;
+        vcell.distinct_answers += double(std::set<std::string>(answers.begin(), answers.end()).size());
+        if (!vote_ok && r.failures.size() < keep_failures) {
+            // The completion shown is the first try that gave the voted
+            // answer, or the first try if no try did (all without "#### ").
+            size_t shown = 0;
+            for (int t = 0; t < vote.tries; ++t)
+                if (answers[size_t(t)] == voted) {
+                    shown = size_t(t);
+                    break;
+                }
+            r.failures.push_back({p, texts[i][shown]});
+        }
     }
-    if (keep_completions) r.completions = std::move(texts);
+    if (keep_completions) {
+        r.completions.resize(n);
+        for (size_t i = 0; i < n; ++i) r.completions[i] = texts[i][0];
+    }
     return r;
 }

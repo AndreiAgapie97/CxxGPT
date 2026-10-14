@@ -554,6 +554,19 @@ int cmd_eval_reasoning(Args& a) {
     const bool show = a.flag("show-failures");
     const int max_new = a.integer_int("max-new", 200);
     CHECK(max_new > 0, "--max-new must be positive");
+    // How many times to sample each problem and take a vote. --effort is a
+    // shorthand for a number of tries; --tries wins if both are given.
+    VoteOpts vote;
+    const std::string effort = a.str("effort", "low");
+    CHECK(effort == "low" || effort == "medium" || effort == "high", "--effort must be low, medium or high");
+    const int effort_tries = effort == "low" ? 1 : effort == "medium" ? 8 : 32;
+    vote.tries = a.has("tries") ? a.integer_int("tries", 1) : effort_tries;
+    CHECK(vote.tries > 0, "--tries must be positive");
+    vote.temperature = a.real("temp", 0.0);
+    CHECK(vote.tries == 1 || vote.temperature > 0, "--temp must be above 0 when sampling more than one try");
+    const long seed = a.integer("seed", 1);
+    Rng vote_rng(seed);
+    vote.rng = &vote_rng;
     // As TernaryEngine runs it: the embedding (and --fp-attn attention) in
     // int8 rows.
     const bool as_engine = a.flag("as-engine");
@@ -571,8 +584,30 @@ int cmd_eval_reasoning(Args& a) {
         test = std::move(sub);
     }
     const double t0 = now_seconds();
-    const EvalResult r = eval_reasoning(model, test, tok, batch, max_new);
+    const EvalResult r = eval_reasoning(model, test, tok, batch, max_new, 8, false, vote);
     print_eval(r, show ? r.failures.size() : 0);
+    if (vote.tries > 1) {
+        // The effort report: per level (task, difficulty) and overall, the
+        // first try's accuracy, the vote's (maj@N), any try's (pass@N), and
+        // the mean number of distinct answers per problem.
+        std::printf("effort: tries %d, temperature %g, seed %ld\n", vote.tries, vote.temperature, seed);
+        std::printf("task   d    n   single   vote    any   distinct\n");
+        for (const auto& [key, cell] : r.vote_by_task) {
+            const auto it = r.by_task.find(key);
+            const int cnt = it == r.by_task.end() ? 0 : it->second.second;
+            std::printf("%-6s %2d %4d %7.1f%% %6.1f%% %6.1f%% %8.2f\n", key.first.c_str(), key.second, cnt,
+                        100.0 * cell.single_correct / std::max(1, cnt),
+                        100.0 * cell.vote_correct / std::max(1, cnt),
+                        100.0 * cell.any_correct / std::max(1, cnt),
+                        cnt ? cell.distinct_answers / cnt : 0.0);
+        }
+        std::printf("overall %4d %7.1f%% %6.1f%% %6.1f%% %8.2f (single-try / vote maj@%d / any-try pass@%d / "
+                    "mean distinct answers)\n",
+                    r.total, 100.0 * r.single_correct / std::max(1, r.total),
+                    100.0 * r.vote_correct / std::max(1, r.total),
+                    100.0 * r.any_correct / std::max(1, r.total),
+                    r.total ? r.distinct_answers / r.total : 0.0, vote.tries, vote.tries);
+    }
     std::printf("(%.1f s)\n", now_seconds() - t0);
     return 0;
 }
