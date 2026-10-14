@@ -168,7 +168,42 @@ inline void test_formats() {
                 rewritten);
 }
 
+inline bool multiplication_steps_correct(const Problem& p) {
+    const size_t star = p.question.find('*');
+    const long a = std::stol(p.question.substr(0,star)), b = std::stol(p.question.substr(star+1));
+    const auto statements = split_steps(p.steps);
+    std::vector<long> multipliers;
+    for (long rest=b, place=1; rest; rest/=10, place*=10)
+        if (rest%10) multipliers.push_back((rest%10)*place);
+    if (statements.size() != multipliers.size() + (multipliers.size()>1)) return false;
+    std::string partials;
+    for (size_t i = 0; i < multipliers.size(); ++i) {
+        const auto& statement = statements[i];
+        const size_t eq = statement.find('=');
+        if (eq == statement.npos || eq+1 >= statement.size() || statement.back()=='=' || statement.substr(0,eq) != std::to_string(a)+"*"+std::to_string(multipliers[i])) return false;
+        const long expected = a*multipliers[i];
+        for (size_t pos=eq+1; pos<statement.size();) {
+            const auto end=statement.find('=',pos);
+            const auto expression=statement.substr(pos,end-pos);
+            if (expression.empty() || reasoning_check::eval(expression) != expected) return false;
+            if (end==statement.npos) break;
+            pos=end+1;
+        }
+        partials += (partials.empty() ? "" : "+") + std::to_string(expected);
+    }
+    return multipliers.size()==1 || statements.back()==partials+"="+std::to_string(a*b);
+}
+
 inline void test_reasoning() {
+    Rng mul_rng(69);
+    for (int d=1; d<=5; ++d) for (int i=0; i<100; ++i) {
+        auto p = make_problem("mul",d,mul_rng);
+        EXPECT(multiplication_steps_correct(p), "question-grounded multiplication work is wrong: %s", p.question.c_str());
+        const size_t first_eq=p.steps.find('='), first_end=p.steps.find("; ");
+        p.steps.replace(first_eq+1, (first_end==p.steps.npos ? p.steps.size() : first_end)-first_eq-1, "0");
+        EXPECT(!multiplication_steps_correct(p), "false intermediate product passed with correct final answer");
+    }
+
     Rng eq_rng(67);
     for (int d : {3, 4}) for (int i = 0; i < 100; ++i) {
         const auto p = make_problem("eq", d, eq_rng);
