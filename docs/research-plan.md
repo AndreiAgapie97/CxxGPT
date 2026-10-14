@@ -36,11 +36,48 @@ below aims at one of three things:
 4. Only then spend a laptop night on it, compared with the previous night's
    numbers.
 
+## Honest measurement: choose on a dev set, report on the test set
+
+Night 1 uses the GSM8K **test** set both for the validation loss and for the
+exams. Using it once is fine. But if we pick settings night after night by
+whichever scores best on it, we slowly tune toward those exact 1,319 problems:
+benchmaxxing by selection, with nothing dishonest intended.
+
+**Rules.**
+1. Decisions (which setting, which idea, when to stop) are made on a **dev
+   set** and on the curriculum, never on the test set.
+2. The test set gives headline numbers only, at milestones. `docs/research.md`
+   records each time it was used.
+3. Every tool that helps the model (the calculator, later retrieval) is
+   reported as two scores, with and without the tool.
+
+**The dev set.**
+- About 500 problems taken out of GSM8K train with a fixed seed, kept in a
+  file, and never trained on. `night.sh` uses them for `--val` and
+  `--reason-test`.
+- MetaMath and OpenMath2 are built from GSM8K train problems, so taking the
+  500 out of `gsm8k/train` alone is not enough:
+  - MetaMathQA rows carry `original_question`; drop the rows whose original is
+    a dev problem.
+  - OpenMath2 rows with `problem_source` `gsm8k` repeat the problem text; drop
+    exact matches. Rows from `augmented_gsm8k` are new problems with no link
+    back to their source, so a small leak remains. Write it down.
+- `scripts/get_data.py` reads neither `original_question` nor matches problem
+  texts today, so this needs a small change there and in
+  `scripts/prepare_data.sh`, then a fresh data preparation.
+- Night 1 trained on all of GSM8K train. A model that continues from night 1
+  has seen the dev problems, so the dev set is only clean for a model trained
+  from scratch. If we keep night 1's weights, use a separate word-problem set
+  as dev instead (for example SVAMP or ASDiv; still to check).
+
 ## The bets, in the order to try them
 
-Prerequisite: the review fixes in group A (each night must get a new data
-order) and B1 (the GSM8K score must accept "1,080"). Without them, comparisons
-between nights are not trustworthy.
+Prerequisites, before night 2:
+- the review fixes in group A (each night must get a new data order) and B1
+  (the GSM8K score must accept "1,080");
+- the dev set above.
+
+Without them, comparisons between nights are not trustworthy.
 
 ### 1. A calculator built into the engine
 
@@ -68,6 +105,15 @@ between nights are not trustworthy.
   notes automatically wherever a solution writes `a op b = c` and the
   arithmetic checks out. That gives more examples, all verified.
 - The curriculum generator could emit notes too, for fast experiments.
+
+**Keeping it from becoming a benchmark trick.**
+- Always report two scores, with and without the calculator. The gap tells us
+  how much of the failure was arithmetic and how much was reasoning.
+- The calculator answers any arithmetic written in its notation, in any task,
+  not only GSM8K-shaped problems. It is trained on notes from all our math
+  sets (added automatically where the arithmetic checks out), not only on
+  GSM8K's own notes.
+- It must also help on the reasoning curriculum, not only on GSM8K.
 
 **First experiment.** Run eval-reasoning on the same checkpoint with and
 without the calculator. That alone measures how much of the GSM8K failure is
@@ -228,6 +274,10 @@ The cheapest to try:
 - run the attention softmax per sequence;
 - drop memsets in front of accumulations;
 - Muon in bf16.
+
+The exams cost time too. Each one runs on the CPU while the GPU waits: 5.5
+minutes for 250 problems at step 2000 of night 1, so about 15 minutes per
+night with the final exam. Run them on the GPU, or less often.
 
 Do the zero-code check first: `GPU="--gpu --matmul bf16" scripts/probe.sh`. It
 measures what bf16 is actually worth here.

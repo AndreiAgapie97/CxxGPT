@@ -57,7 +57,9 @@ Reasoning is the first capability we go after.
   engine, finer experts, learning from checked solutions, place-value digit
   embeddings, int8 tensor cores for ternary), the optimizer's memory in CPU
   RAM for growing past 8 GB, and the seed-repeat funnel an idea passes
-  before it gets a laptop night.
+  before it gets a laptop night. Decisions are made on a dev set held out
+  of GSM8K train (and out of MetaMath and OpenMath2), never on the GSM8K
+  test set, which gives headline numbers only.
 - `src/cxxgpt.cpp`: the CLI (train, sample, eval, data prep, benchmarks).
 - `scripts/get_data.py`: downloads public datasets (GSM8K, TinyStories,
   FineWeb-Edu, OpenMathInstruct-2, MetaMathQA) into `data/`, as text with
