@@ -11,6 +11,7 @@
 //
 // Run a subcommand with --help for its options.
 #include <cmath>
+#include <charconv>
 #include <csignal>
 #include <cstdio>
 #include <filesystem>
@@ -42,7 +43,9 @@ volatile std::sig_atomic_t g_stop = 0;
 void on_signal(int) { g_stop = 1; }
 
 int threads_arg(Args& a) {
-    return int(a.integer("threads", long(std::max(1u, std::thread::hardware_concurrency()))));
+    const int threads = a.integer_int("threads", long(std::max(1u, std::thread::hardware_concurrency())));
+    CHECK(threads > 0, "--threads must be positive");
+    return threads;
 }
 
 std::string read_file(const std::string& path) {
@@ -54,19 +57,19 @@ std::string read_file(const std::string& path) {
 // Model options, shared by every command that builds a fresh model.
 Config config_from_args(Args& a, int vocab) {
     Config c;
-    c.vocab = int(a.integer("vocab", vocab));
-    c.seq_len = int(a.integer("seq", 256));
-    c.d_model = int(a.integer("dim", 256));
-    c.n_layers = int(a.integer("layers", 4));
-    c.n_heads = int(a.integer("heads", 4));
-    c.ffn_hidden = int(a.integer("ffn", 0));
-    c.n_experts = int(a.integer("experts", 0));
-    c.top_k = int(a.integer("topk", 2));
-    c.expert_hidden = int(a.integer("ehidden", 0));
-    c.n_shared = int(a.integer("shared", 0));
+    c.vocab = a.integer_int("vocab", vocab);
+    c.seq_len = a.integer_int("seq", 256);
+    c.d_model = a.integer_int("dim", 256);
+    c.n_layers = a.integer_int("layers", 4);
+    c.n_heads = a.integer_int("heads", 4);
+    c.ffn_hidden = a.integer_int("ffn", 0);
+    c.n_experts = a.integer_int("experts", 0);
+    c.top_k = a.integer_int("topk", 2);
+    c.expert_hidden = a.integer_int("ehidden", 0);
+    c.n_shared = a.integer_int("shared", 0);
     c.ternary = a.flag("ternary");
     c.fp_attention = a.flag("fp-attn");
-    c.nope_every = int(a.integer("nope-every", 0));
+    c.nope_every = a.integer_int("nope-every", 0);
     return c;
 }
 
@@ -89,7 +92,7 @@ void print_config(const Config& c, const Model<float>& m) {
 
 int cmd_bpe_train(Args& a) {
     const std::string in = a.str("in"), out = a.str("out");
-    const int vocab = int(a.integer("vocab", 4096));
+    const int vocab = a.integer_int("vocab", 4096);
     const long max_bytes = a.integer("max-bytes", 200L << 20);
     a.done();
     CHECK(!in.empty() && !out.empty(), "usage: cxxgpt bpe-train --in text.txt --vocab N --out tok.bpe");
@@ -102,6 +105,9 @@ int cmd_bpe_train(Args& a) {
     const double t0 = now_seconds();
     Tokenizer tok;
     tok.train(text, vocab, true);
+    if (tok.long_chunks() > 0)
+        std::printf("warning: %zu chunks longer than %zu bytes were left out of the merges\n", tok.long_chunks(),
+                    Tokenizer::kMaxChunkBytes);
     tok.save(out);
     const size_t n = tok.encode(text).size();
     std::printf("%d tokens (%zu merges) in %.1f s -> %s\n", tok.vocab_size(), tok.num_merges(),
@@ -176,9 +182,16 @@ int cmd_text2tok(Args& a) {
             const size_t old = buf.size();
             buf.resize(old + kBlock);
             f.read(buf.data() + old, std::streamsize(kBlock));
+            CHECK(!f.bad() && (!f.fail() || f.eof()), "error reading %s", in.c_str());
             buf.resize(old + size_t(f.gcount()));
+            // The BOS byte is reserved for "a document starts here": drop it
+            // from the text just read, so the text cannot fake one.
+            const auto new_text = buf.begin() + std::ptrdiff_t(old);
+            buf.erase(std::remove(new_text, buf.end(), char(kBos)), buf.end());
             eof = !f;
             starved = false;
+            CHECK(buf.size() <= kBlock*size_t(threads) + (64u<<20),
+                  "no safe text split within buffer limit; prepare shorter lines/documents");
         }
         const std::string_view all(buf);
         std::vector<std::string_view> blocks;
@@ -189,7 +202,7 @@ int cmd_text2tok(Args& a) {
             if (target >= all.size()) {
                 end = eof ? all.size() : npos;
             } else if (sep.empty()) {
-                end = Tokenizer::next_safe_split(all, target);
+                end = Tokenizer::next_safe_split(all, target, pos);  // pos is 0 or an earlier cut
                 if (end == all.size() && !eof) end = npos;
             } else {
                 end = all.find(sep, target);
@@ -227,6 +240,11 @@ int cmd_text2tok(Args& a) {
     std::printf("%zu bytes -> %llu tokens (vocab %d", bytes, (unsigned long long)w.count(), tok.vocab_size());
     if (!sep.empty()) std::printf(", %ld documents", docs);
     std::printf(") in %.1f s -> %s\n", now_seconds() - t0, out.c_str());
+    size_t long_chunks = 0;
+    for (const Tokenizer& t : toks) long_chunks += t.long_chunks();
+    if (long_chunks > 0)
+        std::printf("warning: %zu chunks longer than %zu bytes were written as plain bytes, without merges\n",
+                    long_chunks, Tokenizer::kMaxChunkBytes);
     return 0;
 }
 
@@ -239,12 +257,19 @@ void append_problem(TokenData& d, const Problem& p, const Tokenizer& tok) {
 
 // "a.tok,b.tok*3": the files concatenated, b three times (to weight a small
 // dataset up). A file without a mask counts as all trained-on.
-TokenData load_token_list(const std::string& spec) {
+TokenData load_token_list(const std::string& spec, bool* repeats = nullptr) {
+    if (repeats) *repeats = false;
     std::vector<std::pair<std::string, int>> files;
     for (const std::string& item : split(spec, ',')) {
         const size_t star = item.rfind('*');
-        const int times = star == std::string::npos ? 1 : std::atoi(item.c_str() + star + 1);
+        int times = 1;
+        if (star != std::string::npos) {
+            const char* begin = item.data()+star+1; const char* end = item.data()+item.size();
+            const auto parsed = std::from_chars(begin,end,times);
+            CHECK(parsed.ec == std::errc{} && parsed.ptr == end, "bad repeat count in '%s'", item.c_str());
+        }
         CHECK(times >= 1, "bad repeat count in '%s'", item.c_str());
+        if (repeats && times>1) *repeats = true;
         files.emplace_back(item.substr(0, star), times);
     }
     return TokenData::load_list(files);
@@ -255,9 +280,9 @@ TokenData load_token_list(const std::string& spec) {
 int cmd_gen_reasoning(Args& a) {
     const std::string out = a.str("out", "data/reason");
     const long n_train = a.integer("train", 200000), n_val = a.integer("val", 2000);
-    const int per_cell = int(a.integer("test-per-cell", 40));
-    const int min_d = int(a.integer("min-diff", 1)), max_d = int(a.integer("max-diff", 3));
-    const int test_max_d = int(a.integer("test-max-diff", max_d + 1));
+    const int per_cell = a.integer_int("test-per-cell", 40);
+    const int min_d = a.integer_int("min-diff", 1), max_d = a.integer_int("max-diff", 3);
+    const int test_max_d = a.integer_int("test-max-diff", max_d < 5 ? max_d+1 : 5);
     const std::vector<std::string> tasks = split(a.str("tasks", "chain,add,mul,expr,eq,cmp"), ',');
     Formats formats;
     formats.chain_plan = a.flag("chain-plan");      // chain solutions look variables up first
@@ -266,6 +291,9 @@ int cmd_gen_reasoning(Args& a) {
     const std::string bpe = a.str("bpe");
     a.done();
     const Tokenizer tok = load_tokenizer(bpe);
+    CHECK(min_d >= 1 && min_d <= max_d && max_d <= 5 && test_max_d >= min_d && test_max_d <= 5,
+          "reasoning difficulties must be ordered within [1,5]");
+    CHECK(per_cell > 0 && n_train >= 0 && n_val >= 0, "reasoning split counts must be nonnegative; test-per-cell positive");
     for (const auto& t : tasks) make_problem(t, 1, rng);  // rejects unknown names
 
     // Test set first: every (task, difficulty) cell, including one level
@@ -273,20 +301,25 @@ int cmd_gen_reasoning(Args& a) {
     std::vector<Problem> test;
     std::set<std::string> held_out;
     for (const auto& t : tasks)
-        for (int d = min_d; d <= test_max_d; ++d)
+        for (int d = min_d; d <= test_max_d; ++d) {
+            int tries = 0;
             for (int i = 0; i < per_cell;) {
+                CHECK(++tries <= 1000000, "question domain exhausted while preparing %s d=%d", t.c_str(), d);
                 Problem p = make_problem(t, d, rng, formats);
                 if (!held_out.insert(p.question).second) continue;  // no duplicates
                 test.push_back(std::move(p));
                 ++i;
             }
+        }
     save_problems(out + ".test.txt", test);
 
     auto make_tokens = [&](long n, const std::string& path) {
         TokenData d;
         d.vocab = uint32_t(tok.vocab_size());
         long skipped = 0;
+        int tries = 0;
         for (long i = 0; i < n;) {
+            CHECK(++tries <= 1000000, "question domain exhausted while preparing training/validation");
             const std::string& t = tasks[rng.below(tasks.size())];
             const Problem p =
                 make_problem(t, min_d + int(rng.below(uint64_t(max_d - min_d + 1))), rng, formats);
@@ -296,6 +329,7 @@ int cmd_gen_reasoning(Args& a) {
             }
             append_problem(d, p, tok);
             ++i;
+            tries = 0;
         }
         d.save(path);
         std::printf("%s: %ld problems, %zu tokens (%ld test duplicates skipped)\n", path.c_str(), n,
@@ -339,11 +373,49 @@ int cmd_gen_word(Args& a) {
     return 0;
 }
 
-// A JSON number as an answer: 18 -> "18", 2.5 -> "2.5".
-std::string format_number(double v) {
-    char buf[32];
-    std::snprintf(buf, sizeof buf, "%.15g", v);
-    return buf;
+// A JSON number as an answer, written out in full from its exact text (no
+// rounding through a double): 18 -> "18", 2.50 -> "2.5", 1.2e3 -> "1200",
+// -0.00120 -> "-0.0012".
+std::string format_number(const Json& value) {
+    const std::string& raw = value.str;
+    const bool negative = !raw.empty() && raw[0] == '-';
+    const size_t begin = negative ? 1 : 0;
+    const size_t exponent_at = raw.find_first_of("eE");  // npos if there is none
+
+    // The digits without sign, point or exponent, and where the point goes:
+    // "12.5" gives digits "125" and point_at 2.
+    std::string digits = raw.substr(begin, exponent_at - begin);
+    const size_t dot = digits.find('.');
+    long point_at = long(dot == std::string::npos ? digits.size() : dot);
+    if (dot != std::string::npos) digits.erase(dot, 1);
+
+    // Leading zeros: "0.0012" gives digits "12" and point_at -2.
+    const size_t first = digits.find_first_not_of('0');
+    if (first == std::string::npos) return "0";
+    digits.erase(0, first);
+    point_at -= long(first);
+
+    // An exponent moves the point: "1.2e3" gives point_at 1 + 3 = 4.
+    if (exponent_at != std::string::npos) {
+        const char* start = raw.data() + exponent_at + 1;
+        if (*start == '+') ++start;
+        long exponent = 0;
+        const auto result = std::from_chars(start, raw.data() + raw.size(), exponent);
+        CHECK(result.ec == std::errc{}, "numeric answer exponent out of range");
+        point_at += exponent;
+    }
+
+    // Trailing zeros after the point carry no value; keep one digit.
+    while (digits.size() > 1 && digits.back() == '0') digits.pop_back();
+
+    if (point_at <= 0) {
+        digits = "0." + std::string(size_t(-point_at), '0') + digits;  // 0.0012
+    } else if (size_t(point_at) >= digits.size()) {
+        digits.append(size_t(point_at) - digits.size(), '0');  // 1200
+    } else {
+        digits.insert(size_t(point_at), 1, '.');  // 12.5
+    }
+    return (negative ? "-" : "") + digits;
 }
 
 // Question/answer pairs from a JSON Lines file to a problems file for
@@ -369,10 +441,15 @@ int cmd_prep_qa(Args& a) {
         if (line.find_first_not_of(" \t\r") == std::string::npos) continue;
         Json j;
         std::string err;
-        CHECK(Json::parse(line, j, &err), "%s:%ld: %s", in.c_str(), line_no, err.c_str());
+        if (!Json::parse(line,j,&err)) {
+            std::fprintf(stderr, "%s:%ld: skipped malformed JSON: %s\n", in.c_str(),line_no,err.c_str());
+            ++skipped; continue;
+        }
         const Json *q = j.get(q_key), *ans = j.get(a_key);
-        CHECK(q && ans && q->type == Json::String && ans->type == Json::String,
-              "%s:%ld: missing string fields '%s' and '%s'", in.c_str(), line_no, q_key.c_str(), a_key.c_str());
+        if (!q || !ans || q->type!=Json::String || ans->type!=Json::String) {
+            std::fprintf(stderr, "%s:%ld: skipped missing question/answer string fields\n", in.c_str(),line_no);
+            ++skipped; continue;
+        }
         Problem p;
         p.task = task;
         p.question = trim(q->str);
@@ -386,11 +463,17 @@ int cmd_prep_qa(Args& a) {
             p.answer = strip_digit_commas(trim(ans->str.substr(mark + 5)));
         } else {
             const Json* fin = j.get(final_key);
-            CHECK(fin, "%s:%ld: missing field '%s'", in.c_str(), line_no, final_key.c_str());
+            if (!fin) {
+                std::fprintf(stderr, "%s:%ld: skipped missing final field '%s'\n", in.c_str(),line_no,final_key.c_str());
+                ++skipped; continue;
+            }
             p.steps = trim(ans->str);
             if (fin->type == Json::String) p.answer = strip_digit_commas(trim(fin->str));
-            else if (fin->type == Json::Number) p.answer = format_number(fin->number);
+            else if (fin->type == Json::Number) p.answer = format_number(*fin);
         }
+        // Raw control BOS in source prose is reserved; only append_problem inserts it.
+        for (auto* text : {&p.question,&p.steps,&p.answer})
+            text->erase(std::remove(text->begin(),text->end(),char(kBos)),text->end());
         // One line only: the format ends the answer at the first newline.
         if (p.answer.empty() || p.answer.find('\n') != std::string::npos || p.question.empty()) {
             ++skipped;
@@ -467,9 +550,9 @@ int cmd_eval_reasoning(Args& a) {
     ThreadPool tp(threads_arg(a));
     g_pool = &tp;
     const std::string ckpt = a.str("ckpt", "model.ckpt"), test_path = a.str("test", "data/reason.test.txt");
-    const int batch = int(a.integer("batch", 64)), limit = int(a.integer("limit", 0));
+    const int batch = a.integer_int("batch", 64), limit = a.integer_int("limit", 0);
     const bool show = a.flag("show-failures");
-    const int max_new = int(a.integer("max-new", 200));
+    const int max_new = a.integer_int("max-new", 200);
     CHECK(max_new > 0, "--max-new must be positive");
     // As TernaryEngine runs it: the embedding (and --fp-attn attention) in
     // int8 rows.
@@ -629,7 +712,8 @@ int cmd_train(Args& a) {
     const std::string data_path = a.str("data"), val_path = a.str("val");
     const std::string out = a.str("out", "model.ckpt"), log_path = a.str("log"), init = a.str("init");
     CHECK(!data_path.empty(), "--data is required (see cxxgpt train --help)");
-    const TokenData data = load_token_list(data_path);
+    bool repeated_data = false;
+    const TokenData data = load_token_list(data_path,&repeated_data);
     TokenData val_data;
     if (!val_path.empty()) val_data = load_token_list(val_path);
     const double val_frac = a.real("val-frac", 0.05);
@@ -650,19 +734,19 @@ int cmd_train(Args& a) {
         if (switch_attn) cfg.fp_attention = fp_attn;
         if (switch_nope) cfg.nope_every = nope;
     }
-    const int B = int(a.integer("batch", 16)), accum = int(a.integer("accum", 1));
-    const int Tn = std::min(cfg.seq_len, int(a.integer("seq", cfg.seq_len)));
+    const int B = a.integer_int("batch", 16), accum = a.integer_int("accum", 1);
+    const int Tn = std::min(cfg.seq_len, a.integer_int("seq", cfg.seq_len));
     const long steps = a.integer("steps", 2000), warmup = a.integer("warmup", 100);
     const double lr = a.real("lr", 1e-3), min_frac = a.real("min-lr-frac", 0.1);
     const double clip = a.real("clip", 1.0), bias_rate = a.real("bias-rate", 1e-3);
     const long seed = a.integer("seed", 1);
-    const int log_every = int(a.integer("log-every", 10)), eval_every = int(a.integer("eval-every", 200));
-    const int eval_batches = int(a.integer("eval-batches", 20)), save_every = int(a.integer("save-every", 500));
+    const int log_every = a.integer_int("log-every", 10), eval_every = a.integer_int("eval-every", 200);
+    const int eval_batches = a.integer_int("eval-batches", 20), save_every = a.integer_int("save-every", 500);
     const double time_limit = a.real("time-limit", 0) * 60.0;
     const std::string reason_path = a.str("reason-test");
     const Tokenizer tok = load_tokenizer(a.str("bpe"));
-    const int reason_every = int(a.integer("reason-every", 0)), reason_limit = int(a.integer("reason-limit", 300));
-    const int max_new = int(a.integer("max-new", 200));
+    const int reason_every = a.integer_int("reason-every", 0), reason_limit = a.integer_int("reason-limit", 300);
+    const int max_new = a.integer_int("max-new", 200);
     CHECK(max_new > 0, "--max-new must be positive");
     g_profiler.enabled = a.flag("profile");
     const bool use_gpu = a.flag("gpu"), request_fused = a.flag("fused-attn"), disable_fused = a.flag("no-fused-attn");
@@ -681,6 +765,8 @@ int cmd_train(Args& a) {
           "model vocab %d < validation vocab %u", cfg.vocab, val_data.vocab);
     CHECK(reason_path.empty() || cfg.vocab >= tok.vocab_size(),
           "model vocab %d < reasoning tokenizer vocab %d", cfg.vocab, tok.vocab_size());
+    CHECK(!cfg.moe() || cfg.top_k > 1,
+          "--topk 1 cannot train this router: a one-logit softmax has zero task gradient; use --topk 2 or more");
     CHECK(log_every > 0 && eval_batches > 0, "log interval and evaluation batch count must be positive");
     AccumulationBatch group(B, Tn, accum);
 
@@ -717,6 +803,8 @@ int cmd_train(Args& a) {
     size_t val_lo = 0, val_hi = val_data.tokens.size();
     if (val_path.empty()) {
         CHECK(val_frac >= 0 && val_frac < 1, "--val-frac must be in [0, 1)");
+        if (repeated_data && val_frac>0)
+            std::fprintf(stderr, "warning: default validation slices repeated data and can overlap training; use a separate --val file\n");
         train_end = size_t(double(data.tokens.size()) * (1.0 - val_frac));
         val = &data;
         val_lo = train_end;
@@ -728,6 +816,7 @@ int cmd_train(Args& a) {
                                               [](uint8_t m) { return m != 0; }),
               "training range contains no predictable targets");
     }
+    std::printf("data sources: %s\n", data_path.c_str());
     std::printf("data: %zu train tokens, %zu val tokens; %d x %d x %d = %zu tokens per step\n",
                 train_end, val_hi - val_lo, B, Tn, accum, group.inputs.size());
 
@@ -878,8 +967,10 @@ int cmd_train(Args& a) {
 int cmd_sample(Args& a) {
     ThreadPool tp(threads_arg(a));
     g_pool = &tp;
-    const std::string ckpt = a.str("ckpt", "model.ckpt"), prompt = a.str("prompt"), bpe = a.str("bpe");
-    const int n = int(a.integer("n", 500));
+    const std::string ckpt = a.str("ckpt", "model.ckpt"), bpe = a.str("bpe");
+    std::string prompt = a.str("prompt");
+    prompt.erase(std::remove(prompt.begin(),prompt.end(),char(kBos)),prompt.end());
+    const int n = a.integer_int("n", 500);
     const double temp = a.real("temp", 0.8);
     const bool answer = a.flag("answer");  // stop after the "#### answer" line, as eval-reasoning does
     Rng rng(uint64_t(a.integer("seed", 1)));
@@ -930,10 +1021,10 @@ int cmd_bench_infer(Args& a) {
                     "Alternates fp32/packed run order on the same forced token stream.\n");
         return 0;
     }
-    int tokens = int(a.integer("tokens", 128));
+    int tokens = a.integer_int("tokens", 128);
     const bool tokens_given = a.has("tokens");
-    const int reps = int(a.integer("reps", 7));
-    const int warmup = int(a.integer("warmup", 2));
+    const int reps = a.integer_int("reps", 7);
+    const int warmup = a.integer_int("warmup", 2);
     const std::string log_path = a.str("log");
     Config cfg = config_from_args(a, 256);
     a.done();
@@ -1036,6 +1127,7 @@ int cmd_bench_infer(Args& a) {
 }  // namespace
 
 int main(int argc, char** argv) {
+    std::setvbuf(stdout, nullptr, _IOLBF, 0);  // startup/eval/save lines reach tee immediately
     struct Command {
         const char* name;
         int (*run)(Args&);

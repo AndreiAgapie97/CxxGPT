@@ -15,6 +15,7 @@
 #include <cstddef>
 #include <functional>
 #include <memory>
+#include <limits>
 #include <thread>
 #include <vector>
 
@@ -28,7 +29,7 @@ constexpr int kWarp = 32;
 
 struct Block {
     Block(int threads, size_t smem_floats)
-        : sync(threads), smem(smem_floats, 0.0f), slots(size_t(threads), 0.0f) {
+        : sync(threads), smem(smem_floats, std::numeric_limits<float>::quiet_NaN()), slots(size_t(threads), std::numeric_limits<float>::quiet_NaN()) {
         for (int w = 0; w < (threads + kWarp - 1) / kWarp; ++w)
             warps.push_back(std::make_unique<std::barrier<>>(std::min(kWarp, threads - w * kWarp)));
     }

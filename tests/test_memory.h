@@ -20,7 +20,7 @@ inline void test_memory() {
     EXPECT(b.activations.used == (L * layer + global) * 4 + 2 * N * sizeof(int),
            "dense activation payload disagrees with independent shape formula");
     EXPECT(b.backward.used == N * (6 * C + 3 * F) * 4, "dense backward scratch shape is wrong");
-    EXPECT(b.scratch.used == N * (F + C) * 4, "projection scratch shape is wrong");
+    EXPECT(b.scratch.used == N * C * 4, "projection scratch shape is wrong");
     m.decode_begin(2, {0, 0}); b = m.memory_bytes();
     EXPECT(b.kv.used == 2 * L * 2 * 8 * C * 4 + 2 * sizeof(int), "KV cache count is wrong");
     const auto retained = b.total();
@@ -49,6 +49,10 @@ inline void test_memory() {
 
     cfg.n_experts = 4; cfg.top_k = 2; cfg.expert_hidden = 32;
     Model<float> moe(cfg); moe.init(2); TernaryEngine pm(moe);
+    moe.allocate(2, 3);
+    const size_t NK = N * 2, Fe = 32, E = 4;
+    EXPECT(moe.memory_bytes().backward.used == (6*N*C + 3*NK*Fe + 2*NK*C + N*E)*4,
+           "MoE backward storage retains unused scratch or has wrong shapes");
     const auto mb = pm.memory_bytes();
     // With no shared FFN, its two default 32x32 placeholder planes remain
     // allocated but are excluded from logical active weights. Count both.

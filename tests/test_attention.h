@@ -94,6 +94,9 @@ inline void check(int B, int NH, int HS, int Tn, uint64_t seed) {
 }  // namespace attention_test
 
 inline void test_attention() {
+    emu::Block fresh(1,4);
+    EXPECT(std::all_of(fresh.smem.begin(),fresh.smem.end(),[](float x) { return std::isnan(x); }),
+           "emulator shared memory hides uninitialized reads with zeros");
     EXPECT(std::isinf(attention_test::rel_err({NAN}, {1.0}, 1, 0, 1)), "attention error metric ignored NaN");
     EXPECT(std::isinf(attention_test::rel_err({1.0f}, {INFINITY}, 1, 0, 1)), "attention error metric ignored infinity");
     EXPECT(attention_test::rel_err({0.0f}, {0.0}, 1, 0, 1) == 0, "zero reference error is not zero");

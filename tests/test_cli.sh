@@ -37,8 +37,174 @@ for option in dim heads experts shared ffn ehidden topk batch accum log-every ev
     fi
 done
 printf 'CLI: single-window train/validation and twelve invalid configurations passed\n'
+for threads in 0 -1; do
+    status=0
+    "$CXXGPT" text2tok --in "$TEST_DIR/text.txt" --out "$TEST_DIR/thread-bad.tok" --threads "$threads" \
+        > "$TEST_DIR/thread-bad.log" 2>&1 || status=$?
+    [[ "$status" == 1 ]]
+    grep -q 'threads must be positive' "$TEST_DIR/thread-bad.log"
+done
+for options in '--dim 4294967304' '--steps 9999999999999999999999999' '--lr nan' '--lr inf' '--lr 1e999' '--lr 0.1junk'; do
+    status=0
+    # Fixed cases; all must fail in parsing before construction/allocation.
+    "$CXXGPT" train "${COMMON[@]}" $options > "$TEST_DIR/strict-args.log" 2>&1 || status=$?
+    [[ "$status" == 1 ]]
+    grep -q 'check failed' "$TEST_DIR/strict-args.log"
+done
+status=0
+"$CXXGPT" train "${COMMON[@]}" --experts 4 --topk 1 > "$TEST_DIR/top1.log" 2>&1 || status=$?
+[[ "$status" == 1 ]]
+grep -q 'one-logit softmax has zero task gradient' "$TEST_DIR/top1.log"
 
 "$CXXGPT_TRAINING_CLI" generate "$TEST_DIR"
+"$CXXGPT" train "${COMMON[@]}" --data "$TEST_DIR/data.tok*3" --val '' --val-frac 0.5 --steps 0 \
+    --out "$TEST_DIR/repeated-val.ckpt" > "$TEST_DIR/repeated-val.log" 2>&1
+grep -q 'validation slices repeated data' "$TEST_DIR/repeated-val.log"
+"$CXXGPT" train "${COMMON[@]}" --data "$TEST_DIR/data.tok*3" --steps 0 \
+    --out "$TEST_DIR/explicit-val.ckpt" > "$TEST_DIR/explicit-val.log" 2>&1
+require_absent -q 'validation slices repeated data' "$TEST_DIR/explicit-val.log"
+"$CXXGPT" train "${COMMON[@]}" --steps 2 --seed 7 --eval-every 0 --out "$TEST_DIR/budget-proof.ckpt" \
+    > "$TEST_DIR/budget-proof.log"
+"$CXXGPT_CURRICULUM" --mode budget --data "$TEST_DIR/data.tok" --ckpt "$TEST_DIR/budget-proof.ckpt" \
+    --log "$TEST_DIR/budget-proof.log" --seq 8 --batch 1 --steps 2 --seed 7 > "$TEST_DIR/budget-proof.csv"
+# A masked tail split has one predictable target per full training window;
+# using the whole corpus would sample a different range with identical draw counts.
+"$CXXGPT" train "${COMMON[@]}" --data "$TEST_DIR/masked.tok" --val '' --val-frac 0.3 \
+    --steps 2 --seed 7 --eval-every 0 --out "$TEST_DIR/range-proof.ckpt" > "$TEST_DIR/range-proof.log"
+"$CXXGPT_CURRICULUM" --mode budget --data "$TEST_DIR/masked.tok" --ckpt "$TEST_DIR/range-proof.ckpt" \
+    --log "$TEST_DIR/range-proof.log" --seq 8 --batch 1 --steps 2 --seed 7 > "$TEST_DIR/range-proof.csv"
+grep -q '^2,16,2,1$' "$TEST_DIR/range-proof.csv"
+for options in '--seq 4' '--batch 2' '--steps 1'; do
+    status=0
+    "$CXXGPT_CURRICULUM" --mode budget --data "$TEST_DIR/data.tok" --ckpt "$TEST_DIR/budget-proof.ckpt" \
+        --log "$TEST_DIR/budget-proof.log" --seq 8 --batch 1 --steps 2 --seed 7 $options \
+        > "$TEST_DIR/budget-mismatch.log" 2>&1 || status=$?
+    [[ "$status" == 1 ]]
+    grep -q 'sampling shape\|budget mismatch' "$TEST_DIR/budget-mismatch.log"
+done
+"$CXXGPT" train "${COMMON[@]}" --steps 10000000 --log-every 10000000 --eval-every 0 --save-every 1 \
+    --out "$TEST_DIR/buffer.ckpt" > "$TEST_DIR/buffer.log" 2>&1 &
+trainer=$!
+for ((poll=0; poll<1000; ++poll)); do
+    [[ -f "$TEST_DIR/buffer.ckpt" ]] && break
+    if ! kill -0 "$trainer" 2>/dev/null; then wait "$trainer"; exit 1; fi
+    sleep 0.01
+done
+seen_header=0
+if grep -q '^params:' "$TEST_DIR/buffer.log"; then seen_header=1; fi
+kill -INT "$trainer"
+wait "$trainer"
+[[ "$seen_header" == 1 ]]
+grep -q 'saved .* (interrupted)' "$TEST_DIR/buffer.log"
+status=0
+"$CXXGPT" text2tok --in "$TEST_DIR" --out "$TEST_DIR/read-error.tok" --threads 2 > "$TEST_DIR/read-error.log" 2>&1 || status=$?
+[[ "$status" == 1 ]]
+grep -q 'error reading' "$TEST_DIR/read-error.log"
+status=0
+"$CXXGPT_TRAINING_CLI" bad-token-save > "$TEST_DIR/token-save.log" 2>&1 || status=$?
+[[ "$status" == 1 ]]
+grep -q 'error writing /dev/full' "$TEST_DIR/token-save.log"
+printf 'a\001b' > "$TEST_DIR/bos.txt"
+"$CXXGPT" text2tok --in "$TEST_DIR/bos.txt" --out "$TEST_DIR/bos.tok" --threads 2 > "$TEST_DIR/bos.log"
+printf '%s\n' '{"question":"one\u0001two","answer":"work\u0001\n#### 2\u0001"}' > "$TEST_DIR/bos.jsonl"
+"$CXXGPT" prep-qa --in "$TEST_DIR/bos.jsonl" --out "$TEST_DIR/bos-qa" > "$TEST_DIR/bos-qa.log"
+"$CXXGPT_TRAINING_CLI" clean-bos "$TEST_DIR/bos.tok" "$TEST_DIR/bos-qa.tok"
+printf '%s\n' '{"question":"q","answer":"work","final":9007199254740993}' 'broken' \
+    '{"question":"q2","answer":"work","final":1.20e3}' \
+    '{"question":"q3","answer":"work","final":1e999}' \
+    '{"question":"q4","answer":"work","final":-0.00120}' \
+    '{"question":"missing answer","final":1}' \
+    '{"question":"missing final","answer":"work"}' > "$TEST_DIR/numeric.jsonl"
+"$CXXGPT" prep-qa --in "$TEST_DIR/numeric.jsonl" --out "$TEST_DIR/numeric" --final-key final > "$TEST_DIR/numeric.log" 2>&1
+grep -q '3 problems (4 without a usable answer skipped)' "$TEST_DIR/numeric.log"
+"$CXXGPT_TRAINING_CLI" numeric-labels "$TEST_DIR/numeric.txt"
+awk -F '\t' 'NR==1 && $5!="9007199254740993" {exit 1} NR==2 && $5!="1200" {exit 1} NR==3 && $5!="-0.0012" {exit 1} END {if(NR!=3)exit 1}' "$TEST_DIR/numeric.txt"
+# Cross the streaming block size without a newline; threaded cuts preserve bytes.
+python3 - "$TEST_DIR/one-line.txt" <<'PYLINE'
+import pathlib,sys
+pathlib.Path(sys.argv[1]).write_text(' alpha beta gamma '*500000)
+PYLINE
+"$CXXGPT" text2tok --in "$TEST_DIR/one-line.txt" --out "$TEST_DIR/one-line-one.tok" --threads 1 > "$TEST_DIR/one-line-one.log"
+"$CXXGPT" text2tok --in "$TEST_DIR/one-line.txt" --out "$TEST_DIR/one-line-two.tok" --threads 2 > "$TEST_DIR/one-line-two.log"
+cmp "$TEST_DIR/one-line-one.tok" "$TEST_DIR/one-line-two.tok"
+# A byte tokenizer alone cannot expose a cut through a learned merge.
+"$CXXGPT" bpe-train --in "$TEST_DIR/one-line.txt" --max-bytes 4096 --vocab 300 \
+    --out "$TEST_DIR/stream.bpe" > "$TEST_DIR/stream-bpe.log"
+for threads in 1 2; do
+    "$CXXGPT" text2tok --in "$TEST_DIR/one-line.txt" --bpe "$TEST_DIR/stream.bpe" \
+        --out "$TEST_DIR/stream-$threads.tok" --threads "$threads" > "$TEST_DIR/stream-$threads.log"
+    "$CXXGPT_TRAINING_CLI" bpe-stream-reference "$TEST_DIR/stream.bpe" "$TEST_DIR/one-line.txt" "$TEST_DIR/stream-$threads.tok"
+done
+cmp "$TEST_DIR/stream-1.tok" "$TEST_DIR/stream-2.tok"
+
+python3 - "$TEST_DIR/long.txt" <<'PYLONG'
+import pathlib,sys
+pathlib.Path(sys.argv[1]).write_text('a'*65537)
+PYLONG
+# An over-long chunk is reported, not fatal: a long data run keeps going.
+"$CXXGPT" text2tok --in "$TEST_DIR/long.txt" --out "$TEST_DIR/chunk-out.tok" --threads 2 > "$TEST_DIR/chunk.log"
+grep -q 'warning: 1 chunks longer than 65536 bytes were written as plain bytes' "$TEST_DIR/chunk.log"
+"$CXXGPT" bpe-train --in "$TEST_DIR/long.txt" --out "$TEST_DIR/chunk-out.bpe" --vocab 300 > "$TEST_DIR/chunk.log"
+grep -q 'warning: 1 chunks longer than 65536 bytes were left out of the merges' "$TEST_DIR/chunk.log"
+status=0
+"$CXXGPT_TRAINING_CLI" bad-tokenizer-vocab > "$TEST_DIR/core-vocab.log" 2>&1 || status=$?
+[[ "$status" == 1 ]]
+grep -q 'uint16 token ids' "$TEST_DIR/core-vocab.log"
+printf 'cxxgpt-bpe 1\n65281\n' > "$TEST_DIR/oversized.bpe"
+status=0
+"$CXXGPT" text2tok --in "$TEST_DIR/text.txt" --out "$TEST_DIR/oversized.tok" --bpe "$TEST_DIR/oversized.bpe" \
+    > "$TEST_DIR/oversized.log" 2>&1 || status=$?
+[[ "$status" == 1 ]]
+grep -q 'too many merges' "$TEST_DIR/oversized.log"
+status=0
+"$CXXGPT" bpe-train --in "$TEST_DIR/text.txt" --out "$TEST_DIR/too-large.bpe" --vocab 65537 \
+    > "$TEST_DIR/too-large.log" 2>&1 || status=$?
+[[ "$status" == 1 ]]
+grep -q 'uint16' "$TEST_DIR/too-large.log"
+for options in '--min-diff 4 --max-diff 2' '--max-diff 10' '--test-max-diff 17' '--test-per-cell 0'; do
+    status=0
+    "$CXXGPT" gen-reasoning --out "$TEST_DIR/invalid-reason" $options --train 0 --val 0 \
+        > "$TEST_DIR/invalid-reason.log" 2>&1 || status=$?
+    [[ "$status" == 1 ]]
+    grep -q 'check failed' "$TEST_DIR/invalid-reason.log"
+done
+status=0
+"$CXXGPT" gen-reasoning --out "$TEST_DIR/exhausted" --tasks mul --min-diff 1 --max-diff 1 \
+    --test-max-diff 1 --test-per-cell 721 --train 0 --val 0 > "$TEST_DIR/exhausted.log" 2>&1 || status=$?
+[[ "$status" == 1 ]]
+grep -q 'question domain exhausted' "$TEST_DIR/exhausted.log"
+for batch in 0 -1; do
+    status=0
+    "$CXXGPT" eval-reasoning --ckpt "$TEST_DIR/audit.ckpt" --test "$TEST_DIR/audit.txt" --batch "$batch" \
+        --threads 2 > "$TEST_DIR/eval-batch.log" 2>&1 || status=$?
+    [[ "$status" == 1 ]]
+    grep -q 'evaluation batch and max_new must be positive' "$TEST_DIR/eval-batch.log"
+done
+for count in '' 1junk 99999999999999999999999 0 -1; do
+    status=0
+    "$CXXGPT" train "${COMMON[@]}" --data "$TEST_DIR/data.tok*$count" > "$TEST_DIR/repeat-count.log" 2>&1 || status=$?
+    [[ "$status" == 1 ]]
+    grep -q 'bad repeat count' "$TEST_DIR/repeat-count.log"
+done
+status=0
+"$CXXGPT" eval-reasoning --ckpt "$TEST_DIR/audit.ckpt" --test "$TEST_DIR/audit.txt" --as-engine \
+    --threads 2 > "$TEST_DIR/engine-config.log" 2>&1 || status=$?
+[[ "$status" == 1 ]]
+grep -q 'requires a ternary model' "$TEST_DIR/engine-config.log"
+for target in 1 -1; do
+    status=0
+    "$CXXGPT_TRAINING_CLI" repeat-backward "$target" > "$TEST_DIR/repeat-backward.log" 2>&1 || status=$?
+    [[ "$status" == 1 ]]
+    grep -q 'needs a new forward' "$TEST_DIR/repeat-backward.log"
+done
+for command in bad-target bad-target-backward; do
+  for target in -2 3; do
+    status=0
+    "$CXXGPT_TRAINING_CLI" "$command" "$target" > "$TEST_DIR/target-range.log" 2>&1 || status=$?
+    [[ "$status" == 1 ]]
+    grep -q 'target .* out of range' "$TEST_DIR/target-range.log"
+  done
+done
 # gen-word uses the existing problem reader and text2tok unchanged.
 for split in train test; do
     prefix="$TEST_DIR/word-$split"

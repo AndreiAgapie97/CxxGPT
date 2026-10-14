@@ -30,43 +30,54 @@ class Tokenizer {
 public:
     Tokenizer() { reset_vocab(); }
 
+    // Merging inside a chunk costs time that grows with the square of its
+    // length. A longer chunk (a huge run of letters or symbols in some web
+    // page) is never merged: encode() writes it as plain bytes and train()
+    // skips it, and both count it, so the caller can report it. A data run of
+    // several hours goes on instead of stopping on one odd document.
+    static constexpr size_t kMaxChunkBytes = 65536;
+    size_t long_chunks() const { return long_chunks_; }
+
     int vocab_size() const { return int(vocab_.size()); }
     size_t num_merges() const { return merges_.size(); }
     const std::string& token_bytes(int id) const { return vocab_[id]; }
 
+    // End of the chunk of s that starts at i (see above). Where a chunk ends
+    // depends only on s and i, so scanning can start at any chunk start.
+    static size_t chunk_end(std::string_view s, size_t i) {
+        const size_t n = s.size();
+        const unsigned char c = s[i];
+        if (is_digit(c)) return i + 1;
+        if (c == ' ' && i + 1 < n && !is_space(s[i + 1]) && !is_digit(s[i + 1]))
+            return scan_run(s, i + 1);  // " word" or " ..."
+        if (is_space(c)) {
+            size_t j = i;
+            while (j < n && is_space(s[j])) ++j;
+            // A final ' ' before a word or punctuation leads that instead.
+            if (j < n && j - i > 1 && s[j - 1] == ' ' && !is_digit(s[j])) --j;
+            return j;
+        }
+        return scan_run(s, i);
+    }
+
     // Calls fn(begin, end) for each chunk of s (see above), in order.
     template <class Fn>
     static void for_each_chunk(std::string_view s, Fn&& fn) {
-        const size_t n = s.size();
-        size_t i = 0;
-        while (i < n) {
-            const size_t start = i;
-            const unsigned char c = s[i];
-            if (is_digit(c)) {
-                ++i;
-            } else if (c == ' ' && i + 1 < n && !is_space(s[i + 1]) && !is_digit(s[i + 1])) {
-                i = scan_run(s, i + 1);  // " word" or " ..."
-            } else if (is_space(c)) {
-                size_t j = i;
-                while (j < n && is_space(s[j])) ++j;
-                // A final ' ' before a word or punctuation leads that instead.
-                if (j < n && j - i > 1 && s[j - 1] == ' ' && !is_digit(s[j])) --j;
-                i = j;
-            } else {
-                i = scan_run(s, i);
-            }
-            fn(start, i);
+        for (size_t i = 0; i < s.size();) {
+            const size_t end = chunk_end(s, i);
+            fn(i, end);
+            i = end;
         }
     }
 
-    // The first position p >= from where a line starts with something other
-    // than whitespace (s[p-1] is '\n'), or s.size() if there is none. Such a
-    // p always starts a chunk, whatever came before, so text cut there
-    // encodes exactly as the whole does: big files can be encoded in
-    // independent pieces, in parallel.
-    static size_t next_safe_split(std::string_view s, size_t from) {
-        for (size_t p = std::max<size_t>(from, 1); p < s.size(); ++p)
-            if (s[p - 1] == '\n' && !is_space(s[p])) return p;
+    // First complete lexical chunk boundary at/after from. A lone last byte
+    // is not a cut: a later read might change its leading-space classification.
+    // Cutting only on newlines made one-line corpora grow without bound.
+    // start must be a chunk start (0, or an earlier cut): scanning begins
+    // there and stops at the first boundary, instead of rescanning all of s.
+    static size_t next_safe_split(std::string_view s, size_t from, size_t start = 0) {
+        for (size_t i = start; i < s.size(); i = chunk_end(s, i))
+            if (i >= from && i > 0 && i + 1 < s.size()) return i;
         return s.size();
     }
 
@@ -78,13 +89,20 @@ public:
 
     // Learns merges from text until the vocabulary has vocab_size tokens.
     void train(const std::string& text, int vocab_size, bool verbose = false) {
-        CHECK(vocab_size >= 256, "vocab_size must be at least 256");
+        CHECK(vocab_size >= 256 && vocab_size <= 65536, "vocab_size must be in [256,65536] for uint16 token ids");
         reset_vocab();
         merges_.clear();
         // Unique chunks with their counts; each as a token sequence.
         std::unordered_map<std::string_view, long> freq;
         const std::string_view tv(text);
-        for_each_chunk(tv, [&](size_t b, size_t e) { ++freq[tv.substr(b, e - b)]; });
+        long_chunks_ = 0;
+        for_each_chunk(tv, [&](size_t b, size_t e) {
+            if (e - b > kMaxChunkBytes) {
+                ++long_chunks_;  // too long to learn merges from (see kMaxChunkBytes)
+                return;
+            }
+            ++freq[tv.substr(b, e - b)];
+        });
         std::vector<std::vector<int>> words;
         std::vector<long> counts;
         for (const auto& [w, c] : freq) {
@@ -117,6 +135,7 @@ public:
             if (it == pair_count.end() || it->second != c) continue;  // stale
             if (c < 2) break;  // merging a pair seen once teaches nothing
             const int a = int(p >> 32), b = int(p & 0xFFFFFFFF), id = vocab_size_now();
+            CHECK(vocab_[a].size() <= kMaxChunkBytes-vocab_[b].size(), "tokenizer merge exceeds chunk size limit");
             merges_.push_back({a, b});
             vocab_.push_back(vocab_[a] + vocab_[b]);
             // Rewrite every word containing the pair, updating pair counts.
@@ -164,6 +183,11 @@ public:
         std::vector<int> out;
         for_each_chunk(tv, [&](size_t b, size_t e) {
             const std::string_view w = tv.substr(b, e - b);
+            if (w.size() > kMaxChunkBytes) {
+                ++long_chunks_;  // plain bytes, no merges (see kMaxChunkBytes)
+                for (unsigned char c : w) out.push_back(int(c));
+                return;
+            }
             if (w.size() == 1) return out.push_back(int((unsigned char)w[0]));
             auto it = cache_.find(w);
             if (it == cache_.end()) {
@@ -200,12 +224,14 @@ public:
         size_t n = 0;
         CHECK(std::fscanf(f, "cxxgpt-bpe %d %zu", &version, &n) == 2 && version == 1,
               "%s is not a tokenizer file", path.c_str());
+        CHECK(n <= 65280, "tokenizer has too many merges for uint16 token ids");
         reset_vocab();
         merges_.clear();
         for (size_t i = 0; i < n; ++i) {
             int a, b;
             CHECK(std::fscanf(f, "%d %d", &a, &b) == 2, "truncated tokenizer file %s", path.c_str());
             CHECK(a >= 0 && b >= 0 && a < vocab_size_now() && b < vocab_size_now(), "bad merge in %s", path.c_str());
+            CHECK(vocab_[a].size() <= kMaxChunkBytes-vocab_[b].size(), "tokenizer merge exceeds chunk size limit");
             merges_.push_back({a, b});
             vocab_.push_back(vocab_[a] + vocab_[b]);
         }
@@ -286,4 +312,5 @@ private:
     };
     static constexpr size_t kMaxCache = size_t(1) << 19;
     mutable std::unordered_map<std::string, std::vector<int>, Hash, std::equal_to<>> cache_;
+    mutable size_t long_chunks_ = 0;  // chunks over kMaxChunkBytes seen by train() or encode()
 };

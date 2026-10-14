@@ -5,8 +5,72 @@
 #include <set>
 #include "test_accumulation.h"
 #include "../src/reasoning.h"
+#include "../src/tokenizer.h"
 
 int main(int argc, char** argv) {
+    if (argc == 5 && std::string(argv[1]) == "bpe-stream-reference") {
+        Tokenizer tok; tok.load(argv[2]);
+        std::ifstream input(argv[3],std::ios::binary); CHECK(input, "cannot open whole-text reference");
+        const std::string text(std::istreambuf_iterator<char>{input},{});
+        CHECK(!input.bad(), "cannot read whole-text reference");
+        const auto whole = tok.encode(text);
+        const auto streamed = TokenData::load(argv[4]);
+        EXPECT(streamed.vocab==uint32_t(tok.vocab_size()), "streamed BPE vocabulary header differs");
+        EXPECT(tok.num_merges()>0 && whole.size()<text.size()/2, "stream fixture did not exercise learned merges");
+        EXPECT(std::equal(whole.begin(),whole.end(),streamed.tokens.begin(),streamed.tokens.end()),
+               "streamed BPE token ids differ from whole-text encoding");
+        return g_failures ? 1 : 0;
+    }
+
+    if (argc == 2 && std::string(argv[1]) == "bad-token-save") {
+        TokenData data; data.vocab = 256; data.tokens.assign(10000,1); data.mask.assign(10000,1);
+        data.save("/dev/full");
+        return 2;
+    }
+
+    if (argc == 4 && std::string(argv[1]) == "clean-bos") {
+        const auto text=TokenData::load(argv[2]), qa=TokenData::load(argv[3]);
+        EXPECT(text.tokens==std::vector<uint16_t>({97,98}), "raw text BOS remained");
+        EXPECT(std::count(qa.tokens.begin(),qa.tokens.end(),uint16_t(kBos))==1,
+               "QA source injected extra document BOS tokens");
+        return g_failures ? 1 : 0;
+    }
+
+    if (argc == 3 && std::string(argv[1]) == "numeric-labels") {
+        const auto ps=load_problems(argv[2]);
+        EXPECT(ps.size()==3 && ps[0].answer=="9007199254740993" && ps[1].answer=="1200" && ps[2].answer=="-0.0012",
+               "numeric QA labels lost exact decimal spelling");
+        return g_failures ? 1 : 0;
+    }
+
+    if (argc == 2 && std::string(argv[1]) == "bad-tokenizer-vocab") {
+        Tokenizer tok; tok.train("a a",65537);
+        return 2;
+    }
+
+    if (argc == 3 && std::string(argv[1]) == "repeat-backward") {
+        ThreadPool tp(1); g_pool = &tp;
+        Config cfg; cfg.vocab = 3; cfg.seq_len = 2; cfg.d_model = 4; cfg.n_heads = 1; cfg.n_layers = 1;
+        Model<float> m(cfg); m.init(7);
+        const int token = 1, target = std::stoi(argv[2]);
+        m.forward(&token, &target, 1, 1); m.zero_grad(); m.backward(); m.backward();
+        return 2;
+    }
+
+    if (argc == 3 && std::string(argv[1]) == "bad-target") {
+        float logits[] = {1,2,3}, loss = 0, gradient[3];
+        const int target = std::stoi(argv[2]);
+        cross_entropy_forward(logits, &loss, &target, 1, 3);
+        cross_entropy_backward(gradient, logits, &target, 1, 3, 1.0f);
+        return 2;  // bad target must fail before indexing, valid ignore must return loss zero
+    }
+    if (argc == 3 && std::string(argv[1]) == "bad-target-backward") {
+        const float probs[] = {0.2f,0.3f,0.5f}; float gradient[3];
+        const int target = std::stoi(argv[2]);
+        cross_entropy_backward(gradient, probs, &target, 1, 3, 1.0f);
+        return 2;
+    }
+
     if (argc == 3 && std::string(argv[1]) == "word") {
         const std::string prefix(argv[2]);
         const auto ps = load_problems(prefix + ".txt");

@@ -1,5 +1,7 @@
 // test_model.h — whole-model gradient checks and the BitLinear pieces.
 #pragma once
+#include <cfenv>
+#include <bit>
 
 #include "../src/generate.h"
 #include "../src/infer.h"
@@ -336,8 +338,9 @@ inline void test_int8_rows() {
 // The embedding (and, with --fp-attn, attention) runs on int8 rows: the
 // reference model gets the same rounded weights.
 inline void test_ternary_engine() {
-    const char* names[] = {"dense", "MoE", "MoE, half NoPE", "MoE, fp attention"};
-    for (int variant = 0; variant < 4; ++variant) {
+    const char* names[] = {"dense", "MoE", "MoE, half NoPE", "MoE, fp attention",
+                           "MoE, no shared, biased", "MoE, no shared, biased, fp attention"};
+    for (int variant = 0; variant < 6; ++variant) {
         Config cfg;
         cfg.vocab = 40;
         cfg.seq_len = 24;
@@ -352,9 +355,11 @@ inline void test_ternary_engine() {
             cfg.expert_hidden = 64;
         }
         if (variant == 2) cfg.nope_every = 2;  // layer 1 without RoPE
-        if (variant == 3) cfg.fp_attention = true;
+        if (variant == 3 || variant == 5) cfg.fp_attention = true;
+        if (variant >= 4) cfg.n_shared = 0;
         Model<float> m(cfg);
         m.init(17);
+        if (variant >= 4) for (auto& bias : m.router_bias) bias = {0.5f, -0.4f, 0.2f, -0.9f};
         // Larger weights than the init, so activations are far from zero
         // and the comparison is meaningful.
         Rng rng(18);
@@ -493,7 +498,155 @@ inline void test_generate_length() {
     EXPECT(stopped[0].size() == 2 && stopped[1].size() == 2, "done did not stop the sequences");
 }
 
+
+// A zero-attention one-layer model permits an independent FFN calculation:
+// selection is argtopk(r+b), but the two mixture weights are softmax(r_sel).
+inline void test_router_selection_and_gates() {
+    Config cfg; cfg.vocab = 11; cfg.seq_len = 4; cfg.d_model = 8; cfg.n_heads = 2;
+    cfg.n_layers = 1; cfg.n_experts = 4; cfg.top_k = 2; cfg.expert_hidden = 6;
+    Model<double> m(cfg); m.init(7);
+    for (const auto& p : m.infos) if (p.name.ends_with(".wqkv") || p.name.ends_with(".wo"))
+        std::fill_n(m.params.begin() + p.offset, p.size, 0.0);
+    auto w = [&](const char* name) { return m.params.data() + m.find(name)->offset; };
+    const int C = cfg.d_model, F = cfg.expert_hidden, token = 1;
+    std::vector<double> x(w("wte") + token*C, w("wte") + (token+1)*C), h(C), r(4);
+    auto norm = [&](const std::vector<double>& in, const double* weight) {
+        double ss = 0; for (double v : in) ss += v*v;
+        std::vector<double> out(C);
+        for (int i = 0; i < C; ++i) out[i] = in[i] / std::sqrt(ss/C + 1e-5) * weight[i];
+        return out;
+    };
+    h = norm(x, w("l0.ln2"));
+    for (int e = 0; e < 4; ++e) for (int j = 0; j < C; ++j) r[e] += h[j] * w("l0.router")[e*C+j];
+    for (const auto& bias : std::vector<std::vector<double>>{{8,-8,-7,7}, {7,-8,-7,8}}) {
+        m.router_bias[0] = bias;
+        m.expert_load[0].assign(4, 0);
+        std::vector<int> order{0,1,2,3};
+        std::stable_sort(order.begin(), order.end(), [&](int a, int b) { return r[a]+bias[a] > r[b]+bias[b]; });
+        auto reference = [&](bool biased_gate) {
+            double g[2], sum = 0;
+            for (int k = 0; k < 2; ++k) sum += g[k] = std::exp(r[order[k]] + (biased_gate ? bias[order[k]] : 0));
+            std::vector<double> residual = x;
+            for (int k = 0; k < 2; ++k) {
+                const int e = order[k]; std::vector<double> sw(F);
+                for (int f = 0; f < F; ++f) {
+                    double gate = 0, up = 0;
+                    for (int j = 0; j < C; ++j) {
+                        gate += h[j] * w("l0.efc")[(e*2*F+f)*C+j];
+                        up += h[j] * w("l0.efc")[(e*2*F+F+f)*C+j];
+                    }
+                    sw[f] = gate/(1+std::exp(-gate))*up;
+                }
+                for (int i = 0; i < C; ++i) for (int f = 0; f < F; ++f)
+                    residual[i] += g[k]/sum * sw[f] * w("l0.eproj")[(e*C+i)*F+f];
+            }
+            const auto final = norm(residual, w("lnf"));
+            std::vector<double> logits(cfg.vocab, 0);
+            for (int v = 0; v < cfg.vocab; ++v) for (int j = 0; j < C; ++j)
+                logits[v] += final[j]*w("wte")[v*C+j];
+            return logits;
+        };
+        const auto expected = reference(false), wrong = reference(true);
+        m.forward(&token, nullptr, 1, 1, true);
+        for (int e = 0; e < 4; ++e)
+            EXPECT(m.expert_load[0][e] == (e==order[0] || e==order[1] ? 1 : 0), "selection is not argtopk(r+b)");
+        double negative_difference = 0;
+        for (int v = 0; v < cfg.vocab; ++v) {
+            EXPECT(std::abs(m.output_row(0)[v]-expected[v]) < 1e-12, "gate is not softmax of raw selected logits");
+            negative_difference = std::max(negative_difference, std::abs(wrong[v]-expected[v]));
+        }
+        EXPECT(negative_difference > 1e-6, "distinct-bias fixture cannot detect biased gates");
+    }
+}
+
+inline void test_router_balancing() {
+    Config cfg; cfg.vocab = 11; cfg.seq_len = 4; cfg.d_model = 8; cfg.n_heads = 2;
+    cfg.n_layers = 2; cfg.n_experts = 4; cfg.top_k = 1; cfg.expert_hidden = 6;
+    Model<double> m(cfg);
+    m.expert_load = {{3,1,0,0}, {0,2,1,1}};
+    EXPECT(m.max_load_ratio() == 3, "max_load_ratio is not the busiest layer's normalized load");
+    m.update_router_bias(0.125);
+    // Mean is one: the equal-load expert is unchanged, not increased.
+    EXPECT(m.router_bias[0] == std::vector<double>({-0.125,0,0.125,0.125}) &&
+           m.router_bias[1] == std::vector<double>({0.125,-0.125,0,0}), "balancing bias has wrong sign or tie policy");
+    for (const auto& load : m.expert_load) EXPECT(load == std::vector<double>(4,0), "balance did not reset loads");
+    EXPECT(m.max_load_ratio() == 1, "empty loads do not report neutral balance");
+    const auto bias = m.router_bias;
+    m.expert_load = {{1,1,1,1}, {0,0,0,0}}; m.update_router_bias(0.125);
+    EXPECT(m.router_bias == bias, "balanced or empty loads changed bias");
+    m.expert_load[0] = {4,0,0,0}; m.update_router_bias(0);
+    EXPECT(m.router_bias == bias && m.expert_load[0] == std::vector<double>(4,0), "zero-rate discard changed bias/kept loads");
+}
+
+inline void test_activation_int8_contract() {
+    // Ordinary negative inputs below half a grid step round to -0 in float,
+    // while the deployment int8 representation has only one zero value.
+    {
+        const float x[] = {1.0f,-0.0001f,-0.0f,0.0f};
+        float got[4]; int8_t q[4];
+        act_quantize(got,x,1,4); const float scale=quantize_int8(x,4,q);
+        for (int i=0;i<4;++i)
+            EXPECT(std::bit_cast<uint32_t>(got[i])==std::bit_cast<uint32_t>(float(q[i])*scale),
+                   "float/int8 activation bit patterns differ, including zero signs");
+    }
+
+    for (int C : {1,7,8,9,15,16,17,31,33}) for (float magnitude : {1e-36f,1e-38f,1e-40f,1e-44f}) {
+        std::vector<float> x(C), got(C); std::vector<int8_t> q(C);
+        for (int j = 0; j < C; ++j) x[j] = j%3 == 0 ? magnitude : j%3 == 1 ? -magnitude : 0;
+        std::feclearexcept(FE_OVERFLOW);
+        act_quantize(got.data(), x.data(), 1, C);
+        const float scale = quantize_int8(x.data(), C, q.data());
+        EXPECT(!std::fetestexcept(FE_OVERFLOW), "tiny quantization formed an overflowing reciprocal");
+        for (int j = 0; j < C; ++j) {
+            const double ratio = scale == 0 ? 0 : double(x[j])/double(scale);
+            const int ref = int(std::clamp(std::nearbyint(ratio), -127.0, 127.0));
+            EXPECT(q[j] == ref && std::isfinite(got[j]) && std::bit_cast<uint32_t>(got[j]) == std::bit_cast<uint32_t>(float(q[j])*scale),
+                   "tiny activation quantization differs from finite double reference");
+        }
+    }
+    Rng rng(78);
+    for (int C : {1,7,8,9,15,16,17,31,32,33,127}) for (int mode = 0; mode < 5; ++mode) {
+        const int N = 3; std::vector<float> x(N*C), got(N*C);
+        std::vector<int8_t> q(C);
+        for (auto& v : x) v = float(rng.normal());
+        if (mode == 1) std::fill(x.begin(), x.end(), 0);
+        if (mode == 2) for (int i = 0; i < N*C; ++i) x[i] = (i % 255 - 127)*0.5f;
+        if (mode == 3) for (auto& v : x) v *= 1e-10f;
+        if (mode == 4) for (auto& v : x) v *= 1e20f;
+        act_quantize(got.data(), x.data(), N, C);
+        for (int n = 0; n < N; ++n) {
+            const float scale = quantize_int8(x.data()+n*C, C, q.data());
+            for (int j = 0; j < C; ++j)
+                EXPECT(std::bit_cast<uint32_t>(got[n*C+j]) == std::bit_cast<uint32_t>(scale*float(q[j])), "training/packed int8 levels differ at C=%d mode=%d", C, mode);
+        }
+    }
+}
+
+inline void test_sampling_zero_boundary() {
+    Rng rng(1); const uint64_t zero[] = {0,0,0,0}; rng.set_state(zero);
+    const float logits[] = {-1000,0,-1000};
+    EXPECT(pick_token(logits,3,1.0,&rng) == 1, "u=0 selected an underflowed zero-probability token");
+}
+
+inline void test_finished_slot_rng() {
+    Config cfg; cfg.vocab = 3; cfg.seq_len = 8; cfg.d_model = 4; cfg.n_layers = 1; cfg.n_heads = 1;
+    Model<float> m(cfg); m.init(7);
+    // Identical prompts permit distinct stop lengths through a deterministic call counter.
+    int calls = 0; Rng actual(5), expected(5);
+    const auto out = generate(m, {{1},{1}}, 3, [&](const auto& text) {
+        return (++calls == 1) || text.size() == 3;
+    }, 1.0, &actual);
+    EXPECT(out[0].size() == 1 && out[1].size() == 3, "mixed stop fixture did not terminate at distinct lengths");
+    for (int i = 0; i < 4; ++i) expected.uniform();
+    for (int i = 0; i < 4; ++i) EXPECT(actual.state()[i] == expected.state()[i], "finished slot consumed extra randomness");
+}
+
 inline void test_model() {
+    test_finished_slot_rng();
+    test_sampling_zero_boundary();
+    test_activation_int8_contract();
+    test_router_balancing();
+    test_router_selection_and_gates();
     test_decode_baseline_routing_state();
     test_bitlinear_ste();
     test_generate_length();

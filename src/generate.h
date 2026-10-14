@@ -25,7 +25,7 @@ int pick_token(const T* logits, int V, double temperature, Rng* rng) {
     for (int i = 0; i < V; ++i) sum += p[i] = std::exp((double(logits[i]) - logits[best]) / temperature);
     double u = rng->uniform() * sum;
     for (int i = 0; i < V; ++i)
-        if ((u -= p[i]) <= 0) return i;
+        if ((u -= p[i]) < 0) return i;
     return best;
 }
 
@@ -66,9 +66,9 @@ std::vector<std::vector<int>> generate(Model<T>& model, const std::vector<std::v
         const T* logits = model.decode_step(cur.data(), pos);
         if (pos < L - 1) continue;
         for (int b = 0; b < B; ++b) {
+            if (finished[b]) continue;  // stopped slots consume no further random draws
             const int t = pick_token(logits + size_t(b) * model.cfg.vocab, model.cfg.vocab, temperature, rng);
             cur[b] = t;
-            if (finished[b]) continue;
             out[b].push_back(t);
             if (done(out[b])) finished[b] = 1, ++n_finished;
         }
@@ -107,6 +107,7 @@ template <class T>
 EvalResult eval_reasoning(Model<T>& model, const std::vector<Problem>& problems, const Tokenizer& tok = {},
                           int batch = 64, int max_new = 200, size_t keep_failures = 8,
                           bool keep_completions = false) {
+    CHECK(batch > 0 && max_new > 0, "evaluation batch and max_new must be positive");
     CHECK(model.cfg.vocab >= tok.vocab_size(), "model vocab %d < tokenizer vocab %d", model.cfg.vocab,
           tok.vocab_size());
     // Ids the tokenizer cannot decode (model vocab padding) end a completion.

@@ -67,7 +67,7 @@ for seed in 1 2 3; do
         for arm in "${ARMS[@]}"; do
             prefix="$RUN_DIR/$variant-seed$seed-$arm"
             budget=(--mode budget --data "$RUN_DIR/data/$arm.tok" --seq 128 --batch 2 --steps "$STEPS" --seed "$((100+seed))")
-            if [[ -f "$prefix.ckpt" ]] && ./reasoning_curriculum "${budget[@]}" --ckpt "$prefix.ckpt" > "$prefix.budget.csv.tmp" 2> "$prefix.budget-check.log"; then
+            if [[ -f "$prefix.ckpt" ]] && ./reasoning_curriculum "${budget[@]}" --ckpt "$prefix.ckpt" --log "$prefix.log" > "$prefix.budget.csv.tmp" 2> "$prefix.budget-check.log"; then
                 mv "$prefix.budget.csv.tmp" "$prefix.budget.csv"
                 continue
             fi
@@ -82,7 +82,7 @@ for seed in 1 2 3; do
                 --save-every 200 --log-every 100 --log "$prefix.csv" "${CONTINUE[@]}" > "$prefix.log"
             finished=$(date +%s%N)
             printf '%s,%s,%s,%s\n' "$variant" "$seed" "$arm" "$((finished-started))" >> "$RUN_DIR/training-time.csv"
-            ./reasoning_curriculum "${budget[@]}" --ckpt "$prefix.ckpt" > "$prefix.budget.csv"
+            ./reasoning_curriculum "${budget[@]}" --ckpt "$prefix.ckpt" --log "$prefix.log" > "$prefix.budget.csv"
         done
     done
 done

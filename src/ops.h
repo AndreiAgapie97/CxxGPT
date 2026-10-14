@@ -47,8 +47,11 @@ inline T dot(const T* a, const T* b, int n) {
 // exponent bits. Within 2 ulp of std::exp; clamps instead of overflowing
 // (e^-87.3 is the smallest normal float). double keeps std::exp, so the
 // gradient checks are unaffected.
-inline float fast_exp(float x) {
-    x = std::min(std::max(x, -87.33654f), 88.37626f);
+inline float fast_exp(float in) {
+    // std::max(lo, NaN) returns lo, so the float-to-int conversion below is
+    // always defined; NaN is passed through at the end. No early return: a
+    // branch here stops GCC from vectorizing the loops that call this.
+    const float x = std::min(std::max(-87.33654f, in), 88.37626f);
     const float k = (x * 1.44269504088896341f + 12582912.0f) - 12582912.0f;
     float r = x - k * 0.693359375f;
     r = r - k * -2.12194440e-4f;
@@ -59,7 +62,8 @@ inline float fast_exp(float x) {
     p = p * r + 1.6666665459e-1f;
     p = p * r + 5.0000001201e-1f;
     p = p * r * r + r + 1.0f;
-    return std::bit_cast<float>(std::bit_cast<int32_t>(p) + (static_cast<int32_t>(k) << 23));
+    const float result = std::bit_cast<float>(std::bit_cast<int32_t>(p) + (static_cast<int32_t>(k) << 23));
+    return in == in ? result : in;  // in != in only for NaN
 }
 inline double fast_exp(double x) { return std::exp(x); }
 
@@ -385,6 +389,7 @@ void add_into(T* dst, const T* src, long n) {
 template <class T>
 double cross_entropy_forward(T* probs, T* losses, const int* targets, int N, int V) {
     PROFILE("xent_fwd");
+    for (int n = 0; n < N; ++n) CHECK(targets[n] >= -1 && targets[n] < V, "target %d out of range", targets[n]);
     for_rows(N, [&](int n0, int n1) {
         for (int n = n0; n < n1; ++n) {
             T* p = probs + long(n) * V;
@@ -417,6 +422,7 @@ double cross_entropy_forward(T* probs, T* losses, const int* targets, int N, int
 template <class T>
 void cross_entropy_backward(T* dlogits, const T* probs, const int* targets, int N, int V, T dloss) {
     PROFILE("xent_bwd");
+    for (int n = 0; n < N; ++n) CHECK(targets[n] >= -1 && targets[n] < V, "target %d out of range", targets[n]);
     for_rows(N, [&](int n0, int n1) {
         for (int n = n0; n < n1; ++n) {
             const T* p = probs + long(n) * V;
@@ -457,7 +463,8 @@ T ternary_quantize(T* wq, const T* w, long n) {
 // x_q = round(x / scale) * scale, with exactly the arithmetic of the
 // inference kernels' quantize_int8 (multiply by 1 / scale, round half to
 // even, clamp to [-127, 127]), so a trained model sees the same int8 levels
-// in training and in deployment.
+// in CPU training and deployment. GPU TF32/bf16 GEMMs round these inputs
+// further; this input-arithmetic contract does not promise identical GPU products.
 template <class T>
 void act_quantize(T* xq, const T* x, int N, int C) {
     PROFILE("act_quant");
@@ -471,8 +478,24 @@ void act_quantize(T* xq, const T* x, int N, int C) {
                 std::fill(q, q + C, T(0));
                 continue;
             }
-            const T scale = amax / T(127), inv = T(1) / scale;
-            for (int c = 0; c < C; ++c) q[c] = std::clamp(std::nearbyint(xn[c] * inv), T(-127), T(127)) * scale;
+            const T scale = amax / T(127);
+            if (scale == T(0)) { std::fill(q, q + C, T(0)); continue; }
+            if (scale <= T(1) / std::numeric_limits<T>::max()) {
+                // Separate loops keep vectorization from speculating an
+                // unused overflowing reciprocal on the tiny-scale path.
+                for (int c = 0; c < C; ++c) {
+                    const T rounded = std::clamp(std::nearbyint(xn[c] / scale), T(-127), T(127));
+                    // int8 zero dequantizes as +0; nearbyint can produce -0.
+                    q[c] = (rounded == T(0) ? T(0) : rounded) * scale;
+                }
+                continue;
+            }
+            const T inv = T(1) / scale;
+            for (int c = 0; c < C; ++c) {
+                const T rounded = std::clamp(std::nearbyint(xn[c] * inv), T(-127), T(127));
+                // int8 zero dequantizes as +0; nearbyint can produce -0.
+                q[c] = (rounded == T(0) ? T(0) : rounded) * scale;
+            }
         }
     });
 }

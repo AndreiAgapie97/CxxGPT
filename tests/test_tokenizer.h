@@ -5,6 +5,25 @@
 #include "test_util.h"
 
 inline void test_tokenizer() {
+    const std::string adjacent = "abc123def-4.5(6)!7+8=9 000xyz\n";
+    std::string adjacent_corpus;
+    for (int i = 0; i < 100; ++i) adjacent_corpus += adjacent;
+    Tokenizer digits; digits.train(adjacent_corpus, 320);
+    for (int id = 256; id < digits.vocab_size(); ++id)
+        for (char c : digits.token_bytes(id)) EXPECT(c < '0' || c > '9', "adjacent digit entered a BPE merge");
+    const auto adjacent_tokens = digits.encode(adjacent);
+    size_t digit_tokens = 0;
+    for (int id : adjacent_tokens) digit_tokens += id >= '0' && id <= '9';
+    const size_t digit_bytes = std::count_if(adjacent.begin(), adjacent.end(), [](char c) { return c >= '0' && c <= '9'; });
+    EXPECT(digit_tokens == digit_bytes && digits.decode(adjacent_tokens) == adjacent, "adjacent digits are not standalone exact tokens");
+    const std::string a = " alpha beta123!\n", b = " beta alpha456?\n";
+    std::string ab, ba;
+    for (int i = 0; i < 100; ++i) { ab += a+b; ba += b+a; }
+    Tokenizer first, reordered; first.train(ab,320); reordered.train(ba,320);
+    EXPECT(first.num_merges() == reordered.num_merges(), "BPE merge count depends on chunk order");
+    for (int id = 0; id < std::min(first.vocab_size(), reordered.vocab_size()); ++id)
+        EXPECT(first.token_bytes(id) == reordered.token_bytes(id), "BPE vocabulary depends on equal-count chunk order");
+
     // Chunking rules.
     const std::string s = "Hello, world! 123  foo\n\nbar";
     std::vector<std::string> got;
@@ -56,7 +75,7 @@ inline void test_tokenizer() {
     }
 
     // Save and load give the same encoder.
-    const std::string path = "/tmp/cxxgpt_test_tokenizer.bpe";
+    const std::string path = test_path("tokenizer.bpe");
     tok.save(path);
     Tokenizer tok2;
     tok2.load(path);
@@ -72,15 +91,42 @@ inline void test_tokenizer() {
         if (t % 3 == 0) r = corpus.substr(rng.below(corpus.size() - 200), 200);
         std::vector<int> pieces;
         for (size_t b = 0; b < r.size();) {
-            const size_t e = Tokenizer::next_safe_split(r, b + 1 + rng.below(8));
+            const size_t from = b + 1 + rng.below(8);
+            const size_t e = Tokenizer::next_safe_split(r, from);
+            // text2tok scans from the previous cut; that must find the same cut.
+            EXPECT(Tokenizer::next_safe_split(r, from, b) == e, "split search from the previous cut differs");
             for (int id : tok.encode(r.substr(b, e - b))) pieces.push_back(id);
             b = e;
         }
         EXPECT(pieces == tok.encode(r), "encoding in pieces differs from encoding the whole");
     }
 
+    // One-line boundaries and adversarial trailing space are also safe.
+    for (const std::string text : {" alpha beta gamma delta", "word  next!  ", "a1b2c3d4e5"}) {
+        const size_t cut = Tokenizer::next_safe_split(text, text.size()/2);
+        auto pieces = tok.encode(text.substr(0,cut)); const auto tail = tok.encode(text.substr(cut));
+        pieces.insert(pieces.end(),tail.begin(),tail.end());
+        EXPECT(pieces == tok.encode(text), "lexical split changes whole-text token ids");
+    }
     // Training is deterministic.
     Tokenizer tok3;
     tok3.train(corpus, 300);
     EXPECT(tok3.encode(corpus) == enc, "training is not deterministic");
+
+    // A chunk over kMaxChunkBytes: training skips it (same merges as without
+    // it), encoding writes it as plain bytes, and both count it.
+    const std::string huge = " " + std::string(Tokenizer::kMaxChunkBytes + 1, 'a');
+    Tokenizer tok4;
+    tok4.train(corpus + huge, 300);
+    EXPECT(tok4.long_chunks() == 1, "training did not count the long chunk");
+    EXPECT(tok4.num_merges() == tok.num_merges(), "a skipped long chunk changed the merges");
+    for (int id = 0; id < tok.vocab_size(); ++id)
+        EXPECT(tok4.token_bytes(id) == tok.token_bytes(id), "a skipped long chunk changed the vocabulary");
+    Tokenizer tok5 = tok;
+    const auto with_huge = tok5.encode("one two" + huge + " three");
+    std::vector<int> expected = tok.encode("one two");
+    for (unsigned char c : huge) expected.push_back(int(c));
+    for (int id : tok.encode(" three")) expected.push_back(id);
+    EXPECT(with_huge == expected, "a long chunk is not encoded as plain bytes");
+    EXPECT(tok5.long_chunks() == 1, "encoding did not count the long chunk");
 }

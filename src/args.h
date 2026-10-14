@@ -3,6 +3,9 @@
 #pragma once
 
 #include <cstdio>
+#include <cerrno>
+#include <cmath>
+#include <limits>
 #include <cstdlib>
 #include <map>
 #include <set>
@@ -46,9 +49,16 @@ public:
         note(k, std::to_string(def), true);
         if (!given) return def;
         char* end = nullptr;
+        errno = 0;
         const long v = std::strtol(kv_[k].c_str(), &end, 10);
-        CHECK(end && *end == 0, "--%s expects an integer, got '%s'", k.c_str(), kv_[k].c_str());
+        CHECK(end != kv_[k].c_str() && *end == 0 && errno != ERANGE, "--%s expects an integer, got '%s'", k.c_str(), kv_[k].c_str());
         return v;
+    }
+    int integer_int(const std::string& k, long def) {
+        const long value = integer(k, def);
+        CHECK(value >= std::numeric_limits<int>::min() && value <= std::numeric_limits<int>::max(),
+              "--%s is outside the int range", k.c_str());
+        return int(value);
     }
     double real(const std::string& k, double def) {
         const bool given = has(k);
@@ -57,8 +67,9 @@ public:
         note(k, buf, true);
         if (!given) return def;
         char* end = nullptr;
+        errno = 0;
         const double v = std::strtod(kv_[k].c_str(), &end);
-        CHECK(end && *end == 0, "--%s expects a number, got '%s'", k.c_str(), kv_[k].c_str());
+        CHECK(end != kv_[k].c_str() && *end == 0 && errno != ERANGE && std::isfinite(v), "--%s expects a number, got '%s'", k.c_str(), kv_[k].c_str());
         return v;
     }
     bool flag(const std::string& k) {
