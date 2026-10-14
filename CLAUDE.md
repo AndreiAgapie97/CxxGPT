@@ -53,6 +53,11 @@ Reasoning is the first capability we go after.
 - `docs/research.md`: the research log from the merged `gpt/research`
   branch (stable cross-entropy, token-weighted accumulation, optimizer
   grids, digit curricula), with raw results under `docs/results/`.
+- `docs/research-plan.md`: what to try next, in order (a calculator in the
+  engine, finer experts, learning from checked solutions, place-value digit
+  embeddings, int8 tensor cores for ternary), the optimizer's memory in CPU
+  RAM for growing past 8 GB, and the seed-repeat funnel an idea passes
+  before it gets a laptop night.
 - `src/cxxgpt.cpp`: the CLI (train, sample, eval, data prep, benchmarks).
 - `scripts/get_data.py`: downloads public datasets (GSM8K, TinyStories,
   FineWeb-Edu, OpenMathInstruct-2, MetaMathQA) into `data/`, as text with
