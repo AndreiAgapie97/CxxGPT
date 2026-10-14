@@ -418,6 +418,7 @@ void print_eval(const EvalResult& r, size_t show_failures) {
         std::printf(" %5.1f%%\n", 100.0 * c / std::max(1, n));
     }
     std::printf("overall %.1f%% (%d / %d)\n", 100.0 * r.correct / std::max(1, r.total), r.correct, r.total);
+    std::printf("gold completions exceeding --max-new %d: %zu / %d\n", r.max_new, r.gold_over_cap, r.total);
     // Multi-line answers (GSM8K's) stay indented under their label.
     auto indent = [](std::string t) {
         for (size_t i = 0; (i = t.find('\n', i)) != std::string::npos; i += 15) t.replace(i, 1, "\n              ");
@@ -436,6 +437,8 @@ int cmd_eval_reasoning(Args& a) {
     const std::string ckpt = a.str("ckpt", "model.ckpt"), test_path = a.str("test", "data/reason.test.txt");
     const int batch = int(a.integer("batch", 64)), limit = int(a.integer("limit", 0));
     const bool show = a.flag("show-failures");
+    const int max_new = int(a.integer("max-new", 200));
+    CHECK(max_new > 0, "--max-new must be positive");
     // As TernaryEngine runs it: the embedding (and --fp-attn attention) in
     // int8 rows.
     const bool as_engine = a.flag("as-engine");
@@ -453,7 +456,7 @@ int cmd_eval_reasoning(Args& a) {
         test = std::move(sub);
     }
     const double t0 = now_seconds();
-    const EvalResult r = eval_reasoning(model, test, tok, batch);
+    const EvalResult r = eval_reasoning(model, test, tok, batch, max_new);
     print_eval(r, show ? r.failures.size() : 0);
     std::printf("(%.1f s)\n", now_seconds() - t0);
     return 0;
@@ -584,7 +587,7 @@ int cmd_train(Args& a) {
             "        --matmul tf32 (tensor cores; fp32: exact, slower; bf16: coarser, maybe faster)\n"
             "        --no-tf32 is an alias for fp32; --fused-attn opts into experimental kernels\n"
             "        default attention uses cuBLAS until NVIDIA runtime validation\n"
-            "reason: --reason-test FILE --reason-every STEPS --reason-limit 300\n"
+            "reason: --reason-test FILE --reason-every STEPS --reason-limit 300 --max-new 200\n"
             "Ctrl-C saves a checkpoint and stops; --resume continues from --out, and\n"
             "takes precedence over --init once --out exists.\n");
         return 0;
@@ -627,6 +630,8 @@ int cmd_train(Args& a) {
     const std::string reason_path = a.str("reason-test");
     const Tokenizer tok = load_tokenizer(a.str("bpe"));
     const int reason_every = int(a.integer("reason-every", 0)), reason_limit = int(a.integer("reason-limit", 300));
+    const int max_new = int(a.integer("max-new", 200));
+    CHECK(max_new > 0, "--max-new must be positive");
     g_profiler.enabled = a.flag("profile");
     const bool use_gpu = a.flag("gpu"), request_fused = a.flag("fused-attn"), disable_fused = a.flag("no-fused-attn");
     CHECK(!request_fused || !disable_fused, "choose only one of --fused-attn and --no-fused-attn");
@@ -717,7 +722,7 @@ int cmd_train(Args& a) {
         if (reason_test.empty()) return;
         be.sync();
         const double t0 = now_seconds();
-        const EvalResult r = eval_reasoning(model, reason_test, tok);
+        const EvalResult r = eval_reasoning(model, reason_test, tok, 64, max_new);
         std::printf("reasoning eval at step %ld (%.1f s):\n", at_step, now_seconds() - t0);
         print_eval(r, 1);  // one wrong answer, to see what the model writes
         if (log) {

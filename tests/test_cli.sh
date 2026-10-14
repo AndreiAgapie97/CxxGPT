@@ -31,6 +31,16 @@ done
 printf 'CLI: single-window train/validation and twelve invalid configurations passed\n'
 
 ./test_training_cli generate "$TEST_DIR"
+"$CXXGPT" eval-reasoning --ckpt "$TEST_DIR/audit.ckpt" --test "$TEST_DIR/audit.txt" --max-new 1 --threads 2 > "$TEST_DIR/cap.log"
+grep -q 'gold completions exceeding --max-new 1: 1 / 1' "$TEST_DIR/cap.log"
+"$CXXGPT" eval-reasoning --ckpt "$TEST_DIR/audit.ckpt" --test "$TEST_DIR/audit.txt" --threads 2 > "$TEST_DIR/cap-default.log"
+grep -q 'gold completions exceeding --max-new 200: 0 / 1' "$TEST_DIR/cap-default.log"
+"$CXXGPT" train "${COMMON[@]}" --init "$TEST_DIR/audit.ckpt" --out "$TEST_DIR/cap.ckpt" \
+    --reason-test "$TEST_DIR/audit.txt" --max-new 1 > "$TEST_DIR/train-cap.log"
+grep -q 'gold completions exceeding --max-new 1: 1 / 1' "$TEST_DIR/train-cap.log"
+status=0
+"$CXXGPT" eval-reasoning --ckpt "$TEST_DIR/audit.ckpt" --test "$TEST_DIR/audit.txt" --max-new 0 > "$TEST_DIR/bad-cap.log" 2>&1 || status=$?
+[[ "$status" == 1 ]] && grep -q 'max-new must be positive' "$TEST_DIR/bad-cap.log"
 # Vocab compatibility must fail before constructing/training the model.
 for kind in val reason; do
     EXTRA=(--data "$TEST_DIR/masked.tok")

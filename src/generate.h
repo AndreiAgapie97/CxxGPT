@@ -84,6 +84,8 @@ struct EvalResult {
     // (task, difficulty) -> (correct, total)
     std::map<std::pair<std::string, int>, std::pair<int, int>> by_task;
     int correct = 0, total = 0;
+    int max_new = 200;
+    size_t gold_over_cap = 0;
     std::vector<std::pair<Problem, std::string>> failures;  // a few, for inspection
     std::vector<std::string> completions;  // optional, in input order for trace audits
 };
@@ -134,8 +136,10 @@ EvalResult eval_reasoning(Model<T>& model, const std::vector<Problem>& problems,
         for (size_t k = k0; k < k1; ++k) texts[order[k]] = text_of(outs[k - k0]);
     }
     EvalResult r;
+    r.max_new = max_new;
     for (size_t i = 0; i < n; ++i) {
         const Problem& p = problems[i];
+        r.gold_over_cap += tok.encode(p.completion()).size() > size_t(max_new);
         const bool ok = completion_done(texts[i]) && answer_matches(texts[i], p.answer);
         auto& cell = r.by_task[{p.task, p.difficulty}];
         cell.first += ok;
