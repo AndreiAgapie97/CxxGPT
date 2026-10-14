@@ -1,4 +1,4 @@
-// Strict generated-trace checks for the native add/cmp curriculum. These
+// Native add/cmp statement checks (tolerating whitespace/leading zeros). These
 // check arithmetic and grounding in the question, not arbitrary proof prose.
 #pragma once
 #include <charconv>
@@ -15,7 +15,7 @@ inline bool number(std::string_view s, long& v) {
     s = trim(s);
     if (s.empty() || s.front() < '0' || s.front() > '9') return false;
     const auto result = std::from_chars(s.data(), s.data() + s.size(), v);
-    return result.ec == std::errc{} && result.ptr == s.data() + s.size() && v <= 1000000;
+    return result.ec == std::errc{} && result.ptr == s.data() + s.size();
 }
 inline bool pair(std::string_view s, char sep, long& a, long& b) {
     const size_t pos = s.find(sep);

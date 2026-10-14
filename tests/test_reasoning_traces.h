@@ -4,6 +4,10 @@
 #include "test_util.h"
 
 inline void test_reasoning_traces() {
+    Problem large; large.task="add"; large.question="1000001+1234567";
+    EXPECT(reasoning_traces::score(large,"1+7+0=8, 0+6+0=6, 0+5+0=5, 0+4+0=4, 0+3+0=3, 0+2+0=2, 1+1+0=2\n#### 2234568\n").all_grounded(),
+           "native-format trace rejected a representable larger operand");
+
     Problem p; p.task = "add"; p.question = "12+19"; p.answer = "31";
     auto s = reasoning_traces::score(p, "2+9+0=11, 1+1+1=3\n#### 31\n");
     EXPECT(s.all_grounded() && s.expected == 2 && s.local_correct == 2, "correct carried addition rejected");
