@@ -229,7 +229,13 @@ EvalResult eval_reasoning(M& model, const std::vector<Problem>& problems, const 
                 completion_done(texts[i][size_t(t)]) ? normalized_answer(texts[i][size_t(t)]) : "";
         const bool single_ok = completion_done(texts[i][0]) && answer_matches(texts[i][0], p.answer);
         const std::string voted = vote_answer(answers);
-        const bool vote_ok = !voted.empty() && voted == p.answer;
+        // An empty answer can mean two things: every try failed to finish an
+        // "#### " line (wrong, as a single greedy try always was), or the
+        // answer line itself was empty and gold is empty too (correct today).
+        // Only a finished try can give the empty answer correctly.
+        bool any_finished = false;
+        for (int t = 0; t < vote.tries && !any_finished; ++t) any_finished = completion_done(texts[i][size_t(t)]);
+        const bool vote_ok = (any_finished || !voted.empty()) && voted == p.answer;
         bool any_ok = false;
         for (int t = 0; t < vote.tries && !any_ok; ++t)
             any_ok = completion_done(texts[i][size_t(t)]) && answer_matches(texts[i][size_t(t)], p.answer);

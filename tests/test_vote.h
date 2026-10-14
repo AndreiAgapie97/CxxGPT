@@ -145,6 +145,28 @@ inline void test_vote_report() {
 
 // One try must reproduce exactly what eval-reasoning scored before votes
 // existed: decode each problem greedily here, by hand, and compare.
+// An empty gold answer is correct when a try finishes an empty "#### " line
+// (today's scoring), and only then: unfinished tries never count.
+inline void test_vote_empty_answer() {
+    std::vector<Problem> ps = {vote_problem("add", 1, "40-40?", "")};
+    ScriptedModel finished;
+    finished.queue = {"work\n#### \n", "work\n#### \n", "work\n#### 5\n", "work\n#### \n"};
+    finished.prompt_len = 1 + int(ps[0].prompt().size());
+    VoteOpts vote;
+    vote.tries = 4;
+    vote.temperature = 1.0;
+    Rng rng(6);
+    vote.rng = &rng;
+    const EvalResult r = eval_reasoning(finished, ps, Tokenizer{}, 4, 40, 8, false, vote);
+    EXPECT(r.vote_correct == 1, "a finished empty answer line must match an empty gold (vote %d)", r.vote_correct);
+    // The same problem, but no try ever finishes: still wrong.
+    ScriptedModel unfinished;
+    unfinished.queue = {"no answer\n", "no answer\n", "no answer\n", "no answer\n"};
+    unfinished.prompt_len = finished.prompt_len;
+    const EvalResult u = eval_reasoning(unfinished, ps, Tokenizer{}, 4, 40, 8, false, vote);
+    EXPECT(u.vote_correct == 0, "an unfinished try must not give the empty answer (vote %d)", u.vote_correct);
+}
+
 inline void test_vote_single_try_matches_greedy() {
     Config cfg;
     cfg.vocab = 256;
@@ -189,6 +211,7 @@ inline void test_vote_single_try_matches_greedy() {
 inline void test_vote() {
     test_vote_answer();
     test_vote_report();
+    test_vote_empty_answer();
     test_vote_single_try_matches_greedy();
 }
 
