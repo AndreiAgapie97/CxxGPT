@@ -70,7 +70,7 @@ public:
         }
         for (const auto* v : {&x0, &lnf, &rstdf, &logits, &losses}) b.activations.add(*v);
         b.activations.add(tokens_); b.activations.add(targets_);
-        for (const auto* v : {&dresid, &dC, &dqkv, &datty, &dfc, &dsw, &dey, &dxg, &drl, &dffn}) b.backward.add(*v);
+        for (const auto* v : {&dresid, &dC, &dqkv, &datty, &dfc, &dsw, &dey, &dxg, &drl}) b.backward.add(*v);
         for (const auto* v : {&xq, &out_tmp, &dgate_scratch_}) b.scratch.add(*v);
         b.scratch.add(count_scratch_); b.scratch.add(fill_scratch_); b.kv.add(kv_start_);
         for (const auto& v : kcache_) b.kv.add(v);
@@ -128,13 +128,12 @@ public:
         x0.resize(N * C); lnf.resize(N * C); rstdf.resize(N);
         logits.resize(N * V); losses.resize(N);
         tokens_.resize(N); targets_.resize(N);
-        const size_t widest = std::max({C, F, Fe});
-        xq.resize(std::max(N, NK) * widest);
+        if (cfg.ternary) xq.resize(std::max(N, NK) * std::max({C, F, Fe}));
         out_tmp.resize(N * C);
         // backward scratch
         dresid.resize(N * C); dC.resize(N * C); dqkv.resize(N * 3 * C); datty.resize(N * C);
         dfc.resize(std::max(N * 2 * F, NK * 2 * Fe)); dsw.resize(std::max(N * F, NK * Fe));
-        if (cfg.moe()) { dey.resize(NK * C); dxg.resize(NK * C); drl.resize(N * E); dffn.resize(N * C); }
+        if (cfg.moe()) { dey.resize(NK * C); dxg.resize(NK * C); drl.resize(N * E); }
     }
 
     // Runs the model on tokens[B * Tn]. With targets (-1 = ignore), returns
@@ -591,7 +590,7 @@ private:
     std::vector<int> tokens_, targets_;
     std::vector<LayerActs> acts;
     std::vector<T> x0, lnf, rstdf, logits, losses, xq, out_tmp;
-    std::vector<T> dresid, dC, dqkv, datty, dfc, dsw, dey, dxg, drl, dffn;
+    std::vector<T> dresid, dC, dqkv, datty, dfc, dsw, dey, dxg, drl;
     std::vector<int> count_scratch_, fill_scratch_;
     std::vector<T> dgate_scratch_;
     int kv_B_ = 0;
