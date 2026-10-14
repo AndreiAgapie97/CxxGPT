@@ -184,7 +184,10 @@ int cmd_text2tok(Args& a) {
             f.read(buf.data() + old, std::streamsize(kBlock));
             CHECK(!f.bad() && (!f.fail() || f.eof()), "error reading %s", in.c_str());
             buf.resize(old + size_t(f.gcount()));
-            buf.erase(std::remove(buf.begin()+std::ptrdiff_t(old),buf.end(),char(kBos)),buf.end());
+            // The BOS byte is reserved for "a document starts here": drop it
+            // from the text just read, so the text cannot fake one.
+            const auto new_text = buf.begin() + std::ptrdiff_t(old);
+            buf.erase(std::remove(new_text, buf.end(), char(kBos)), buf.end());
             eof = !f;
             starved = false;
             CHECK(buf.size() <= kBlock*size_t(threads) + (64u<<20),
@@ -370,30 +373,49 @@ int cmd_gen_word(Args& a) {
     return 0;
 }
 
-// A JSON number as an answer: 18 -> "18", 2.5 -> "2.5".
+// A JSON number as an answer, written out in full from its exact text (no
+// rounding through a double): 18 -> "18", 2.50 -> "2.5", 1.2e3 -> "1200",
+// -0.00120 -> "-0.0012".
 std::string format_number(const Json& value) {
     const std::string& raw = value.str;
-    const bool negative = !raw.empty() && raw[0]=='-';
-    const size_t exponent_at = raw.find_first_of("eE"), begin = negative ? 1 : 0;
-    std::string digits = raw.substr(begin,exponent_at-begin);
-    const auto dot = digits.find('.');
-    long position = long(dot==digits.npos ? digits.size() : dot);
-    if (dot != digits.npos) digits.erase(dot,1);
-    const auto first = digits.find_first_not_of('0');
-    if (first==digits.npos) return "0";
-    position -= long(first); digits.erase(0,first);
-    if (exponent_at!=raw.npos) {
-        const char* start = raw.data()+exponent_at+1;
-        if (*start=='+') ++start;
-        long exponent = 0; const auto result=std::from_chars(start,raw.data()+raw.size(),exponent);
-        CHECK(result.ec==std::errc{}, "numeric answer exponent out of range");
-        position += exponent;
+    const bool negative = !raw.empty() && raw[0] == '-';
+    const size_t begin = negative ? 1 : 0;
+    const size_t exponent_at = raw.find_first_of("eE");  // npos if there is none
+
+    // The digits without sign, point or exponent, and where the point goes:
+    // "12.5" gives digits "125" and point_at 2.
+    std::string digits = raw.substr(begin, exponent_at - begin);
+    const size_t dot = digits.find('.');
+    long point_at = long(dot == std::string::npos ? digits.size() : dot);
+    if (dot != std::string::npos) digits.erase(dot, 1);
+
+    // Leading zeros: "0.0012" gives digits "12" and point_at -2.
+    const size_t first = digits.find_first_not_of('0');
+    if (first == std::string::npos) return "0";
+    digits.erase(0, first);
+    point_at -= long(first);
+
+    // An exponent moves the point: "1.2e3" gives point_at 1 + 3 = 4.
+    if (exponent_at != std::string::npos) {
+        const char* start = raw.data() + exponent_at + 1;
+        if (*start == '+') ++start;
+        long exponent = 0;
+        const auto result = std::from_chars(start, raw.data() + raw.size(), exponent);
+        CHECK(result.ec == std::errc{}, "numeric answer exponent out of range");
+        point_at += exponent;
     }
-    while (digits.size()>1 && digits.back()=='0') digits.pop_back();
-    if (position<=0) digits = "0."+std::string(size_t(-position),'0')+digits;
-    else if (size_t(position)>=digits.size()) digits.append(size_t(position)-digits.size(),'0');
-    else digits.insert(size_t(position),1,'.');
-    return (negative ? "-" : "")+digits;
+
+    // Trailing zeros after the point carry no value; keep one digit.
+    while (digits.size() > 1 && digits.back() == '0') digits.pop_back();
+
+    if (point_at <= 0) {
+        digits = "0." + std::string(size_t(-point_at), '0') + digits;  // 0.0012
+    } else if (size_t(point_at) >= digits.size()) {
+        digits.append(size_t(point_at) - digits.size(), '0');  // 1200
+    } else {
+        digits.insert(size_t(point_at), 1, '.');  // 12.5
+    }
+    return (negative ? "-" : "") + digits;
 }
 
 // Question/answer pairs from a JSON Lines file to a problems file for
