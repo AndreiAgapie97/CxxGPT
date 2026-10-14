@@ -15,7 +15,9 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <cublas_v2.h>
@@ -555,6 +557,7 @@ struct GpuTrainer::Impl {
     std::vector<ParamInfo> infos;
     size_t n_params = 0;
     cublasHandle_t blas = nullptr;
+    cublasComputeType_t compute = CUBLAS_COMPUTE_32F_FAST_TF32;  // how gemm multiplies (Matmul)
 
     DevBuf<float> params, grads, qparams, m, v;
     long adam_step = 0;
@@ -590,6 +593,58 @@ struct GpuTrainer::Impl {
     DevBuf<float> router_bias;  // [layer, expert]
     std::vector<std::vector<double>> expert_load;
 
+    // Profiling (set_profile): GPU time per named region of the step, from
+    // CUDA events recorded around it, so timing never makes the GPU wait.
+    bool profiling = false;
+    struct Mark {
+        const char* name;
+        cudaEvent_t start, stop;
+    };
+    std::vector<Mark> marks;
+    std::vector<cudaEvent_t> spare_events;
+
+    cudaEvent_t record_event() {
+        cudaEvent_t e;
+        if (spare_events.empty()) {
+            CUDA_CHECK(cudaEventCreate(&e));
+        } else {
+            e = spare_events.back();
+            spare_events.pop_back();
+        }
+        CUDA_CHECK(cudaEventRecord(e));
+        return e;
+    }
+    // Region r(*this, "name"): the rest of the enclosing block counts as
+    // "name". Regions must not nest.
+    struct Region {
+        Impl& impl;
+        const char* name;
+        cudaEvent_t start = nullptr;
+        Region(Impl& i, const char* n) : impl(i), name(n) {
+            if (impl.profiling) start = impl.record_event();
+        }
+        ~Region() {
+            if (start) impl.marks.push_back({name, start, impl.record_event()});
+        }
+    };
+
+    std::vector<std::pair<std::string, double>> take_profile() {
+        std::vector<std::pair<std::string, double>> out;
+        if (marks.empty()) return out;
+        CUDA_CHECK(cudaDeviceSynchronize());
+        for (const auto& mk : marks) {
+            float ms = 0.0f;
+            CUDA_CHECK(cudaEventElapsedTime(&ms, mk.start, mk.stop));
+            auto it = std::find_if(out.begin(), out.end(), [&](const auto& e) { return e.first == mk.name; });
+            if (it == out.end()) out.emplace_back(mk.name, 1e-3 * ms);
+            else it->second += 1e-3 * ms;
+            spare_events.push_back(mk.start);
+            spare_events.push_back(mk.stop);
+        }
+        marks.clear();
+        return out;
+    }
+
     // Attention: fused kernels (attention.cuh), which keep one number per
     // row (lse), or cuBLAS products through the full matrix of weights (att).
     bool fused_attn = true;
@@ -609,7 +664,7 @@ struct GpuTrainer::Impl {
     std::vector<float> losses_h;
     std::vector<int> counts_h;
 
-    Impl(const Config& c, const std::vector<ParamInfo>& in, bool tf32, bool fused)
+    Impl(const Config& c, const std::vector<ParamInfo>& in, Matmul matmul, bool fused)
         : cfg(c), infos(in), fused_attn(fused) {
         cfg.validate();
         CHECK(!cfg.fp_attention, "full-precision attention (--fp-attn) is not on the GPU yet");
@@ -620,7 +675,9 @@ struct GpuTrainer::Impl {
               err == cudaSuccess ? "no devices" : cudaGetErrorString(err));
         for (const auto& p : infos) n_params = std::max(n_params, p.offset + p.size);
         CUBLAS_CHECK(cublasCreate(&blas));
-        CUBLAS_CHECK(cublasSetMathMode(blas, tf32 ? CUBLAS_TF32_TENSOR_OP_MATH : CUBLAS_DEFAULT_MATH));
+        compute = matmul == Matmul::fp32   ? CUBLAS_COMPUTE_32F
+                  : matmul == Matmul::bf16 ? CUBLAS_COMPUTE_32F_FAST_16BF
+                                           : CUBLAS_COMPUTE_32F_FAST_TF32;
         if (fused_attn) {
             const int HS = cfg.head_size();
             CHECK(HS <= attn::kMaxHS, "fused attention takes heads of up to %d (this model: %d); use --no-fused-attn",
@@ -717,6 +774,11 @@ struct GpuTrainer::Impl {
 
     ~Impl() {
         if (blas) cublasDestroy(blas);
+        for (const auto& mk : marks) {
+            cudaEventDestroy(mk.start);
+            cudaEventDestroy(mk.stop);
+        }
+        for (cudaEvent_t e : spare_events) cudaEventDestroy(e);
     }
 
     float* P(size_t o) { return params.p + o; }
@@ -731,8 +793,9 @@ struct GpuTrainer::Impl {
               int ldc, float beta) {
         if (M == 0 || N == 0) return;
         const float one = 1.0f;
-        CUBLAS_CHECK(cublasSgemm(blas, tb ? CUBLAS_OP_T : CUBLAS_OP_N, ta ? CUBLAS_OP_T : CUBLAS_OP_N, N, M, K,
-                                 &one, B, ldb, A, lda, &beta, C, ldc));
+        CUBLAS_CHECK(cublasGemmEx(blas, tb ? CUBLAS_OP_T : CUBLAS_OP_N, ta ? CUBLAS_OP_T : CUBLAS_OP_N, N, M, K, &one,
+                                  B, CUDA_R_32F, ldb, A, CUDA_R_32F, lda, &beta, C, CUDA_R_32F, ldc, compute,
+                                  CUBLAS_GEMM_DEFAULT));
     }
 
     // The same, for `batch` independent products at fixed strides.
@@ -740,8 +803,9 @@ struct GpuTrainer::Impl {
                       const float* B, int ldb, long long sb, float* C, int ldc, long long sc, float beta,
                       int batch) {
         const float one = 1.0f;
-        CUBLAS_CHECK(cublasSgemmStridedBatched(blas, tb ? CUBLAS_OP_T : CUBLAS_OP_N, ta ? CUBLAS_OP_T : CUBLAS_OP_N,
-                                               N, M, K, &one, B, ldb, sb, A, lda, sa, &beta, C, ldc, sc, batch));
+        CUBLAS_CHECK(cublasGemmStridedBatchedEx(blas, tb ? CUBLAS_OP_T : CUBLAS_OP_N, ta ? CUBLAS_OP_T : CUBLAS_OP_N,
+                                                N, M, K, &one, B, CUDA_R_32F, ldb, sb, A, CUDA_R_32F, lda, sa, &beta,
+                                                C, CUDA_R_32F, ldc, sc, batch, compute, CUBLAS_GEMM_DEFAULT));
     }
 
     // linear_forward: y[N, OC] = x[N, IC] · w[OC, IC]ᵀ
@@ -763,6 +827,7 @@ struct GpuTrainer::Impl {
 
     // Model::proj_forward / proj_backward: BitLinear when ternary.
     void proj_forward(float* y, const float* x, size_t woff, int N, int IC, int OC) {
+        Region r(*this, "matmul fwd");
         if (cfg.ternary) {
             act_quantize(xq.p, x, N, IC);
             x = xq.p;
@@ -770,6 +835,7 @@ struct GpuTrainer::Impl {
         linear_forward(y, x, W(woff), N, IC, OC);
     }
     void proj_backward(float* dx, const float* dy, const float* x, size_t woff, int N, int IC, int OC) {
+        Region r(*this, "matmul bwd");
         if (cfg.ternary) {
             act_quantize(xq.p, x, N, IC);
             x = xq.p;
@@ -778,11 +844,13 @@ struct GpuTrainer::Impl {
     }
 
     void rmsnorm_forward(float* out, float* rstd, const float* x, const float* w, int N, int C) {
+        Region r(*this, "norms, rope, adds");
         rmsnorm_fwd<<<blocks_for(N, kRowsPerBlock), kBlock>>>(out, rstd, x, w, N, C);
         LAUNCH_CHECK();
     }
     void rmsnorm_backward(float* dx, float* dw, const float* dout, const float* x, const float* w,
                           const float* rstd, int N, int C) {
+        Region r(*this, "norms, rope, adds");
         rmsnorm_bwd_dx<<<blocks_for(N, kRowsPerBlock), kBlock>>>(dx, dout, x, w, rstd, N, C);
         LAUNCH_CHECK();
         constexpr int R = 64;
@@ -796,17 +864,20 @@ struct GpuTrainer::Impl {
     void rope_apply(float* qkv, int B, int Tn, bool inverse) {
         const int C = cfg.d_model, NH = cfg.n_heads, half = cfg.head_size() / 2;
         const size_t n = size_t(B) * Tn * 2 * NH * half;
+        Region r(*this, "norms, rope, adds");
         rope<<<blocks_for(n), kBlock>>>(qkv, rope_cos.p, rope_sin.p, B * Tn, Tn, C, NH, half, inverse);
         LAUNCH_CHECK();
     }
 
     void add(float* out, const float* a, const float* b, size_t n) {
+        Region r(*this, "norms, rope, adds");
         add_fwd<<<blocks_for(n), kBlock>>>(out, a, b, n);
         LAUNCH_CHECK();
     }
 
     // Attention of layer activations a: a.atty from a.qkv.
     void attention_forward(LayerActs& a, int B, int Tn) {
+        Region r(*this, "attention fwd");
         const int C = cfg.d_model, NH = cfg.n_heads, HS = cfg.head_size();
         const float scale = 1.0f / std::sqrt(float(HS));
         if (fused_attn) {
@@ -841,6 +912,7 @@ struct GpuTrainer::Impl {
 
     // attention_forward's backward: accumulates into dqkv_, given dout = d(a.atty).
     void attention_backward(float* dqkv_, const float* dout, const LayerActs& a, int B, int Tn) {
+        Region r(*this, "attention bwd");
         const int C = cfg.d_model, NH = cfg.n_heads, HS = cfg.head_size();
         const float scale = 1.0f / std::sqrt(float(HS));
         if (fused_attn) {
@@ -884,16 +956,19 @@ struct GpuTrainer::Impl {
 
     void swiglu_forward(float* out, const float* inp, int N, int F) {
         if (N == 0) return;
+        Region r(*this, "swiglu");
         swiglu_fwd<<<blocks_for(size_t(N) * F), kBlock>>>(out, inp, N, F);
         LAUNCH_CHECK();
     }
     void swiglu_backward(float* dinp, const float* dout, const float* inp, int N, int F) {
         if (N == 0) return;
+        Region r(*this, "swiglu");
         swiglu_bwd<<<blocks_for(size_t(N) * F), kBlock>>>(dinp, dout, inp, N, F);
         LAUNCH_CHECK();
     }
 
     void quantize_weights() {
+        Region r(*this, "ternary weights");
         if (n_seg > 0) {
             partial_sums<<<dim3(kPartials, n_seg), kBlock>>>(seg_partial.p, params.p, seg_off.p, seg_len.p, true);
             LAUNCH_CHECK();
@@ -974,6 +1049,7 @@ struct GpuTrainer::Impl {
         auto& a = acts[l];
         const auto& o = layer[l];
         const int C = cfg.d_model, E = cfg.n_experts, K = cfg.top_k, Fe = cfg.ehidden(), NK = N * K;
+        std::optional<Region> routing(std::in_place, *this, "moe routing");
         linear_forward(a.rlogits.p, a.ln2.p, P(o.router), N, C, E);
         counts.zero(E);
         moe_route<<<blocks_for(N), kBlock>>>(a.sel.p, a.gate.p, counts.p, a.rlogits.p,
@@ -990,6 +1066,7 @@ struct GpuTrainer::Impl {
         LAUNCH_CHECK();
         moe_gather<<<blocks_for(size_t(NK) * C), kBlock>>>(a.xg.p, a.ln2.p, a.order.p, NK, C, K);
         LAUNCH_CHECK();
+        routing.reset();
         const size_t efc_per = size_t(2) * Fe * C, eproj_per = size_t(C) * Fe;
         for (int e = 0; e < E; ++e) {
             const int r0 = a.expert_start[e], n = a.expert_start[e + 1] - r0;
@@ -998,6 +1075,7 @@ struct GpuTrainer::Impl {
             swiglu_forward(a.esw.p + size_t(r0) * Fe, a.efc.p + size_t(r0) * 2 * Fe, n, Fe);
             proj_forward(a.ey.p + size_t(r0) * C, a.esw.p + size_t(r0) * Fe, o.eproj + e * eproj_per, n, Fe, C);
         }
+        Region combine(*this, "moe routing");
         moe_combine<<<blocks_for(size_t(N) * C), kBlock>>>(out, a.ey.p, a.gate.p, a.row_of.p, N, C, K);
         LAUNCH_CHECK();
     }
@@ -1006,9 +1084,12 @@ struct GpuTrainer::Impl {
         auto& a = acts[l];
         const auto& o = layer[l];
         const int C = cfg.d_model, E = cfg.n_experts, K = cfg.top_k, Fe = cfg.ehidden(), NK = N * K;
-        moe_bwd_combine<<<blocks_for(NK, kRowsPerBlock), kBlock>>>(dey.p, dgate.p, dout, a.ey.p, a.gate.p,
-                                                                  a.row_of.p, NK, C, K);
-        LAUNCH_CHECK();
+        {
+            Region r(*this, "moe routing");
+            moe_bwd_combine<<<blocks_for(NK, kRowsPerBlock), kBlock>>>(dey.p, dgate.p, dout, a.ey.p, a.gate.p,
+                                                                      a.row_of.p, NK, C, K);
+            LAUNCH_CHECK();
+        }
         dxg.zero(size_t(NK) * C);
         const size_t efc_per = size_t(2) * Fe * C, eproj_per = size_t(C) * Fe;
         for (int e = 0; e < E; ++e) {
@@ -1020,6 +1101,7 @@ struct GpuTrainer::Impl {
             swiglu_backward(dfc.p, dsw.p, a.efc.p + size_t(r0) * 2 * Fe, n, Fe);
             proj_backward(dxg.p + size_t(r0) * C, dfc.p, a.xg.p + size_t(r0) * C, o.efc + e * efc_per, n, C, 2 * Fe);
         }
+        Region r(*this, "moe routing");
         moe_scatter<<<blocks_for(size_t(N) * C), kBlock>>>(dx, dxg.p, a.row_of.p, N, C, K);
         LAUNCH_CHECK();
         drl.zero(size_t(N) * E);
@@ -1057,9 +1139,12 @@ struct GpuTrainer::Impl {
             x = a.resid2.p;
         }
         rmsnorm_forward(lnf_out.p, rstdf.p, x, P(lnf), N, C);
-        linear_forward(logits.p, lnf_out.p, P(wte), N, C, V);  // tied head
-        xent_fwd<<<N, kBlock>>>(logits.p, losses.p, targets.p, V);
-        LAUNCH_CHECK();
+        {
+            Region r(*this, "output layer and loss");
+            linear_forward(logits.p, lnf_out.p, P(wte), N, C, V);  // tied head
+            xent_fwd<<<N, kBlock>>>(logits.p, losses.p, targets.p, V);
+            LAUNCH_CHECK();
+        }
         to_host(losses_h.data(), losses.p, N);
         has_targets = true;
         n_valid = 0;
@@ -1073,12 +1158,15 @@ struct GpuTrainer::Impl {
         CHECK(has_targets, "backward() needs a forward() first");
         const int B = B_cur, Tn = T_cur, N = B * Tn, C = cfg.d_model, V = cfg.vocab;
         if (n_valid == 0) return;
-        xent_bwd<<<blocks_for(size_t(N) * V), kBlock>>>(logits.p, targets.p, N, V, float(loss_scale / n_valid));
-        LAUNCH_CHECK();
         const float* dlogits = logits.p;
         const float* xL = acts.back().resid2.p;
         dC.zero(size_t(N) * C);
-        linear_backward(dC.p, G(wte), dlogits, lnf_out.p, P(wte), N, C, V);
+        {
+            Region r(*this, "output layer and loss");
+            xent_bwd<<<blocks_for(size_t(N) * V), kBlock>>>(logits.p, targets.p, N, V, float(loss_scale / n_valid));
+            LAUNCH_CHECK();
+            linear_backward(dC.p, G(wte), dlogits, lnf_out.p, P(wte), N, C, V);
+        }
         dresid.zero(size_t(N) * C);
         rmsnorm_backward(dresid.p, G(lnf), dC.p, xL, P(lnf), rstdf.p, N, C);
         for (int l = cfg.n_layers - 1; l >= 0; --l) {
@@ -1102,8 +1190,10 @@ struct GpuTrainer::Impl {
     }
 
     double grad_norm() {
+        std::optional<Region> r(std::in_place, *this, "gradient norm");
         partial_sums<<<dim3(kPartials, 1), kBlock>>>(norm_partial.p, grads.p, all_off.p, all_len.p, false);
         LAUNCH_CHECK();
+        r.reset();
         double part[kPartials];
         to_host(part, norm_partial.p, kPartials);
         double s = 0.0;
@@ -1123,6 +1213,7 @@ struct GpuTrainer::Impl {
                 continue;
             }
             const int grid = std::min(blocks_for(info.size), 4096);
+            Region r(*this, "adamw");
             adamw<<<grid, kBlock>>>(params.p + info.offset, grads.p + info.offset, m.p + info.offset,
                                     v.p + v_at[i], info.size, float(lr), float(beta1), float(beta2), c1, c2,
                                     float(eps), wd, float(grad_scale));
@@ -1179,6 +1270,7 @@ struct GpuTrainer::Impl {
     // AdamW::muon_update for one tensor, all its blocks batched through
     // cuBLAS; newton_schulz (train.h) step for step.
     void muon_step(const ParamInfo& info, float lr, float wd, float gscale) {
+        Region r(*this, "muon");
         const MuonShape sh = muon_shape(info);
         const int mr = sh.mrows(), nc = sh.ncols(), batch = sh.batch;
         const long long mn = (long long)mr * nc, mm = (long long)mr * mr;
@@ -1203,8 +1295,8 @@ struct GpuTrainer::Impl {
     }
 };
 
-GpuTrainer::GpuTrainer(const Config& cfg, const std::vector<ParamInfo>& infos, bool tf32, bool fused_attention)
-    : impl_(std::make_unique<Impl>(cfg, infos, tf32, fused_attention)) {}
+GpuTrainer::GpuTrainer(const Config& cfg, const std::vector<ParamInfo>& infos, Matmul matmul, bool fused_attention)
+    : impl_(std::make_unique<Impl>(cfg, infos, matmul, fused_attention)) {}
 
 GpuTrainer::~GpuTrainer() = default;
 
@@ -1267,6 +1359,9 @@ std::vector<std::vector<double>> GpuTrainer::take_expert_load() {
 
 size_t GpuTrainer::num_params() const { return impl_->n_params; }
 size_t GpuTrainer::device_bytes() const { return g_device_bytes; }
+
+void GpuTrainer::set_profile(bool on) { impl_->profiling = on; }
+std::vector<std::pair<std::string, double>> GpuTrainer::take_profile() { return impl_->take_profile(); }
 
 std::string GpuTrainer::device_name() {
     int dev = 0;

@@ -4,7 +4,8 @@
 # then the scripts/night.sh command for each size that fits.
 #   scripts/probe.sh [steps]          (default 20; needs cxxgpt-gpu: make gpu)
 # The defaults match scripts/night.sh: BATCH=8 SEQ=512 ACCUM=16 VOCAB=16384,
-# OPT=--muon ("" for AdamW). Other sizes:
+# OPT=--muon ("" for AdamW), GPU=--gpu (add GPU options to it, e.g.
+# GPU="--gpu --matmul bf16"; the night.sh commands carry them). Other sizes:
 # SIZES="name:--dim 640 --layers 10 --heads 10;...".
 # The tokens are synthetic (the reasoning curriculum); speed does not depend
 # on what they say, only on the vocabulary size, which VOCAB sets.
@@ -66,6 +67,7 @@ while IFS= read -r line; do
     extra=
     [ "$SEQ" = 512 ] || extra+=" SEQ=$SEQ"
     [ "$OPT" = --muon ] || extra+=" OPT=\"$OPT\""
+    [ "$GPU" = --gpu ] || extra+=" GPU=\"$GPU\""
     cmds+=("$name:"$'\n'"  TOKS=$toks BATCH=$b ACCUM=$a$extra MODEL=\"$args\" scripts/night.sh")
   elif grep -qiE "out of memory|ALLOC_FAILED" "$tmp/log"; then
     printf "%-20s does not fit, even at batch 1 x %d\n" "$name" "$SEQ"
