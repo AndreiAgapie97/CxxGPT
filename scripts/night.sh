@@ -31,8 +31,8 @@ cd "$(dirname "$0")/.."
 DATA=${DATA:-data}
 RUN=${RUN:-night1}
 case "${DEV:-0}" in
-  0) validation=test ;;
-  1) validation=dev ;;
+  0) validation="test" ;;
+  1) validation="dev" ;;
   *) echo "DEV must be 0 or 1"; exit 1 ;;
 esac
 # Keep night1's seed/order unchanged. Later INIT nights get another order;
