@@ -82,6 +82,38 @@ inline std::vector<Rational> solve(const std::vector<WordNode>& plan) {
     return results;
 }
 
+// Solve the new stories a second way, directly from their independent
+// quantities. This catches a wrong plan as well as wrong plan arithmetic.
+inline Rational solve_shape(WordProblem::Shape shape, const std::array<int64_t, 4>& inputs,
+                            const std::vector<int64_t>& additions, bool three_people, bool percentage) {
+    const Rational a(inputs[0], 100), b(inputs[1], 100), c(inputs[2], 100), d(inputs[3], 100);
+    Rational first = shape == WordProblem::part && !percentage ? apply('/', a, b) : apply('*', a, b);
+    if (percentage) first = apply('/', first, Rational(100));
+    for (int64_t added : additions) first = apply('+', first, Rational(added, 100));
+    if (shape == WordProblem::comparison) return apply('-', first, c);
+    if (shape == WordProblem::change) return apply('-', c, first);
+    CHECK(shape == WordProblem::total || shape == WordProblem::rate || shape == WordProblem::part,
+          "unexpected story shape");
+    Rational result = apply('+', first, c);
+    return three_people ? apply('+', result, d) : result;
+}
+
+inline void check_money(const std::string& question) {
+    // Check both dollar signs and amounts spelled as "7.50 dollars".
+    for (size_t at = 0; at < question.size(); ++at) {
+        if (question[at] < '0' || question[at] > '9') continue;
+        const size_t begin = at;
+        while (at < question.size() && ((question[at] >= '0' && question[at] <= '9') ||
+               (question[at] == '.' && at + 1 < question.size() && question[at + 1] >= '0' && question[at + 1] <= '9'))) ++at;
+        const std::string value = question.substr(begin, at - begin);
+        if ((begin && question[begin - 1] == '$') || question.substr(at, 8) == " dollars") {
+            const size_t dot = value.find('.');
+            EXPECT(dot == std::string::npos || value.size() - dot - 1 == 2,
+                   "money must have zero or two decimals: %s", question.c_str());
+        }
+    }
+}
+
 inline void check_solution(const WordProblem& generated, bool notes) {
     const auto reference = solve(generated.plan);
     const auto& p = generated.problem;
@@ -89,6 +121,16 @@ inline void check_solution(const WordProblem& generated, bool notes) {
     for (size_t i = 0; i < reference.size(); ++i)
         EXPECT((reference[i] == Rational(generated.values[i], 100)), "plan node %zu has a wrong value", i);
     EXPECT(decimal(p.answer) == reference.back(), "answer disagrees with independently solved plan");
+    if (generated.shape != WordProblem::chain)
+        EXPECT(decimal(p.answer) == solve_shape(generated.shape, generated.inputs, generated.additions,
+                                               generated.three_people, generated.percentage),
+               "answer disagrees with independently solved story shape");
+    check_money(p.question);
+    if (generated.distractor_number) {
+        const Rational distractor(generated.distractor_number, 100);
+        for (const auto& value : reference)
+            EXPECT(!(value == distractor), "distractor number used in solution arithmetic");
+    }
     EXPECT(extract_answer(p.completion()) == p.answer, "not a GSM8K completion");
     std::istringstream lines(p.steps);
     std::string line;
@@ -97,9 +139,11 @@ inline void check_solution(const WordProblem& generated, bool notes) {
     while (std::getline(lines, line)) {
         while (node < generated.plan.size() && !generated.plan[node].op) ++node;
         CHECK(node < reference.size(), "extra solution step");
-        const size_t colon = line.find(": "), eq = line.find(" = ");
-        CHECK(colon != std::string::npos && eq != std::string::npos && line.back() == '.', "bad solution line");
-        const std::string expr = line.substr(colon + 2, eq - colon - 2);
+        const size_t eq = line.find(" = ");
+        CHECK(eq != std::string::npos && line.back() == '.', "bad solution line");
+        size_t begin = eq;
+        while (begin && std::string("0123456789.+-*/").find(line[begin - 1]) != std::string::npos) --begin;
+        const std::string expr = line.substr(begin, eq - begin);
         const size_t op = expr.find_first_of("+-*/");
         CHECK(op != std::string::npos, "missing solution operator");
         const WordNode& plan = generated.plan[node];
@@ -116,9 +160,9 @@ inline void check_solution(const WordProblem& generated, bool notes) {
             EXPECT(note == result && note == decimal(tail.substr(equals + 1, end - equals - 1)),
                    "calculator note has a wrong expression/result");
             tail = tail.substr(end + 2);
-            EXPECT(note == decimal(tail), "calculator note differs from the number following it");
         } else EXPECT(tail.find("<<") == std::string::npos, "notes present while disabled");
-        EXPECT(decimal(tail) == reference[node], "written step result is wrong");
+        const size_t result_end = tail.find_first_not_of("0123456789.");
+        EXPECT(decimal(tail.substr(0, result_end)) == reference[node], "written step result is wrong");
         ++node;
         ++operations;
     }
@@ -153,8 +197,11 @@ inline void arithmetic() {
     int64_t unused = 0;
     EXPECT(!word_detail::calculate('?', 100, 200, false, unused), "unknown operation accepted");
     // Exercise every possible fractional suffix, including trailing zeroes.
-    for (int64_t value = 0; value <= 10000; ++value)
+    for (int64_t value = 0; value <= 10000; ++value) {
         EXPECT((decimal(word_detail::number(value)) == Rational(value, 100)), "bad decimal spelling");
+        EXPECT((decimal(word_detail::money(value)) == Rational(value, 100)), "money formatting changed value");
+        check_money("An item costs $" + word_detail::money(value) + " each.");
+    }
 }
 
 }  // namespace word_check
@@ -163,6 +210,12 @@ inline void test_wordgen() {
     word_check::arithmetic();
     std::set<std::string> train_questions, test_questions;
     std::set<int> train_patterns, test_patterns;
+    std::array<std::set<int>, WordProblem::shape_count> shape_patterns[2];
+    std::set<int> seen_distractors, distractor_positions;
+    std::set<int> shapes_by_length;
+    std::set<std::string> rate_units;
+    bool saw_two_people = false, saw_three_people = false, saw_fraction = false, saw_percentage = false;
+    int inline_steps = 0, converted_stories = 0;
     int checked = 0;
     for (bool test : {false, true}) for (int steps = 2; steps <= 8; ++steps) {
         Rng rng(123 + uint64_t(steps));  // deliberately the same seeds for both splits
@@ -170,21 +223,57 @@ inline void test_wordgen() {
         for (int i = 0; i < 600; ++i) {
             const auto p = make_word_problem(rng, options);
             word_check::check_solution(p, true);
+            shapes_by_length.insert((int(test) * 7 + steps - 2) * WordProblem::shape_count + p.shape);
+            if (p.shape == WordProblem::total) (p.three_people ? saw_three_people : saw_two_people) = true;
+            if (p.shape == WordProblem::part) (p.percentage ? saw_percentage : saw_fraction) = true;
+            if (p.shape == WordProblem::rate) for (const std::string unit : {"hour", "day", "week"})
+                if (p.problem.question.find(unit) != std::string::npos) rate_units.insert(unit);
+            if (p.problem.steps.find(" as the result.") != std::string::npos) ++inline_steps;
+            seen_distractors.insert(p.distractor);
+            distractor_positions.insert(p.distractor_position);
+            EXPECT((p.distractor >= 12) == test, "distractor wording leaked across splits");
+            size_t ml = 0;
+            while ((ml = p.problem.question.find(" milliliters", ml)) != std::string::npos) {
+                size_t begin = ml;
+                while (begin && std::string("0123456789.").find(p.problem.question[begin - 1]) != std::string::npos) --begin;
+                if (begin != ml) {
+                    const auto amount = word_check::decimal(p.problem.question.substr(begin, ml - begin));
+                    EXPECT(amount.n >= 1000 * amount.d && amount.n <= 24750 * amount.d &&
+                           amount.n % (250 * amount.d) == 0, "follow-up milliliters were not scaled from liters");
+                    ++converted_stories;
+                }
+                ++ml;
+            }
             EXPECT(p.problem.difficulty == steps, "requested step count was not honored");
             (test ? test_questions : train_questions).insert(p.problem.question);
             for (int id : p.patterns) {
                 EXPECT((id % 6 >= 4) == test, "pattern %d leaked across splits", id);
                 (test ? test_patterns : train_patterns).insert(id);
+                shape_patterns[test][p.shape].insert(id);
             }
             ++checked;
         }
     }
-    EXPECT(train_patterns.size() == 48 && test_patterns.size() == 24, "not all 72 sentence patterns exercised");
+    EXPECT(train_patterns.size() == word_detail::family_count * 4 &&
+           test_patterns.size() == word_detail::family_count * 2, "not all sentence patterns exercised");
+    EXPECT(seen_distractors.size() == 24 && distractor_positions.count(0) && distractor_positions.count(1) &&
+           distractor_positions.count(3), "distractor variety/placement missing");
+    EXPECT(shapes_by_length.size() == 2 * 7 * WordProblem::shape_count, "a shape is missing at a requested length/split");
+    EXPECT(saw_two_people && saw_three_people && saw_fraction && saw_percentage && rate_units.size() == 3,
+           "missing a story subtype or time unit");
+    EXPECT(inline_steps > 0 && converted_stories > 0, "inline wording or converted units not exercised");
+    for (int shape = 0; shape < WordProblem::shape_count; ++shape) {
+        EXPECT(!shape_patterns[0][shape].empty() && !shape_patterns[1][shape].empty(), "missing story shape");
+        for (int id : shape_patterns[1][shape])
+            EXPECT(!shape_patterns[0][shape].count(id), "held-out pattern leaked for a shape");
+    }
     for (const auto& q : test_questions) EXPECT(!train_questions.count(q), "question leaked across splits");
     for (int id : test_patterns) EXPECT(!train_patterns.count(id), "held-out pattern leaked into training");
     std::set<std::string> pattern_text;
     for (const auto& group : word_detail::patterns) for (const char* pattern : group)
         EXPECT(pattern_text.insert(pattern).second, "duplicate sentence pattern");
+    for (const char* pattern : word_detail::distractors)
+        EXPECT(pattern_text.insert(pattern).second, "duplicate distractor wording");
     for (bool test : {false, true}) {
         Rng noted_rng(7), plain_rng(7), quiet_rng(7);
         for (int i = 0; i < 200; ++i) {
@@ -218,5 +307,6 @@ inline void test_wordgen() {
     std::remove((base + "-b.txt").c_str());
     EXPECT(make_word_problems(1, 0).empty(), "zero count is not empty");
     EXPECT(a[0].question != make_word_problems(32, 1)[0].question, "seed has no effect");
-    std::printf("  %d word problems independently solved; all 72 patterns and calculator notes checked\n", checked);
+    std::printf("  %d word problems independently solved; all %d patterns, six shapes and calculator notes checked\n",
+                checked, word_detail::family_count * 6);
 }
