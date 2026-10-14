@@ -5,6 +5,25 @@
 #include "test_util.h"
 
 inline void test_tokenizer() {
+    const std::string adjacent = "abc123def-4.5(6)!7+8=9 000xyz\n";
+    std::string adjacent_corpus;
+    for (int i = 0; i < 100; ++i) adjacent_corpus += adjacent;
+    Tokenizer digits; digits.train(adjacent_corpus, 320);
+    for (int id = 256; id < digits.vocab_size(); ++id)
+        for (char c : digits.token_bytes(id)) EXPECT(c < '0' || c > '9', "adjacent digit entered a BPE merge");
+    const auto adjacent_tokens = digits.encode(adjacent);
+    size_t digit_tokens = 0;
+    for (int id : adjacent_tokens) digit_tokens += id >= '0' && id <= '9';
+    const size_t digit_bytes = std::count_if(adjacent.begin(), adjacent.end(), [](char c) { return c >= '0' && c <= '9'; });
+    EXPECT(digit_tokens == digit_bytes && digits.decode(adjacent_tokens) == adjacent, "adjacent digits are not standalone exact tokens");
+    const std::string a = " alpha beta123!\n", b = " beta alpha456?\n";
+    std::string ab, ba;
+    for (int i = 0; i < 100; ++i) { ab += a+b; ba += b+a; }
+    Tokenizer first, reordered; first.train(ab,320); reordered.train(ba,320);
+    EXPECT(first.num_merges() == reordered.num_merges(), "BPE merge count depends on chunk order");
+    for (int id = 0; id < std::min(first.vocab_size(), reordered.vocab_size()); ++id)
+        EXPECT(first.token_bytes(id) == reordered.token_bytes(id), "BPE vocabulary depends on equal-count chunk order");
+
     // Chunking rules.
     const std::string s = "Hello, world! 123  foo\n\nbar";
     std::vector<std::string> got;
