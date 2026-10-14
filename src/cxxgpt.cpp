@@ -1059,6 +1059,7 @@ int cmd_bench_infer(Args& a) {
 }  // namespace
 
 int main(int argc, char** argv) {
+    std::setvbuf(stdout, nullptr, _IOLBF, 0);  // startup/eval/save lines reach tee immediately
     struct Command {
         const char* name;
         int (*run)(Args&);

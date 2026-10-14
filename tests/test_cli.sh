@@ -57,6 +57,20 @@ status=0
 grep -q 'one-logit softmax has zero task gradient' "$TEST_DIR/top1.log"
 
 "$CXXGPT_TRAINING_CLI" generate "$TEST_DIR"
+"$CXXGPT" train "${COMMON[@]}" --steps 10000000 --log-every 10000000 --eval-every 0 --save-every 1 \
+    --out "$TEST_DIR/buffer.ckpt" > "$TEST_DIR/buffer.log" 2>&1 &
+trainer=$!
+for ((poll=0; poll<1000; ++poll)); do
+    [[ -f "$TEST_DIR/buffer.ckpt" ]] && break
+    if ! kill -0 "$trainer" 2>/dev/null; then wait "$trainer"; exit 1; fi
+    sleep 0.01
+done
+seen_header=0
+if grep -q '^params:' "$TEST_DIR/buffer.log"; then seen_header=1; fi
+kill -INT "$trainer"
+wait "$trainer"
+[[ "$seen_header" == 1 ]]
+grep -q 'saved .* (interrupted)' "$TEST_DIR/buffer.log"
 status=0
 "$CXXGPT" text2tok --in "$TEST_DIR" --out "$TEST_DIR/read-error.tok" --threads 2 > "$TEST_DIR/read-error.log" 2>&1 || status=$?
 [[ "$status" == 1 ]]
