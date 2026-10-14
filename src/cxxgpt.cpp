@@ -327,10 +327,29 @@ int cmd_gen_reasoning(Args& a) {
 }
 
 // A JSON number as an answer: 18 -> "18", 2.5 -> "2.5".
-std::string format_number(double v) {
-    char buf[32];
-    std::snprintf(buf, sizeof buf, "%.15g", v);
-    return buf;
+std::string format_number(const Json& value) {
+    const std::string& raw = value.str;
+    const bool negative = !raw.empty() && raw[0]=='-';
+    const size_t exponent_at = raw.find_first_of("eE"), begin = negative ? 1 : 0;
+    std::string digits = raw.substr(begin,exponent_at-begin);
+    const auto dot = digits.find('.');
+    long position = long(dot==digits.npos ? digits.size() : dot);
+    if (dot != digits.npos) digits.erase(dot,1);
+    const auto first = digits.find_first_not_of('0');
+    if (first==digits.npos) return "0";
+    position -= long(first); digits.erase(0,first);
+    if (exponent_at!=raw.npos) {
+        const char* start = raw.data()+exponent_at+1;
+        if (*start=='+') ++start;
+        long exponent = 0; const auto result=std::from_chars(start,raw.data()+raw.size(),exponent);
+        CHECK(result.ec==std::errc{}, "numeric answer exponent out of range");
+        position += exponent;
+    }
+    while (digits.size()>1 && digits.back()=='0') digits.pop_back();
+    if (position<=0) digits = "0."+std::string(size_t(-position),'0')+digits;
+    else if (size_t(position)>=digits.size()) digits.append(size_t(position)-digits.size(),'0');
+    else digits.insert(size_t(position),1,'.');
+    return (negative ? "-" : "")+digits;
 }
 
 // Question/answer pairs from a JSON Lines file to a problems file for
@@ -356,10 +375,15 @@ int cmd_prep_qa(Args& a) {
         if (line.find_first_not_of(" \t\r") == std::string::npos) continue;
         Json j;
         std::string err;
-        CHECK(Json::parse(line, j, &err), "%s:%ld: %s", in.c_str(), line_no, err.c_str());
+        if (!Json::parse(line,j,&err)) {
+            std::fprintf(stderr, "%s:%ld: skipped malformed JSON: %s\n", in.c_str(),line_no,err.c_str());
+            ++skipped; continue;
+        }
         const Json *q = j.get(q_key), *ans = j.get(a_key);
-        CHECK(q && ans && q->type == Json::String && ans->type == Json::String,
-              "%s:%ld: missing string fields '%s' and '%s'", in.c_str(), line_no, q_key.c_str(), a_key.c_str());
+        if (!q || !ans || q->type!=Json::String || ans->type!=Json::String) {
+            std::fprintf(stderr, "%s:%ld: skipped missing question/answer string fields\n", in.c_str(),line_no);
+            ++skipped; continue;
+        }
         Problem p;
         p.task = task;
         p.question = trim(q->str);
@@ -373,10 +397,13 @@ int cmd_prep_qa(Args& a) {
             p.answer = strip_digit_commas(trim(ans->str.substr(mark + 5)));
         } else {
             const Json* fin = j.get(final_key);
-            CHECK(fin, "%s:%ld: missing field '%s'", in.c_str(), line_no, final_key.c_str());
+            if (!fin) {
+                std::fprintf(stderr, "%s:%ld: skipped missing final field '%s'\n", in.c_str(),line_no,final_key.c_str());
+                ++skipped; continue;
+            }
             p.steps = trim(ans->str);
             if (fin->type == Json::String) p.answer = strip_digit_commas(trim(fin->str));
-            else if (fin->type == Json::Number) p.answer = format_number(fin->number);
+            else if (fin->type == Json::Number) p.answer = format_number(*fin);
         }
         // One line only: the format ends the answer at the first newline.
         if (p.answer.empty() || p.answer.find('\n') != std::string::npos || p.question.empty()) {

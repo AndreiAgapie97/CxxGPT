@@ -57,6 +57,16 @@ status=0
 grep -q 'one-logit softmax has zero task gradient' "$TEST_DIR/top1.log"
 
 "$CXXGPT_TRAINING_CLI" generate "$TEST_DIR"
+printf '%s\n' '{"question":"q","answer":"work","final":9007199254740993}' 'broken' \
+    '{"question":"q2","answer":"work","final":1.20e3}' \
+    '{"question":"q3","answer":"work","final":1e999}' \
+    '{"question":"q4","answer":"work","final":-0.00120}' \
+    '{"question":"missing answer","final":1}' \
+    '{"question":"missing final","answer":"work"}' > "$TEST_DIR/numeric.jsonl"
+"$CXXGPT" prep-qa --in "$TEST_DIR/numeric.jsonl" --out "$TEST_DIR/numeric" --final-key final > "$TEST_DIR/numeric.log" 2>&1
+grep -q '3 problems (4 without a usable answer skipped)' "$TEST_DIR/numeric.log"
+"$CXXGPT_TRAINING_CLI" numeric-labels "$TEST_DIR/numeric.txt"
+awk -F '\t' 'NR==1 && $5!="9007199254740993" {exit 1} NR==2 && $5!="1200" {exit 1} NR==3 && $5!="-0.0012" {exit 1} END {if(NR!=3)exit 1}' "$TEST_DIR/numeric.txt"
 # Cross the streaming block size without a newline; threaded cuts preserve bytes.
 python3 - "$TEST_DIR/one-line.txt" <<'PYLINE'
 import pathlib,sys

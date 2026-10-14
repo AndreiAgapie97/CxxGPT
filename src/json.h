@@ -1,7 +1,8 @@
 // json.h — a small JSON reader, for dataset files (one object per line).
 //
 // Parses the whole grammar (RFC 8259): objects, arrays, strings with every
-// escape including surrogate pairs (decoded to UTF-8), numbers, true, false,
+// escape including surrogate pairs (decoded to UTF-8), finite-range numbers
+// (with their exact spelling retained), true, false,
 // null. Objects keep their keys in file order. Nesting is limited to 256
 // levels, so hostile input cannot exhaust the stack.
 #pragma once
@@ -72,7 +73,13 @@ private:
                 case 't': out.type = Bool; out.boolean = true; return literal("true");
                 case 'f': out.type = Bool; return literal("false");
                 case 'n': return literal("null");
-                default: out.type = Number; return number(out.number);
+                default: {
+                    const size_t start = i;
+                    out.type = Number;
+                    if (!number(out.number)) return false;
+                    out.str = std::string(s.substr(start,i-start));  // retain exact decimal spelling for numeric labels
+                    return true;
+                }
             }
         }
 
@@ -211,8 +218,8 @@ private:
                 if (i < s.size() && (s[i] == '+' || s[i] == '-')) ++i;
                 if (!digits()) return fail("digits expected in exponent");
             }
-            std::from_chars(s.data() + start, s.data() + i, v);  // locale-independent
-            return true;
+            const auto parsed = std::from_chars(s.data()+start,s.data()+i,v);  // locale-independent
+            return parsed.ec == std::errc{} && parsed.ptr == s.data()+i ? true : fail("number out of range");
         }
     };
 };

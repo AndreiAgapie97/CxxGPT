@@ -6,6 +6,13 @@
 #include "../src/tokenizer.h"
 
 int main(int argc, char** argv) {
+    if (argc == 3 && std::string(argv[1]) == "numeric-labels") {
+        const auto ps=load_problems(argv[2]);
+        EXPECT(ps.size()==3 && ps[0].answer=="9007199254740993" && ps[1].answer=="1200" && ps[2].answer=="-0.0012",
+               "numeric QA labels lost exact decimal spelling");
+        return g_failures ? 1 : 0;
+    }
+
     if (argc == 2 && std::string(argv[1]) == "bad-tokenizer-vocab") {
         Tokenizer tok; tok.train("a a",65537);
         return 2;

@@ -35,6 +35,8 @@ inline void test_json() {
     for (const char* b : bad) EXPECT(!Json::parse(b, j, &err), "invalid JSON accepted: %s", b);
     std::string deep(1000, '[');
     EXPECT(!Json::parse(deep, j, &err), "deep nesting accepted");
+    EXPECT(!Json::parse("1e999",j,&err), "overflowed JSON number was accepted");
+    EXPECT(Json::parse("9007199254740993",j,&err) && j.str=="9007199254740993", "numeric spelling lost integer precision");
 }
 
 inline void test_problem_file() {
