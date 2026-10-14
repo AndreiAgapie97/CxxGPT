@@ -42,7 +42,9 @@ volatile std::sig_atomic_t g_stop = 0;
 void on_signal(int) { g_stop = 1; }
 
 int threads_arg(Args& a) {
-    return a.integer_int("threads", long(std::max(1u, std::thread::hardware_concurrency())));
+    const int threads = a.integer_int("threads", long(std::max(1u, std::thread::hardware_concurrency())));
+    CHECK(threads > 0, "--threads must be positive");
+    return threads;
 }
 
 std::string read_file(const std::string& path) {

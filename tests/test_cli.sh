@@ -29,6 +29,12 @@ for option in dim heads experts shared ffn ehidden topk batch accum log-every ev
     fi
 done
 printf 'CLI: single-window train/validation and twelve invalid configurations passed\n'
+for threads in 0 -1; do
+    status=0
+    "$CXXGPT" text2tok --in "$TEST_DIR/text.txt" --out "$TEST_DIR/thread-bad.tok" --threads "$threads" \
+        > "$TEST_DIR/thread-bad.log" 2>&1 || status=$?
+    [[ "$status" == 1 ]] && grep -q 'threads must be positive' "$TEST_DIR/thread-bad.log"
+done
 for options in '--dim 4294967304' '--steps 9999999999999999999999999' '--lr nan' '--lr inf' '--lr 1e999' '--lr 0.1junk'; do
     status=0
     # Fixed cases; all must fail in parsing before construction/allocation.
