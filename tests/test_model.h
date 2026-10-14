@@ -298,10 +298,44 @@ inline void test_decode_matches_forward() {
     }
 }
 
+// Int8 rows (the engine's full-precision attention): each weight within half
+// a step of the original, and dot_f32_i8 (SIMD) against a double sum.
+inline void test_int8_rows() {
+    Rng rng(41);
+    for (const int cols : {32, 70, 256}) {
+        const int rows = 5;
+        std::vector<float> w(size_t(rows) * cols), x(cols);
+        for (auto& v : w) v = float(rng.normal());
+        for (auto& v : x) v = float(rng.normal());
+        w[3] = 0.0f;
+        std::fill(w.begin() + cols, w.begin() + 2 * cols, 0.0f);  // an all-zero row
+        const Int8Rows m = quantize_rows_int8(w.data(), rows, cols);
+        double worst_w = 0, worst_dot = 0;
+        for (int r = 0; r < rows; ++r) {
+            double exact = 0, mag = 0;
+            for (int c = 0; c < cols; ++c) {
+                const size_t i = size_t(r) * cols + c;
+                const double deq = double(m.scale[size_t(r)]) * m.q[i];
+                if (m.scale[size_t(r)] > 0) worst_w = std::max(worst_w, std::abs(deq - w[i]) / m.scale[size_t(r)]);
+                else EXPECT(m.q[i] == 0, "int8 rows: an all-zero row gave a nonzero weight");
+                exact += double(x[size_t(c)]) * m.q[i];
+                mag += std::abs(double(x[size_t(c)]) * m.q[i]);
+            }
+            const double got = dot_f32_i8(x.data(), &m.q[size_t(r) * cols], cols);
+            if (mag > 0) worst_dot = std::max(worst_dot, std::abs(got - exact) / mag);
+        }
+        EXPECT(worst_w <= 0.5 + 1e-4, "int8 rows (%d columns): a weight is %g steps off", cols, worst_w);
+        EXPECT(worst_dot < 1e-6, "dot_f32_i8 (%d columns) differs from the double sum by %g", cols, worst_dot);
+    }
+}
+
 // A ternary model on the bitplane int8 kernels computes what the training
 // forward pass computes (which fake-quantizes with the same arithmetic).
+// With --fp-attn, attention runs on int8 rows: the reference model then gets
+// the same rounded attention weights.
 inline void test_ternary_engine() {
-    for (int variant = 0; variant < 3; ++variant) {
+    const char* names[] = {"dense", "MoE", "MoE, half NoPE", "MoE, fp attention"};
+    for (int variant = 0; variant < 4; ++variant) {
         Config cfg;
         cfg.vocab = 40;
         cfg.seq_len = 24;
@@ -316,6 +350,7 @@ inline void test_ternary_engine() {
             cfg.expert_hidden = 64;
         }
         if (variant == 2) cfg.nope_every = 2;  // layer 1 without RoPE
+        if (variant == 3) cfg.fp_attention = true;
         Model<float> m(cfg);
         m.init(17);
         // Larger weights than the init, so activations are far from zero
@@ -323,6 +358,7 @@ inline void test_ternary_engine() {
         Rng rng(18);
         for (auto& w : m.params) w = float(rng.normal() * 0.3);
         m.weights_dirty = true;
+        if (cfg.fp_attention) round_attention_int8(m);
         TernaryEngine eng(m);
         std::vector<int> toks(cfg.seq_len);
         for (auto& t : toks) t = int(rng.below(cfg.vocab));
@@ -347,7 +383,7 @@ inline void test_ternary_engine() {
         std::sort(errs.begin(), errs.end());
         const double median = errs[errs.size() / 2];
         EXPECT(median < 1e-5 && worst < 2e-2, "ternary engine vs training forward (%s): median %g, worst %g",
-               variant ? "MoE" : "dense", median, worst);
+               names[variant], median, worst);
         // Bitplanes: 2 bits per ternary weight, versus 32 in training.
         size_t ternary_weights = 0;
         for (const auto& p : m.infos) ternary_weights += p.ternary ? p.size : 0;
@@ -417,6 +453,7 @@ inline void test_generate_length() {
 inline void test_model() {
     test_generate_length();
     test_eval_reasoning();
+    test_int8_rows();
     test_ternary_engine();
     test_decode_matches_forward();
     test_fp_attention();

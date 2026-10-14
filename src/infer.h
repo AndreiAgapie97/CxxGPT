@@ -6,22 +6,70 @@
 // int8 kernels from ternary.h: activations quantized once per projection
 // input, integer dot products, one float multiply per output.
 //
-// The embedding, the output head, norms and the MoE router stay in float,
-// as in training. One sequence at a time, with a KV cache.
+// With --fp-attn, attention was trained in full precision; its weights are
+// stored as int8 rows instead (Int8Rows: one scale per row), and multiply
+// the float input directly. The embedding, the output head, norms and the
+// MoE router stay in float, as in training. One sequence at a time, with a
+// KV cache.
 #pragma once
 
+#include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <limits>
 #include <vector>
 
 #include "model.h"
 #include "ternary.h"
 
+// A full-precision matrix stored as int8 rows: w[r][c] ≈ scale[r] · q[r][c],
+// with scale[r] = max_c |w[r][c]| / 127, so each weight is off by at most
+// half a step (scale[r] / 2). Only the weights are rounded.
+struct Int8Rows {
+    int rows = 0, cols = 0;
+    std::vector<int8_t> q;
+    std::vector<float> scale;
+
+    size_t bytes() const { return q.size() + scale.size() * sizeof(float); }
+};
+
+inline Int8Rows quantize_rows_int8(const float* w, int rows, int cols) {
+    Int8Rows m;
+    m.rows = rows;
+    m.cols = cols;
+    m.q.resize(size_t(rows) * cols);
+    m.scale.resize(size_t(rows));
+    for (int r = 0; r < rows; ++r) {
+        const float* row = w + size_t(r) * cols;
+        float amax = 0.0f;
+        for (int c = 0; c < cols; ++c) amax = std::max(amax, std::fabs(row[c]));
+        const float scale = amax / 127.0f;
+        m.scale[size_t(r)] = scale;
+        for (int c = 0; c < cols; ++c) {
+            const float v = scale > 0.0f ? std::nearbyint(row[c] / scale) : 0.0f;
+            m.q[size_t(r) * cols + c] = int8_t(std::clamp(v, -127.0f, 127.0f));
+        }
+    }
+    return m;
+}
+
+// Rounds a model's attention weights to int8 rows and back, in place: the
+// weights TernaryEngine computes with for --fp-attn models, so the model
+// can be evaluated as the engine would run it.
+inline void round_attention_int8(Model<float>& m) {
+    for (const auto& p : m.infos) {
+        if (!(p.name.ends_with(".wqkv") || p.name.ends_with(".wo"))) continue;
+        float* w = &m.params[p.offset];
+        const Int8Rows q = quantize_rows_int8(w, p.rows, p.cols);
+        for (size_t i = 0; i < p.size; ++i) w[i] = q.scale[i / size_t(p.cols)] * float(q.q[i]);
+    }
+    m.weights_dirty = true;
+}
+
 class TernaryEngine {
 public:
     explicit TernaryEngine(const Model<float>& m) : cfg_(m.cfg), kernel_(default_int8_kernel()) {
         CHECK(cfg_.ternary, "TernaryEngine needs a model trained with --ternary");
-        CHECK(!cfg_.fp_attention, "TernaryEngine runs all-ternary models, not --fp-attn ones (yet)");
         CHECK(cfg_.top_k <= 64, "top_k above 64 is not supported");
         CHECK(cfg_.d_model % 32 == 0, "d_model must be a multiple of 32 for the bitplane kernels");
         CHECK(cfg_.always_hidden() % 32 == 0 && cfg_.ehidden() % 32 == 0,
@@ -43,8 +91,13 @@ public:
             auto& L = layers_[l];
             L.ln1 = copy(tensor(p + "ln1"));
             L.ln2 = copy(tensor(p + "ln2"));
-            L.wqkv = pack(m, tensor(p + "wqkv"), 0);
-            L.wo = pack(m, tensor(p + "wo"), 0);
+            if (cfg_.fp_attention) {
+                L.wqkv8 = int8_rows(m, tensor(p + "wqkv"));
+                L.wo8 = int8_rows(m, tensor(p + "wo"));
+            } else {
+                L.wqkv = pack(m, tensor(p + "wqkv"), 0);
+                L.wo = pack(m, tensor(p + "wo"), 0);
+            }
             if (F > 0) {
                 L.wfc = pack(m, tensor(p + "wfc"), 0);
                 L.wproj = pack(m, tensor(p + "wproj"), 0);
@@ -78,13 +131,14 @@ public:
     void reset() { pos_ = 0; }
     int position() const { return pos_; }
 
-    // Bytes of weight storage: bitplanes for the ternary matrices, float for
-    // the rest.
+    // Bytes of weight storage: bitplanes for the ternary matrices, int8 rows
+    // for full-precision attention, float for the rest.
     size_t weight_bytes() const {
         size_t b = (wte_.size() + lnf_.size()) * 4;
         auto bp = [](const TernaryMatrixBitplane& W) { return (W.pos.size() + W.neg.size()) * 4 + 4; };
         for (const auto& L : layers_) {
-            b += (L.ln1.size() + L.ln2.size() + L.router.size()) * 4 + bp(L.wqkv) + bp(L.wo);
+            b += (L.ln1.size() + L.ln2.size() + L.router.size()) * 4;
+            b += cfg_.fp_attention ? L.wqkv8.bytes() + L.wo8.bytes() : bp(L.wqkv) + bp(L.wo);
             if (F_ > 0) b += bp(L.wfc) + bp(L.wproj);
             for (const auto& W : L.efc) b += bp(W);
             for (const auto& W : L.eproj) b += bp(W);
@@ -102,7 +156,7 @@ public:
         for (int l = 0; l < cfg_.n_layers; ++l) {
             auto& L = layers_[l];
             rmsnorm(h_.data(), x_.data(), L.ln1.data(), C);
-            gemv(L.wqkv, h_.data(), qkv_.data());
+            attn_proj(L.wqkv, L.wqkv8, h_.data(), qkv_.data());
             if (cfg_.rope_layer(l)) rope_apply(qkv_.data(), rope_, 1, 1, C, NH, false, pos_);
             float* kc = kcache_[l].data();
             float* vc = vcache_[l].data();
@@ -125,7 +179,7 @@ public:
                     for (int i = 0; i < HS; ++i) y[i] += w * v[i];
                 }
             }
-            gemv(L.wo, att_.data(), tmp_.data());
+            attn_proj(L.wo, L.wo8, att_.data(), tmp_.data());
             for (int c = 0; c < C; ++c) x_[c] += tmp_[c];
             rmsnorm(h_.data(), x_.data(), L.ln2.data(), C);
             ffn(L, h_.data(), tmp_.data());
@@ -143,6 +197,7 @@ private:
     struct Layer {
         std::vector<float> ln1, ln2, router, bias;
         TernaryMatrixBitplane wqkv{32, 32}, wo{32, 32}, wfc{32, 32}, wproj{32, 32};
+        Int8Rows wqkv8, wo8;  // attention instead of wqkv, wo with --fp-attn
         std::vector<TernaryMatrixBitplane> efc, eproj;
     };
 
@@ -160,6 +215,11 @@ private:
         return W;
     }
 
+    static Int8Rows int8_rows(const Model<float>& m, const ParamInfo& p) {
+        CHECK(p.count == 1, "%s: one matrix expected", p.name.c_str());
+        return quantize_rows_int8(&m.params[p.offset], p.rows, p.cols);
+    }
+
     static void rmsnorm(float* out, const float* x, const float* w, int C) {
         const float r = 1.0f / std::sqrt(dot(x, x, C) / float(C) + float(kRmsEps));
         for (int c = 0; c < C; ++c) out[c] = x[c] * r * w[c];
@@ -169,6 +229,14 @@ private:
     void gemv(const TernaryMatrixBitplane& W, const float* x, float* y) {
         const float s = quantize_int8(x, W.cols, xq_.data());
         pool().parallel_for(W.rows, [&](int r0, int r1) { kernel_.qrows(xq_.data(), s, W, y, r0, r1); });
+    }
+
+    // An attention projection: the bitplanes, or the int8 rows with --fp-attn.
+    void attn_proj(const TernaryMatrixBitplane& T, const Int8Rows& Q, const float* x, float* y) {
+        if (!cfg_.fp_attention) return gemv(T, x, y);
+        pool().parallel_for(Q.rows, [&](int r0, int r1) {
+            for (int r = r0; r < r1; ++r) y[r] = Q.scale[size_t(r)] * dot_f32_i8(x, &Q.q[size_t(r) * Q.cols], Q.cols);
+        });
     }
 
     // FFN for one token: shared/dense part plus routed experts, as two pool

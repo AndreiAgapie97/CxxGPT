@@ -535,6 +535,41 @@ inline float dot_f32(const float* __restrict a, const float* __restrict b, int n
     return s;
 }
 
+// Σ x[i] · w[i] with int8 weights (TernaryEngine's int8 rows), each widened
+// to float on the fly: a quarter of fp32's memory traffic for the weights,
+// and float arithmetic for the rest.
+inline float dot_f32_i8(const float* __restrict x, const int8_t* __restrict w, int n) {
+    int i = 0;
+    float s = 0.0f;
+#if defined(__AVX512F__)
+    constexpr int V = cfg::kAvx512Floats;
+    auto widen = [](const int8_t* p) {
+        return _mm512_cvtepi32_ps(_mm512_cvtepi8_epi32(_mm_loadu_si128(reinterpret_cast<const __m128i*>(p))));
+    };
+    __m512 acc[4] = {_mm512_setzero_ps(), _mm512_setzero_ps(), _mm512_setzero_ps(),
+                     _mm512_setzero_ps()};
+    for (; i + 4 * V <= n; i += 4 * V)
+        for (int j = 0; j < 4; ++j)
+            acc[j] = _mm512_fmadd_ps(_mm512_loadu_ps(x + i + j * V), widen(w + i + j * V), acc[j]);
+    for (; i + V <= n; i += V) acc[0] = _mm512_fmadd_ps(_mm512_loadu_ps(x + i), widen(w + i), acc[0]);
+    s = _mm512_reduce_add_ps(_mm512_add_ps(_mm512_add_ps(acc[0], acc[1]), _mm512_add_ps(acc[2], acc[3])));
+#elif defined(__AVX2__)
+    constexpr int V = cfg::kAvx2Floats;
+    auto widen = [](const int8_t* p) {
+        return _mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(_mm_loadl_epi64(reinterpret_cast<const __m128i*>(p))));
+    };
+    __m256 acc[4] = {_mm256_setzero_ps(), _mm256_setzero_ps(), _mm256_setzero_ps(),
+                     _mm256_setzero_ps()};
+    for (; i + 4 * V <= n; i += 4 * V)
+        for (int j = 0; j < 4; ++j)
+            acc[j] = madd256(_mm256_loadu_ps(x + i + j * V), widen(w + i + j * V), acc[j]);
+    for (; i + V <= n; i += V) acc[0] = madd256(_mm256_loadu_ps(x + i), widen(w + i), acc[0]);
+    s = hsum256(_mm256_add_ps(_mm256_add_ps(acc[0], acc[1]), _mm256_add_ps(acc[2], acc[3])));
+#endif
+    for (; i < n; ++i) s += x[i] * float(w[i]);
+    return s;
+}
+
 // exp(x) per lane, Cephes expf: x = n ln2 + r with |r| <= ln2/2, exp(r) from a
 // degree-6 polynomial, scaled by 2^n. About 1 ulp. Inputs are clamped to
 // [-87, 88.3], where 2^n stays a normal float; SiLU only needs exp(-g) to
