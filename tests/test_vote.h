@@ -125,10 +125,20 @@ inline void test_vote_report() {
            "mul d2 (the missing answer line) must win the vote but not the first try");
     EXPECT(r.failures.size() == 3, "%zu failures shown, but 3 problems lost the vote", r.failures.size());
     if (r.failures.size() == 3) {
-        // Each failure shows a completion that really gave the voted answer.
-        for (const auto& [p, text] : r.failures)
-            EXPECT(normalized_answer(text) == vote_answer({normalized_answer(text)}),
-                   "failure text '%s' does not match its own answer", text.c_str());
+        // The vote-losers, in problem order, with the completion each must
+        // show: the first try that gave the voted answer.
+        const std::vector<std::pair<const char*, const char*>> want = {
+            {"34+50?", "work\n#### 4\n"},    // gold 9, vote 4, first 4 is try 1
+            {"11x2+1", "work\n#### 5\n"},    // gold 12, vote 5, first 5 is try 0
+            {"40-37?", "work\n#### 8\n"},    // gold 3, tie 8/3, first 8 is try 0
+        };
+        for (size_t f = 0; f < r.failures.size(); ++f) {
+            EXPECT(r.failures[f].first.question == want[f].first,
+                   "failure %zu shows problem '%s', expected '%s'", f, r.failures[f].first.question.c_str(),
+                   want[f].first);
+            EXPECT(r.failures[f].second == want[f].second, "failure %zu shows '%s', expected '%s'", f,
+                   r.failures[f].second.c_str(), want[f].second);
+        }
     }
     // Seeded: the same seed replays the same scripts and the same report.
     ScriptedModel again;
