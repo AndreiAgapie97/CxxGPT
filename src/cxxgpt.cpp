@@ -178,6 +178,7 @@ int cmd_text2tok(Args& a) {
             const size_t old = buf.size();
             buf.resize(old + kBlock);
             f.read(buf.data() + old, std::streamsize(kBlock));
+            CHECK(!f.bad() && (!f.fail() || f.eof()), "error reading %s", in.c_str());
             buf.resize(old + size_t(f.gcount()));
             buf.erase(std::remove(buf.begin()+std::ptrdiff_t(old),buf.end(),char(kBos)),buf.end());
             eof = !f;
