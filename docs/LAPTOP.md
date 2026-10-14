@@ -135,6 +135,9 @@ RUN=night2 INIT=runs/night1.ckpt MIX="..." TOKS=... BATCH=... ACCUM=... scripts/
 The model trains in full precision first, and the last night or two
 switch it to ternary, which is what our kernels run: `TERNARY=1` with
 `INIT`, and the ternary row's `TOKS`, `BATCH` and `ACCUM` from the probe.
+`TERNARY=1` keeps attention in full precision (`--fp-attn`; on the
+curriculum ternary attention cost 9.5 points of accuracy, README "Ternary
+FFN, full-precision attention"); `TERNARY=all` makes it ternary too.
 On the curriculum, switching for the last third of training cost half as
 much as training ternary throughout (README, "Full precision first,
 ternary at the end").

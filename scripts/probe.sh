@@ -30,7 +30,7 @@ d512-moe:--dim 512 --layers 8 --heads 8 --experts 8 --topk 2
 d640-moe:--dim 640 --layers 10 --heads 10 --experts 8 --topk 2
 d768-dense:--dim 768 --layers 12 --heads 12
 d768-moe:--dim 768 --layers 12 --heads 12 --experts 8 --topk 2
-d768-moe-ternary:--dim 768 --layers 12 --heads 12 --experts 8 --topk 2 --ternary"
+d768-moe-ternary:--dim 768 --layers 12 --heads 12 --experts 8 --topk 2 --ternary --fp-attn"
 SIZES=${SIZES:-$DEFAULT_SIZES}
 
 tmp=$(mktemp -d)
