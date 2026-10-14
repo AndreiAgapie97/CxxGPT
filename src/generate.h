@@ -64,9 +64,9 @@ std::vector<std::vector<int>> generate(Model<T>& model, const std::vector<std::v
         const T* logits = model.decode_step(cur.data(), pos);
         if (pos < L - 1) continue;
         for (int b = 0; b < B; ++b) {
+            if (finished[b]) continue;  // stopped slots consume no further random draws
             const int t = pick_token(logits + size_t(b) * model.cfg.vocab, model.cfg.vocab, temperature, rng);
             cur[b] = t;
-            if (finished[b]) continue;
             out[b].push_back(t);
             if (done(out[b])) finished[b] = 1, ++n_finished;
         }

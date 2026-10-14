@@ -614,7 +614,21 @@ inline void test_sampling_zero_boundary() {
     EXPECT(pick_token(logits,3,1.0,&rng) == 1, "u=0 selected an underflowed zero-probability token");
 }
 
+inline void test_finished_slot_rng() {
+    Config cfg; cfg.vocab = 3; cfg.seq_len = 8; cfg.d_model = 4; cfg.n_layers = 1; cfg.n_heads = 1;
+    Model<float> m(cfg); m.init(7);
+    // Identical prompts permit distinct stop lengths through a deterministic call counter.
+    int calls = 0; Rng actual(5), expected(5);
+    const auto out = generate(m, {{1},{1}}, 3, [&](const auto& text) {
+        return (++calls == 1) || text.size() == 3;
+    }, 1.0, &actual);
+    EXPECT(out[0].size() == 1 && out[1].size() == 3, "mixed stop fixture did not terminate at distinct lengths");
+    for (int i = 0; i < 4; ++i) expected.uniform();
+    for (int i = 0; i < 4; ++i) EXPECT(actual.state()[i] == expected.state()[i], "finished slot consumed extra randomness");
+}
+
 inline void test_model() {
+    test_finished_slot_rng();
     test_sampling_zero_boundary();
     test_activation_int8_contract();
     test_router_balancing();
