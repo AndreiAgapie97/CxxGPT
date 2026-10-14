@@ -54,9 +54,15 @@ benchmaxxing by selection, with nothing dishonest intended.
    and one try are not the same test.
 
 **The dev set.**
-- About 500 problems taken out of GSM8K train with a fixed seed, kept in a
-  file, and never trained on. `night.sh` uses them for `--val` and
-  `--reason-test`.
+- `scripts/get_data.py gsm8k` holds out exactly 500 GSM8K train problems
+  using Python's local random generator with seed `20261014`. It keeps the
+  upstream file in `data/gsm8k/raw/train.jsonl`, writes the remaining problems
+  to `train.jsonl`, and writes the held-out problems to `dev.jsonl`. Repeating
+  preparation selects the same problems; the official test file is unchanged.
+- `scripts/prepare_data.sh` also writes `gsm8k/dev.txt` and `dev.tok`.
+  `DEV=1 scripts/night.sh` uses those files for both `--val` and
+  `--reason-test`. The default remains `DEV=0`, using the test files so the
+  original night-1 command is unchanged. Use `DEV=1` when choosing settings.
 - MetaMath and OpenMath2 are built from GSM8K train problems, so taking the
   500 out of `gsm8k/train` alone is not enough:
   - MetaMathQA rows carry `original_question`; drop the rows whose original is
@@ -64,9 +70,32 @@ benchmaxxing by selection, with nothing dishonest intended.
   - OpenMath2 rows with `problem_source` `gsm8k` repeat the problem text; drop
     exact matches. Rows from `augmented_gsm8k` are new problems with no link
     back to their source, so a small leak remains. Write it down.
-- `scripts/get_data.py` reads neither `original_question` nor matches problem
-  texts today, so this needs a small change there and in
-  `scripts/prepare_data.sh`, then a fresh data preparation.
+- The downloader now applies both filters after normalizing whitespace and
+  prints the number of excluded rows separately for MetaMathQA and OpenMath2.
+  MetaMath rows without `original_question` stop preparation rather than
+  silently bypassing the filter. Preparing either dataset by itself first
+  creates/loads the same GSM8K dev split.
+- The remaining `augmented_gsm8k` leak is **not removed**: those rows have no
+  original-question link, and exact text matching cannot identify reworded
+  versions of a dev problem. The dev set is therefore not guaranteed free of
+  semantic overlap. The filter deliberately does not discard all augmented
+  problems or try to infer their origins.
+- Rerun `scripts/prepare_data.sh` to replace old, unfiltered math data. It
+  rebuilds question/token pairs when their JSONL source is newer, so an old
+  `train.tok` cannot silently retain the removed problems. No prepared data
+  files are stored in the repository.
+- To audit literal overlap, run
+  `./cxxgpt leak-check data/gsm8k/dev.txt TRAIN.txt...`. The question file may
+  be a `prep-qa` five-column problem file (only its question field is used),
+  or plain text with one question per line. Words are ASCII letters/digits,
+  lowercased; punctuation separates words. A hit requires 13 consecutive
+  words, including across training-file line breaks. Each training file is
+  scanned separately and reports its number of hit questions and up to three
+  examples (1-based question numbers). Repeated matches count once per
+  question. Shorter questions cannot match. This detects literal overlap,
+  not paraphrases. The scanner stores the question index and hit flags, a
+  fixed 64 KiB read buffer, and at most one question-sized word; training-file
+  length and unbroken training tokens cannot make its memory grow.
 - Night 1 trained on all of GSM8K train. A model that continues from night 1
   has seen the dev problems, so the dev set is only clean for a model trained
   from scratch. If we keep night 1's weights, use a separate word-problem set

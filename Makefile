@@ -78,6 +78,7 @@ test: ternary_moe test_engine cxxgpt test_training_cli reasoning_audit reasoning
 	./ternary_moe --tests
 	./test_engine
 	bash tests/test_cli.sh
+	python3 tests/test_get_data.py
 
 bench: ternary_moe
 	./ternary_moe

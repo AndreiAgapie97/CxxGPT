@@ -53,7 +53,9 @@ text() {  # text with <|endoftext|> between documents -> tokens
   mv "$2.part" "$2"
 }
 qa() {  # question/answer JSON Lines -> tokens trained only on the answers
-  if [ -f "$2.tok" ]; then echo "have $2.tok"; return; fi
+  if [ -f "$2.tok" ] && [ -f "$2.txt" ] && [ "$2.tok" -nt "$1" ] && [ "$2.txt" -nt "$1" ]; then
+    echo "have $2.tok"; return
+  fi
   "$CX" prep-qa --in "$1" --out "$2.part" --bpe "$tok" --task "$3"
   mv "$2.part.txt" "$2.txt"
   mv "$2.part.tok" "$2.tok"
@@ -61,6 +63,7 @@ qa() {  # question/answer JSON Lines -> tokens trained only on the answers
 for f in "$DATA"/fineweb-edu/[0-9][0-9][0-9].txt; do text "$f" "${f%.txt}.tok"; done
 text "$DATA/tinystories/train.txt" "$DATA/tinystories/train.tok"
 qa "$DATA/gsm8k/train.jsonl" "$DATA/gsm8k/train" gsm8k
+qa "$DATA/gsm8k/dev.jsonl" "$DATA/gsm8k/dev" gsm8k
 qa "$DATA/gsm8k/test.jsonl" "$DATA/gsm8k/test" gsm8k
 qa "$DATA/openmath2/train_1M.jsonl" "$DATA/openmath2/train" openmath
 qa "$DATA/metamath/train.jsonl" "$DATA/metamath/train" metamath

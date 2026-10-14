@@ -28,6 +28,7 @@ import http.client
 import io
 import json
 import os
+import random
 import sys
 import time
 import urllib.error
@@ -35,6 +36,8 @@ import urllib.request
 
 HF = os.environ.get("HF_ENDPOINT", "https://huggingface.co").rstrip("/")  # or a mirror
 DOC_SEP = "<|endoftext|>"
+DEV_SIZE = 500
+DEV_SEED = 20261014
 
 
 def log(msg):
@@ -267,13 +270,53 @@ def write_docs(docs, dest):
 # Datasets
 # ---------------------------------------------------------------------------
 
+def normalize_question(question):
+    """Match original problem text, ignoring only whitespace differences."""
+    if not isinstance(question, str):
+        sys.exit("dataset question provenance must be text, not null or another type")
+    return " ".join(question.split())
+
+
 def get_gsm8k(out, args):
-    base = "https://raw.githubusercontent.com/openai/grade-school-math/master/grade_school_math/data"
-    for split in ("train", "test"):
-        if args.check:
+    base = os.environ.get("GSM8K_ENDPOINT",
+                          "https://raw.githubusercontent.com/openai/grade-school-math/master/grade_school_math/data")
+    if args.check:
+        for split in ("train", "test"):
             check_text(f"{base}/{split}.jsonl", 4096, '"question"', '"answer"', "####")
-        else:
-            download(f"{base}/{split}.jsonl", os.path.join(out, f"{split}.jsonl"))
+        return
+    # Keep the unmodified upstream file separately: reruns must never split an
+    # already reduced train.jsonl, including when upgrading old preparations.
+    path = download(f"{base}/train.jsonl", os.path.join(out, "raw", "train.jsonl"))
+    with open(path, encoding="utf-8") as f:
+        rows = [json.loads(line) for line in f if line.strip()]
+    questions = [normalize_question(row["question"]) for row in rows]
+    if len(set(questions)) != len(questions) or len(rows) <= DEV_SIZE:
+        sys.exit("GSM8K train must contain more than 500 distinct questions")
+    held_out = set(random.Random(DEV_SEED).sample(range(len(rows)), DEV_SIZE))
+    for split in ("train", "dev"):
+        dest = os.path.join(out, f"{split}.jsonl")
+        text = "".join(json.dumps(row, ensure_ascii=False) + "\n" for i, row in enumerate(rows)
+                       if (i in held_out) == (split == "dev"))
+        # Preserve timestamps on identical reruns so prepared tokens stay valid.
+        if not os.path.exists(dest) or open_text(dest) != text:
+            with open(dest + ".part", "w", encoding="utf-8") as f:
+                f.write(text)
+            os.replace(dest + ".part", dest)
+    log(f"  GSM8K: {len(rows) - DEV_SIZE} train, {DEV_SIZE} dev (seed {DEV_SEED})")
+    download(f"{base}/test.jsonl", os.path.join(out, "test.jsonl"))
+
+
+def open_text(path):
+    with open(path, encoding="utf-8") as f:
+        return f.read()
+
+
+def dev_questions(args):
+    # Standalone MetaMath/OpenMath preparation must apply the same exclusion.
+    out = os.path.join(args.out, "gsm8k")
+    get_gsm8k(out, args)
+    with open(os.path.join(out, "dev.jsonl"), encoding="utf-8") as f:
+        return {normalize_question(json.loads(line)["question"]) for line in f}
 
 
 def get_tinystories(out, args):
@@ -321,31 +364,46 @@ def get_openmath2(out, args):
         log(f"  {len(files)} files for split {args.split}")
         check_parquet(hf_url(repo, files[0]), cols)
         return
+    dev = dev_questions(args)
+    removed = 0
     sources = set(args.sources.split(",")) if args.sources else None
     paths = [hf_download(repo, p, os.path.join(out, "parquet", os.path.basename(p))) for p in files]
 
     def rows():
+        nonlocal removed
         for path in paths:
             for r in parquet_rows(path, cols):
+                if r["problem_source"] == "gsm8k" and normalize_question(r["problem"]) in dev:
+                    removed += 1
+                    continue
                 if sources is None or r["problem_source"] in sources:
                     yield r["problem"], r["generated_solution"], r["expected_answer"]
 
     write_qa(rows(), os.path.join(out, f"{args.split}.jsonl"))
+    log(f"  OpenMath2 dev filter: removed {removed} rows")
 
 
 def get_metamath(out, args):
     # MetaMathQA: GSM8K and MATH training problems, rephrased and augmented;
     # each response ends with "The answer is: X".
     if args.check:
-        check_text(hf_url("meta-math/MetaMathQA", "MetaMathQA-395K.json"), 4096, '"query"', '"response"')
+        check_text(hf_url("meta-math/MetaMathQA", "MetaMathQA-395K.json"), 4096, '"query"', '"response"', '"original_question"')
         return
+    dev = dev_questions(args)
+    removed = 0
     path = hf_download("meta-math/MetaMathQA", "MetaMathQA-395K.json", os.path.join(out, "MetaMathQA-395K.json"))
     with open(path, encoding="utf-8") as f:
         data = json.load(f)
     marker = "The answer is: "
 
     def rows():
+        nonlocal removed
         for r in data:
+            if "original_question" not in r:
+                sys.exit("MetaMathQA row has no original_question; cannot exclude dev problems")
+            if normalize_question(r["original_question"]) in dev:
+                removed += 1
+                continue
             resp = r.get("response", "")
             k = resp.rfind(marker)
             if k < 0:
@@ -353,6 +411,7 @@ def get_metamath(out, args):
             yield r.get("query", ""), resp[:k], resp[k + len(marker):]
 
     write_qa(rows(), os.path.join(out, "train.jsonl"))
+    log(f"  MetaMathQA dev filter: removed {removed} rows")
 
 
 DATASETS = {

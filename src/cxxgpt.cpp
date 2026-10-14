@@ -30,6 +30,7 @@
 #endif
 #include "infer.h"
 #include "json.h"
+#include "leak_check.h"
 #include "model.h"
 #include "reasoning.h"
 #include "wordgen.h"
@@ -88,6 +89,34 @@ void print_config(const Config& c, const Model<float>& m) {
     std::printf("\n");
     std::printf("params: %.3f M total, %.3f M active per token\n", m.num_params() / 1e6,
                 m.active_params() / 1e6);
+}
+
+int cmd_leak_check(int argc, char** argv) {
+    if (argc == 3 && std::string(argv[2]) == "--help") {
+        std::printf("usage: cxxgpt leak-check QUESTIONS.txt TRAIN.txt...\n"
+                    "Questions: prep-qa problem records or one question per line.\n"
+                    "Finds exact runs of 13 ASCII letter/digit words, ignoring case.\n");
+        return 0;
+    }
+    CHECK(argc >= 4, "usage: cxxgpt leak-check QUESTIONS.txt TRAIN.txt...");
+    const leak_check::Index index(leak_check::read_questions(argv[2]));
+    for (int i = 3; i < argc; ++i) {
+        std::ifstream in(argv[i], std::ios::binary);
+        CHECK(in, "cannot open %s", argv[i]);
+        const auto hits = index.scan(in);
+        const size_t count = size_t(std::count(hits.begin(), hits.end(), true));
+        std::printf("%s: %zu / %zu questions share a 13-word run\n", argv[i], count, hits.size());
+        size_t shown = 0;
+        for (size_t q = 0; q < hits.size() && shown < 3; ++q) {
+            if (!hits[q]) continue;
+            std::string example = index.questions[q].substr(0, 240);
+            for (char& ch : example) if (ch == '\n' || ch == '\r' || ch == '\t') ch = ' ';
+            std::printf("  question %zu: %s%s\n", q + 1, example.c_str(),
+                        index.questions[q].size() > 240 ? "..." : "");
+            ++shown;
+        }
+    }
+    return 0;
 }
 
 int cmd_bpe_train(Args& a) {
@@ -1151,6 +1180,7 @@ int main(int argc, char** argv) {
         {"bench-infer", cmd_bench_infer, "times the ternary inference engine against fp32 decoding"},
     };
     const std::string cmd = argc > 1 ? argv[1] : "";
+    if (cmd == "leak-check") return cmd_leak_check(argc, argv);
     Args a(argc, argv, 2);
     for (const Command& c : commands)
         if (cmd == c.name) {
@@ -1159,5 +1189,6 @@ int main(int argc, char** argv) {
         }
     std::printf("usage: cxxgpt <command> [--options]; cxxgpt <command> --help lists its options\n");
     for (const Command& c : commands) std::printf("  %-15s %s\n", c.name, c.what);
+    std::printf("  %-15s %s\n", "leak-check", "finds 13-word question overlaps in training text");
     return cmd.empty() || cmd == "help" || cmd == "--help" ? 0 : 1;
 }
