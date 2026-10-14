@@ -30,6 +30,8 @@ class Tokenizer {
 public:
     Tokenizer() { reset_vocab(); }
 
+    static constexpr size_t kMaxChunkBytes = 65536;  // bound merge work, do not silently split/change BPE
+
     int vocab_size() const { return int(vocab_.size()); }
     size_t num_merges() const { return merges_.size(); }
     const std::string& token_bytes(int id) const { return vocab_[id]; }
@@ -84,7 +86,10 @@ public:
         // Unique chunks with their counts; each as a token sequence.
         std::unordered_map<std::string_view, long> freq;
         const std::string_view tv(text);
-        for_each_chunk(tv, [&](size_t b, size_t e) { ++freq[tv.substr(b, e - b)]; });
+        for_each_chunk(tv, [&](size_t b, size_t e) {
+            CHECK(e-b <= kMaxChunkBytes, "tokenizer chunk exceeds %zu bytes; prepare shorter input chunks", kMaxChunkBytes);
+            ++freq[tv.substr(b, e-b)];
+        });
         std::vector<std::vector<int>> words;
         std::vector<long> counts;
         for (const auto& [w, c] : freq) {
@@ -117,6 +122,7 @@ public:
             if (it == pair_count.end() || it->second != c) continue;  // stale
             if (c < 2) break;  // merging a pair seen once teaches nothing
             const int a = int(p >> 32), b = int(p & 0xFFFFFFFF), id = vocab_size_now();
+            CHECK(vocab_[a].size() <= kMaxChunkBytes-vocab_[b].size(), "tokenizer merge exceeds chunk size limit");
             merges_.push_back({a, b});
             vocab_.push_back(vocab_[a] + vocab_[b]);
             // Rewrite every word containing the pair, updating pair counts.
@@ -164,6 +170,7 @@ public:
         std::vector<int> out;
         for_each_chunk(tv, [&](size_t b, size_t e) {
             const std::string_view w = tv.substr(b, e - b);
+            CHECK(w.size() <= kMaxChunkBytes, "tokenizer chunk exceeds %zu bytes; prepare shorter input chunks", kMaxChunkBytes);
             if (w.size() == 1) return out.push_back(int((unsigned char)w[0]));
             auto it = cache_.find(w);
             if (it == cache_.end()) {
@@ -207,6 +214,7 @@ public:
             int a, b;
             CHECK(std::fscanf(f, "%d %d", &a, &b) == 2, "truncated tokenizer file %s", path.c_str());
             CHECK(a >= 0 && b >= 0 && a < vocab_size_now() && b < vocab_size_now(), "bad merge in %s", path.c_str());
+            CHECK(vocab_[a].size() <= kMaxChunkBytes-vocab_[b].size(), "tokenizer merge exceeds chunk size limit");
             merges_.push_back({a, b});
             vocab_.push_back(vocab_[a] + vocab_[b]);
         }

@@ -47,6 +47,15 @@ status=0
 [[ "$status" == 1 ]] && grep -q 'one-logit softmax has zero task gradient' "$TEST_DIR/top1.log"
 
 "$CXXGPT_TRAINING_CLI" generate "$TEST_DIR"
+python3 - "$TEST_DIR/long.txt" <<'PYLONG'
+import pathlib,sys
+pathlib.Path(sys.argv[1]).write_text('a'*65537)
+PYLONG
+for command in text2tok bpe-train; do
+    status=0
+    "$CXXGPT" "$command" --in "$TEST_DIR/long.txt" --out "$TEST_DIR/chunk-out" > "$TEST_DIR/chunk.log" 2>&1 || status=$?
+    [[ "$status" == 1 ]] && grep -q 'tokenizer chunk exceeds' "$TEST_DIR/chunk.log"
+done
 status=0
 "$CXXGPT_TRAINING_CLI" bad-tokenizer-vocab > "$TEST_DIR/core-vocab.log" 2>&1 || status=$?
 [[ "$status" == 1 ]] && grep -q 'uint16 token ids' "$TEST_DIR/core-vocab.log"
