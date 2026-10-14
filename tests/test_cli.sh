@@ -127,6 +127,16 @@ PYLINE
 "$CXXGPT" text2tok --in "$TEST_DIR/one-line.txt" --out "$TEST_DIR/one-line-one.tok" --threads 1 > "$TEST_DIR/one-line-one.log"
 "$CXXGPT" text2tok --in "$TEST_DIR/one-line.txt" --out "$TEST_DIR/one-line-two.tok" --threads 2 > "$TEST_DIR/one-line-two.log"
 cmp "$TEST_DIR/one-line-one.tok" "$TEST_DIR/one-line-two.tok"
+# A byte tokenizer alone cannot expose a cut through a learned merge.
+"$CXXGPT" bpe-train --in "$TEST_DIR/one-line.txt" --max-bytes 4096 --vocab 300 \
+    --out "$TEST_DIR/stream.bpe" > "$TEST_DIR/stream-bpe.log"
+for threads in 1 2; do
+    "$CXXGPT" text2tok --in "$TEST_DIR/one-line.txt" --bpe "$TEST_DIR/stream.bpe" \
+        --out "$TEST_DIR/stream-$threads.tok" --threads "$threads" > "$TEST_DIR/stream-$threads.log"
+    "$CXXGPT_TRAINING_CLI" bpe-stream-reference "$TEST_DIR/stream.bpe" "$TEST_DIR/one-line.txt" "$TEST_DIR/stream-$threads.tok"
+done
+cmp "$TEST_DIR/stream-1.tok" "$TEST_DIR/stream-2.tok"
+
 python3 - "$TEST_DIR/long.txt" <<'PYLONG'
 import pathlib,sys
 pathlib.Path(sys.argv[1]).write_text('a'*65537)

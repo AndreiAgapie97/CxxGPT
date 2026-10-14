@@ -1,11 +1,27 @@
 // Native fixture generation and checkpoint comparison for the real trainer.
 #include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <set>
 #include "test_accumulation.h"
 #include "../src/reasoning.h"
 #include "../src/tokenizer.h"
 
 int main(int argc, char** argv) {
+    if (argc == 5 && std::string(argv[1]) == "bpe-stream-reference") {
+        Tokenizer tok; tok.load(argv[2]);
+        std::ifstream input(argv[3],std::ios::binary); CHECK(input, "cannot open whole-text reference");
+        const std::string text(std::istreambuf_iterator<char>{input},{});
+        CHECK(!input.bad(), "cannot read whole-text reference");
+        const auto whole = tok.encode(text);
+        const auto streamed = TokenData::load(argv[4]);
+        EXPECT(streamed.vocab==uint32_t(tok.vocab_size()), "streamed BPE vocabulary header differs");
+        EXPECT(tok.num_merges()>0 && whole.size()<text.size()/2, "stream fixture did not exercise learned merges");
+        EXPECT(std::equal(whole.begin(),whole.end(),streamed.tokens.begin(),streamed.tokens.end()),
+               "streamed BPE token ids differ from whole-text encoding");
+        return g_failures ? 1 : 0;
+    }
+
     if (argc == 2 && std::string(argv[1]) == "bad-token-save") {
         TokenData data; data.vocab = 256; data.tokens.assign(10000,1); data.mask.assign(10000,1);
         data.save("/dev/full");
