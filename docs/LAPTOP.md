@@ -30,9 +30,7 @@ and can do everything else from there.
 ### In Ubuntu
 
 5. Check that the GPU is visible: `nvidia-smi` should list the RTX 4070.
-6. Get the code, in the Linux home folder (much faster than `/mnt/c`).
-   `-b main` picks the branch the work is on; without it, git takes the
-   repository's default branch, which may be an older one:
+6. Get the code, in the Linux home folder (much faster than `/mnt/c`):
    ```sh
    git clone -b main https://github.com/AndreiAgapie97/CxxGPT.git ~/CxxGPT
    cd ~/CxxGPT
@@ -135,8 +133,8 @@ RUN=night2 INIT=runs/night1.ckpt MIX="..." TOKS=... BATCH=... ACCUM=... scripts/
 The model trains in full precision first, and the last night or two
 switch it to ternary, which is what our kernels run: `TERNARY=1` with
 `INIT`, and the ternary row's `TOKS`, `BATCH` and `ACCUM` from the probe.
-`TERNARY=1` keeps attention in full precision (`--fp-attn`; on the
-curriculum ternary attention cost 9.5 points of accuracy, README "Ternary
+`TERNARY=1` keeps attention in full precision (`--fp-attn`, the best
+curriculum run so far, though not yet a settled result: README "Ternary
 FFN, full-precision attention"); `TERNARY=all` makes it ternary too.
 On the curriculum, switching for the last third of training cost half as
 much as training ternary throughout (README, "Full precision first,
@@ -147,30 +145,25 @@ RUN=night5 INIT=runs/night4.ckpt TERNARY=1 TOKS=... BATCH=... ACCUM=... scripts/
 CPU-scale experiments and engine work continue on the cloud VM during the
 day.
 
-### Trying the faster GPU code (branch `claude/cpp-ai-model-j4lk16`)
+### GPU options
 
-Two GPU speed changes wait on this branch until the laptop has tested them,
-so `main` stays what the nights run:
-- fused attention (on by default here; `--no-fused-attn` goes back): the
-  attention weights are never stored, which saves about 1.2 GB of GPU
-  memory at the night-1 size and leaves room for a larger batch or model;
+Two GPU speed changes have so far run only on a CPU emulator of the
+kernels, not on a real GPU. `./test_gpu`, which `setup_wsl.sh` runs,
+checks both against the CPU engine:
+- fused attention, on by default: the attention weights are never
+  stored, which saves about 1.2 GB of GPU memory at the night-1 size and
+  leaves room for a larger batch or model. If `test_gpu` fails on it,
+  `--no-fused-attn` goes back to the cuBLAS attention, for the probe and
+  the night alike: `GPU="--gpu --no-fused-attn"` before the command;
 - `--matmul bf16`: matrix products on the tensor cores at twice the TF32
-  rate, with coarser rounding of each input; it is only worth having if
-  the probe shows it faster.
+  rate, with coarser rounding of each input; only worth having if the
+  probe shows it faster: `GPU="--gpu --matmul bf16" scripts/probe.sh`.
 
-Before a night (about 25 minutes), in a second clone so the main one is
-untouched:
+Where a training step spends its GPU time (if it runs out of memory, use
+`--batch 4 --accum 32`):
 ```sh
-git clone -b claude/cpp-ai-model-j4lk16 https://github.com/AndreiAgapie97/CxxGPT.git ~/CxxGPT-fast
-cd ~/CxxGPT-fast && make gpu && ./test_gpu 2>&1 | tee test-gpu.txt   # must end with "all passed"
-GPU="--gpu --no-fused-attn" scripts/probe.sh 2>&1 | tee probe-cublas-attn.txt
-scripts/probe.sh 2>&1 | tee probe-fused.txt
-GPU="--gpu --matmul bf16" scripts/probe.sh 2>&1 | tee probe-bf16.txt
 ./cxxgpt-gpu train --gpu --profile --data data/reason.train.tok --vocab 16384 --seq 512 \
   --batch 8 --accum 16 --steps 10 --warmup 5 --eval-every 0 --save-every 0 --out /tmp/profile.ckpt \
-  --muon --dim 768 --layers 12 --heads 12 --experts 8 --topk 2 2>&1 | tail -25 | tee profile.txt
+  --muon --dim 768 --layers 12 --heads 12 --experts 8 --topk 2 2>&1 | tail -25
 ```
-The last command shows where a training step spends its GPU time (if it
-runs out of memory, use `--batch 4 --accum 32`). Paste the five outputs in
-the morning: if the tests pass and the numbers are better, the branch joins
-`main`, and the profile says what to speed up next.
+(`data/reason.train.tok` is the file the probe made.)

@@ -19,11 +19,11 @@ script that downloads public datasets.
 | part | state |
 |---|---|
 | training engine (CPU) | transformer with RoPE, RMSNorm, SwiGLU, tied embeddings; ternary BitLinear; top-k MoE with shared experts and bias-based load balancing; AdamW and Muon; checkpoints and resume |
-| training engine (GPU) | the same model in CUDA + cuBLAS, op for op; compiled in CI, tested against the CPU on the laptop |
+| training engine (GPU) | the same model in CUDA + cuBLAS, op for op, with fused attention kernels; compiled in CI, tested against the CPU on the laptop |
 | tokenizer | byte-level BPE, trained by our own code; parallel streaming encoder |
 | data | synthetic reasoning curriculum; GSM8K and other public math and text sets (`scripts/get_data.py`) |
 | evaluation | exact-answer accuracy on held-out problems, per task and difficulty |
-| inference | ternary models packed into bitplanes, run on the int8 kernels with a KV cache |
+| inference | ternary models packed into bitplanes, run on the int8 kernels with a KV cache; the output layer and full-precision attention (`--fp-attn`) as int8 rows |
 
 The models trained so far are tiny (3–10 M parameters, CPU only). The
 laptop's GPU is next: see [docs/LAPTOP.md](docs/LAPTOP.md).
@@ -100,6 +100,7 @@ laptop to a night of training.
 | `src/train.h` | AdamW, Muon (Newton–Schulz), clipping, schedule, token data, checkpoints |
 | `src/config.h` | model shape and parameter layout, shared with the GPU code |
 | `src/gpu.cu`, `src/gpu.h` | the CUDA trainer |
+| `src/attention.cuh` | fused attention kernels for the GPU (tested on a CPU emulator, `tests/cuda_emu.h`) |
 | `src/tokenizer.h` | byte-level BPE |
 | `src/reasoning.h` | the reasoning curriculum and its evaluation |
 | `src/ternary.h`, `src/infer.h` | bitplane int8 kernels and the ternary inference engine |
@@ -221,9 +222,8 @@ set (validation losses are on different text, so not comparable):
 - **The ternary MoE gains much less.** Its errors are copying errors: it
   writes the definition of another variable with the same source
   (`f=z+5` where the problem says `f=z-1`). Precise copying is the job of
-  attention, and ternary attention weights may be too coarse for it at
-  this size; to look into, with the switch to ternary at the end or with
-  attention kept in higher precision.
+  attention, but ternary attention is not the cause: the MoE in full
+  precision does as badly ("Ternary FFN, full-precision attention").
 
 ### Full precision first, ternary at the end
 
@@ -251,6 +251,50 @@ These runs do the same after 1700 of 2500 steps: MoE with Muon, the last
 - Restarting the schedule costs something by itself (0.0940 here,
   against 0.0863 for one 2500-step schedule); every night pays that,
   ternary or not.
+
+### Ternary FFN, full-precision attention
+
+`train --ternary --fp-attn` makes only the FFN ternary (the experts, most
+of the weights); the attention projections stay in full precision. Same
+curriculum as the chain section (lookups first), Muon, 2500 steps, one
+run each:
+
+| model | val loss | accuracy | chain | d = 1–3 | d = 4 |
+|---|---:|---:|---:|---:|---:|
+| MoE, ternary FFN, full-precision attention | **0.0786** | **71.9%** | 77.5% | **93.6%** | **6.7%** |
+| MoE, full precision | 0.0897 | 64.2% | 36.2% | 83.8% | 5.4% |
+| MoE, all ternary | 0.0957 | 62.4% | 35.0% | 81.9% | 3.8% |
+| dense, full precision | 0.0788 | 70.0% | **78.8%** | 91.5% | 5.4% |
+
+- **Ternary attention is not what hurts copying:** the MoE in full
+  precision fails chain as badly as the all-ternary one. The difference
+  is when chain "clicks". Its accuracy at steps 500 to 2500 (the checks
+  during training, on 240 of the 960 test problems):
+
+  | model | 500 | 1000 | 1500 | 2000 | 2500 |
+  |---|---:|---:|---:|---:|---:|
+  | MoE, ternary FFN, fp attention | 12.5% | 52.5% | 70.0% | 75.0% | 77.5% |
+  | dense, full precision | 12.5% | 5.0% | 42.5% | 77.5% | 80.0% |
+  | MoE, full precision | 17.5% | 15.0% | 15.0% | 30.0% | 42.5% |
+  | MoE, all ternary | 5.0% | 10.0% | 25.0% | 25.0% | 35.0% |
+
+  The lookup skill appears suddenly, at a different step in each run, and
+  the two weak MoEs are still climbing when training stops. One run per
+  model cannot separate that timing from the model itself; several seeds
+  each can (minutes per run on the laptop GPU, 40 on this VM).
+- **For now attention stays in full precision**, the best run so far:
+  `night.sh` `TERNARY=1` trains `--ternary --fp-attn`, `TERNARY=all`
+  everything ternary. The seed runs decide before the ternary nights.
+- **Training costs the same.** Attention is a small part of the model:
+  at the laptop's night-1 size (d768, 12 layers, 8 experts, top-2), 28 M
+  of 267 M weights, 28 M of the 98 M a token uses.
+- **The inference engine stores these weights as int8 rows**, like the
+  output layer (next sections). That costs no accuracy: evaluated as the
+  engine runs it (`eval-reasoning --as-engine`), 71.7% against 71.9%,
+  and 62.5% against 62.4% for the all-ternary model.
+- **It costs speed and memory at inference:** at the night-1 size, 98 MB
+  of weights instead of 77 MB, and 494 tokens/s instead of 682 (4
+  threads, medians of 3 interleaved rounds).
 
 ### Inference kernels
 
@@ -288,6 +332,22 @@ every active weight from memory for every token, and ternary weights are
 computes in training on 98–100% of positions; the rest are int8 rounding
 flips between near-equal candidates.
 
+**The output layer is stored as int8 rows** (one scale per row; it is
+also the embedding). At a 16k-token vocabulary it was the largest read
+of every step: at the night-1 size (d768, 12 layers, 8 experts, top-2;
+267 M weights, 98 M active), 50 MB in fp32 against about 21 MB for all
+the ternary weights a token uses. In int8 it is 12.6 MB. Same VM, random
+weights, 4 threads, 48 tokens, medians of 3 interleaved rounds:
+
+| output layer | weights | ternary decoding |
+|---|---:|---:|
+| fp32 | 114 MB | 513 tok/s |
+| int8 rows | 77 MB | 682 tok/s |
+
+Accuracy is unchanged ("Ternary FFN, full-precision attention"). The
+table above was measured with the output layer in fp32; at its 256-token
+vocabulary that layer is under 1 MB.
+
 ## How the kernels work
 
 - **Weights: two bitplanes.** Each row is stored as two bitmasks, `pos`
@@ -307,7 +367,11 @@ flips between near-equal candidates.
 - Train on the laptop GPU: language first, then worked math solutions,
   checked on the GSM8K test set ([docs/LAPTOP.md](docs/LAPTOP.md)).
 - Ternary's cost at larger sizes, and how late the switch to ternary
-  can come; whether ternary attention is what hurts copying.
-- Length generalization on the curriculum.
-- Faster GPU training: fused attention, bf16.
+  can come.
+- Several seeds per model on the curriculum (minutes each on the laptop
+  GPU): full-precision attention, and for length generalization layers
+  without RoPE (`--nope-every`) and rewritten expressions
+  (`gen-reasoning --expr-rewrite`).
+- Faster GPU training: fused attention and bf16 are written; the laptop
+  tests them, and `--profile` says what to speed up next.
 - Benchmark the inference engine against bitnet.cpp at equal model size.

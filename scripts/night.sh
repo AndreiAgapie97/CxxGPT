@@ -17,8 +17,8 @@
 #   INIT: a checkpoint to start from (for example runs/night1.ckpt), with a
 #         fresh optimizer and schedule; its model replaces MODEL.
 #   TERNARY=1 (with INIT): turn the checkpoint's FFN weights ternary from
-#         this night on, attention staying full precision (--fp-attn: on the
-#         curriculum, ternary attention cost far more than it saves);
+#         this night on, attention staying full precision (--fp-attn: the
+#         best curriculum run so far, README "Ternary FFN, ...");
 #         TERNARY=all turns attention ternary too. Full-precision nights
 #         first, ternary ones at the end.
 #   MIX: the training files, comma-separated, "*N" repeats one N times;

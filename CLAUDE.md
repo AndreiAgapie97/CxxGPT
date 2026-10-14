@@ -24,16 +24,30 @@ Reasoning is the first capability we go after.
   ternary BitLinear projections, aux-loss-free MoE balancing. AdamW, or
   Muon (`--muon`) for the matrices inside the blocks.
 - `src/ternary.h` and `src/infer.h`: inference on bitplane int8 kernels
-  (AVX2, AVX-512, VNNI). A trained ternary checkpoint runs on them.
+  (AVX2, AVX-512, VNNI). A trained ternary checkpoint runs on them. The
+  embedding/output layer, and attention with `--fp-attn`, are int8 rows
+  (one scale per row); `eval-reasoning --as-engine` rounds a model the
+  same way.
+- `--ternary --fp-attn` (ternary FFN, full-precision attention) gave the
+  best MoE run on the curriculum (71.9%, against 64.2% all full precision
+  and 62.4% all ternary), but chain accuracy "clicks" at a different step
+  in each run, so one run per model does not settle it: repeat with
+  several seeds (fast on the laptop GPU) before the ternary nights. Until
+  then `night.sh` `TERNARY=1` keeps attention full precision (README,
+  "Ternary FFN, full-precision attention").
 - `src/tokenizer.h`: byte-level BPE; digits are never merged.
 - `src/reasoning.h`: a synthetic reasoning curriculum with held-out harder
   test levels (`gen-reasoning --chain-plan`: chain solutions look the
   variables up first, which more than doubles chain accuracy). `cxxgpt
   prep-qa` turns GSM8K-style JSON Lines into the same format.
 - `src/gpu.cu` (interface `src/gpu.h`): the CUDA training backend, the
-  same model op for op, fp32 with cuBLAS (TF32 by default).
-  `tests/test_gpu.cpp` compares it with the CPU engine. Build with
-  `make gpu`, giving `cxxgpt-gpu` (`train --gpu`) and `test_gpu`.
+  same model op for op, fp32 with cuBLAS (TF32 by default; `--matmul
+  bf16`), and fused attention kernels (`src/attention.cuh`, tested on a
+  CPU emulator, `tests/cuda_emu.h`; `--no-fused-attn` goes back to
+  cuBLAS). `--profile` times each part of a step. `tests/test_gpu.cpp`
+  compares it with the CPU engine. Build with `make gpu`, giving
+  `cxxgpt-gpu` (`train --gpu`) and `test_gpu`. The fused attention and
+  bf16 had not yet run on a real GPU when they were merged.
 - `src/cxxgpt.cpp`: the CLI (train, sample, eval, data prep, benchmarks).
 - `scripts/get_data.py`: downloads public datasets (GSM8K, TinyStories,
   FineWeb-Edu, OpenMathInstruct-2, MetaMathQA) into `data/`, as text with
@@ -66,7 +80,8 @@ Reasoning is the first capability we go after.
    - overnight runs on public data (general text plus math and reasoning
      sets): full precision first, then the last nights switched to
      ternary (`night.sh` `INIT=... TERNARY=1`), which on the curriculum
-     cost half as much as ternary throughout.
+     cost half as much as ternary throughout; attention stays full
+     precision (`TERNARY=1` gives `--ternary --fp-attn`).
 3. Inference on our ternary kernels: CPU first, then GPU.
 
 ## Hardware
