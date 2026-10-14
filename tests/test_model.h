@@ -555,7 +555,27 @@ inline void test_router_selection_and_gates() {
     }
 }
 
+inline void test_router_balancing() {
+    Config cfg; cfg.vocab = 11; cfg.seq_len = 4; cfg.d_model = 8; cfg.n_heads = 2;
+    cfg.n_layers = 2; cfg.n_experts = 4; cfg.top_k = 1; cfg.expert_hidden = 6;
+    Model<double> m(cfg);
+    m.expert_load = {{3,1,0,0}, {0,2,1,1}};
+    EXPECT(m.max_load_ratio() == 3, "max_load_ratio is not the busiest layer's normalized load");
+    m.update_router_bias(0.125);
+    // Mean is one: the equal-load expert is unchanged, not increased.
+    EXPECT(m.router_bias[0] == std::vector<double>({-0.125,0,0.125,0.125}) &&
+           m.router_bias[1] == std::vector<double>({0.125,-0.125,0,0}), "balancing bias has wrong sign or tie policy");
+    for (const auto& load : m.expert_load) EXPECT(load == std::vector<double>(4,0), "balance did not reset loads");
+    EXPECT(m.max_load_ratio() == 1, "empty loads do not report neutral balance");
+    const auto bias = m.router_bias;
+    m.expert_load = {{1,1,1,1}, {0,0,0,0}}; m.update_router_bias(0.125);
+    EXPECT(m.router_bias == bias, "balanced or empty loads changed bias");
+    m.expert_load[0] = {4,0,0,0}; m.update_router_bias(0);
+    EXPECT(m.router_bias == bias && m.expert_load[0] == std::vector<double>(4,0), "zero-rate discard changed bias/kept loads");
+}
+
 inline void test_model() {
+    test_router_balancing();
     test_router_selection_and_gates();
     test_decode_baseline_routing_state();
     test_bitlinear_ste();
