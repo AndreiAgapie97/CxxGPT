@@ -336,8 +336,9 @@ inline void test_int8_rows() {
 // The embedding (and, with --fp-attn, attention) runs on int8 rows: the
 // reference model gets the same rounded weights.
 inline void test_ternary_engine() {
-    const char* names[] = {"dense", "MoE", "MoE, half NoPE", "MoE, fp attention"};
-    for (int variant = 0; variant < 4; ++variant) {
+    const char* names[] = {"dense", "MoE", "MoE, half NoPE", "MoE, fp attention",
+                           "MoE, no shared, biased", "MoE, no shared, biased, fp attention"};
+    for (int variant = 0; variant < 6; ++variant) {
         Config cfg;
         cfg.vocab = 40;
         cfg.seq_len = 24;
@@ -352,9 +353,11 @@ inline void test_ternary_engine() {
             cfg.expert_hidden = 64;
         }
         if (variant == 2) cfg.nope_every = 2;  // layer 1 without RoPE
-        if (variant == 3) cfg.fp_attention = true;
+        if (variant == 3 || variant == 5) cfg.fp_attention = true;
+        if (variant >= 4) cfg.n_shared = 0;
         Model<float> m(cfg);
         m.init(17);
+        if (variant >= 4) for (auto& bias : m.router_bias) bias = {0.5f, -0.4f, 0.2f, -0.9f};
         // Larger weights than the init, so activations are far from zero
         // and the comparison is meaningful.
         Rng rng(18);
