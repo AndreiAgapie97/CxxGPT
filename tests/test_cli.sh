@@ -57,6 +57,45 @@ status=0
 grep -q 'one-logit softmax has zero task gradient' "$TEST_DIR/top1.log"
 
 "$CXXGPT_TRAINING_CLI" generate "$TEST_DIR"
+# Read the real CPU backend's interval log against independently sorted router
+# scores. Evaluation every step must not split the two-step logging interval.
+"$CXXGPT" train "${COMMON[@]}" --init "$TEST_DIR/load.ckpt" --steps 3 --accum 2 --lr 0 --bias-rate 0 \
+    --log-every 2 --load-log "$TEST_DIR/load.csv" --out "$TEST_DIR/load-trained.ckpt" > "$TEST_DIR/load.log"
+"$CXXGPT_TRAINING_CLI" load-log "$TEST_DIR/load.ckpt" "$TEST_DIR/data.tok" "$TEST_DIR/load.csv"
+grep -q '^layer 1: expert 3 got 0.0% of tokens$' "$TEST_DIR/load.log"
+"$CXXGPT" train "${COMMON[@]}" --resume --steps 4 --accum 2 --lr 0 --bias-rate 0 --log-every 2 \
+    --load-log "$TEST_DIR/load.csv" --out "$TEST_DIR/load-trained.ckpt" > "$TEST_DIR/load-resume.log"
+[[ $(grep -c '^step,layer,' "$TEST_DIR/load.csv") == 1 ]]
+grep -q '^# resumed at step 3$' "$TEST_DIR/load.csv"
+[[ $(grep -c '^4,' "$TEST_DIR/load.csv") == 2 ]]
+printf 'wrong,header\n' > "$TEST_DIR/load-invalid.csv"
+status=0
+"$CXXGPT" train "${COMMON[@]}" --load-log "$TEST_DIR/load-invalid.csv" > "$TEST_DIR/load-invalid.log" 2>&1 || status=$?
+[[ "$status" == 1 ]]
+grep -q 'expert load log header differs' "$TEST_DIR/load-invalid.log"
+
+# Run the unchanged report script in a disposable runs directory.
+mkdir -p "$TEST_DIR/report/scripts" "$TEST_DIR/report/runs"
+cp scripts/report.sh "$TEST_DIR/report/scripts/report.sh"
+printf 'model: tiny fixture\nstep 40 | loss 1.0 | 100 tok/s\n' > "$TEST_DIR/report/runs/fixture.log"
+cat > "$TEST_DIR/report/runs/fixture.load.csv" <<'CSV'
+step,layer,expert_0,expert_1,max_load_ratio
+10,0,0.5,0.5,1
+10,1,0,1,2
+10,2,0.01,0.99,1.98
+20,0,0.005,0.995,1.99
+20,1,0.2,0.8,1.6
+20,2,0.5,0.5,1
+# resumed at step 20
+40,0,0.4,0.6,1.2
+40,1,0.3,0.7,1.4
+40,2,0.6,0.4,1.2
+CSV
+bash "$TEST_DIR/report/scripts/report.sh" fixture > "$TEST_DIR/report.txt"
+grep -Fq 'layer 0: final shares [0.4000 0.6000]; first under 1%: step 20' "$TEST_DIR/report.txt"
+grep -Fq 'layer 1: final shares [0.3000 0.7000]; first under 1%: step 10' "$TEST_DIR/report.txt"
+grep -Fq 'layer 2: final shares [0.6000 0.4000]; first under 1%: never' "$TEST_DIR/report.txt"
+printf 'CLI: expert load intervals, dead-expert warnings, resume and report passed\n'
 "$CXXGPT" train "${COMMON[@]}" --data "$TEST_DIR/data.tok*3" --val '' --val-frac 0.5 --steps 0 \
     --out "$TEST_DIR/repeated-val.ckpt" > "$TEST_DIR/repeated-val.log" 2>&1
 grep -q 'validation slices repeated data' "$TEST_DIR/repeated-val.log"

@@ -30,6 +30,7 @@
 #endif
 #include "infer.h"
 #include "json.h"
+#include "load_log.h"
 #include "model.h"
 #include "reasoning.h"
 #include "wordgen.h"
@@ -589,7 +590,7 @@ struct Backend {
     virtual double step(double lr, double max_norm) = 0;
     // Updates the router biases from the expert loads since the last call;
     // returns the busiest expert's load ratio (see Model::max_load_ratio).
-    virtual double balance(double rate) = 0;
+    virtual double balance(double rate, ExpertLoadLog* interval = nullptr) = 0;
     // Brings the weights and optimizer state into the host Model and AdamW,
     // for checkpoints and evaluations.
     virtual void sync() = 0;
@@ -611,10 +612,8 @@ struct CpuBackend : Backend {
         if (std::isfinite(norm)) opt.update(model, lr);
         return norm;
     }
-    double balance(double rate) override {
-        const double load = model.max_load_ratio();
-        model.update_router_bias(rate);
-        return load;
+    double balance(double rate, ExpertLoadLog* interval = nullptr) override {
+        return balance_with_load_log(model, rate, interval);
     }
     void sync() override {}
 };
@@ -649,12 +648,11 @@ struct GpuBackend : Backend {
             for (const auto& [name, seconds] : gpu.take_profile()) g_profiler.add(name.c_str(), seconds);
         return norm;
     }
-    double balance(double rate) override {
+    double balance(double rate, ExpertLoadLog* interval = nullptr) override {
         const auto loads = gpu.take_expert_load();
         for (size_t l = 0; l < loads.size(); ++l)
             for (size_t e = 0; e < loads[l].size(); ++e) model.expert_load[l][e] += loads[l][e];
-        const double load = model.max_load_ratio();
-        model.update_router_bias(rate);
+        const double load = balance_with_load_log(model, rate, interval);
         gpu.set_router_bias(model.router_bias);
         return load;
     }
@@ -696,6 +694,7 @@ int cmd_train(Args& a) {
             "start:  --init FILE (FILE's weights and model; new optimizer and schedule; data order from --seed;\n"
             "        with --ternary, the weights turn ternary from here on)\n"
             "output: --out model.ckpt --resume --log FILE.csv --log-every 10\n"
+            "        --load-log FILE.csv (per-layer expert shares; layers/experts start at 0)\n"
             "        --eval-every 200 --eval-batches 20 --save-every 500\n"
             "        --time-limit MINUTES --threads N --profile\n"
             "gpu:    --gpu (train on the GPU; needs cxxgpt-gpu, from make gpu)\n"
@@ -713,6 +712,7 @@ int cmd_train(Args& a) {
     g_pool = &tp;
     const std::string data_path = a.str("data"), val_path = a.str("val");
     const std::string out = a.str("out", "model.ckpt"), log_path = a.str("log"), init = a.str("init");
+    const std::string load_log_path = a.str("load-log");
     CHECK(!data_path.empty(), "--data is required (see cxxgpt train --help)");
     bool repeated_data = false;
     const TokenData data = load_token_list(data_path,&repeated_data);
@@ -834,6 +834,22 @@ int cmd_train(Args& a) {
         if (fresh) std::fprintf(log, "step,loss,val_loss,lr,grad_norm,ms_per_step,load_ratio\n");
         if (resume) std::fprintf(log, "# resumed at step %ld\n", opt.step);
     }
+    ExpertLoadLog load_interval(cfg);
+    FILE* load_log = nullptr;
+    if (!load_log_path.empty()) {
+        const std::string header = ExpertLoadLog::header(cfg.n_experts);
+        const bool fresh = !std::filesystem::exists(load_log_path) || std::filesystem::file_size(load_log_path) == 0;
+        if (!fresh) {
+            std::ifstream previous(load_log_path);
+            std::string first_line;
+            std::getline(previous, first_line);
+            CHECK(first_line == header, "expert load log header differs: use a new --load-log file");
+        }
+        load_log = create_file(load_log_path, "a");
+        CHECK(load_log, "cannot open %s", load_log_path.c_str());
+        if (fresh) std::fprintf(load_log, "%s\n", header.c_str());
+        if (resume) std::fprintf(load_log, "# resumed at step %ld\n", opt.step);
+    }
     std::signal(SIGINT, on_signal);
     std::signal(SIGTERM, on_signal);
 
@@ -901,7 +917,7 @@ int cmd_train(Args& a) {
             continue;  // failed attempts do not advance optimizer or schedule
         }
         bad_steps = 0;
-        const double load = be.balance(bias_rate);
+        const double load = be.balance(bias_rate, &load_interval);
         const double ms = (now_seconds() - t0) * 1e3;
         if (step == first_step && be.device_bytes() > 0)
             std::printf("gpu memory: %.0f MB after the first step\n", double(be.device_bytes()) / (1 << 20));
@@ -931,6 +947,8 @@ int cmd_train(Args& a) {
             loss_acc = ms_acc = 0;
             n_acc = 0;
         }
+        if ((step + 1) % log_every == 0 || last)
+            load_interval.write(step + 1, load_log, stdout);
         if (save_every > 0 && (step + 1) % save_every == 0) {
             be.sync();
             if (save_checkpoint(out, model, opt, data_rng, true)) saved_step = opt.step;
@@ -942,6 +960,10 @@ int cmd_train(Args& a) {
             break;
         }
     }
+    // Also preserve a partial interval when a time limit, signal or failed
+    // attempt stops the run between ordinary logging steps.
+    load_interval.write(opt.step, load_log, stdout);
+    if (load_log) CHECK(std::fclose(load_log) == 0, "cannot close expert load log");
     if (g_profiler.enabled) g_profiler.report(int(step - first_step));
     if (empty_groups) std::printf("skipped %zu empty sampled groups\n", empty_groups);
     if (diverged) {

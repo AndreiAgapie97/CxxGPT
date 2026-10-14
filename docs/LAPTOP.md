@@ -120,7 +120,24 @@ validation loss every 500 steps, exact answers every 2000. Its settings
 Run the same command again to resume after an interruption. The log is
 `runs/night1.log`; in the morning, `scripts/report.sh night1` sums it up on
 one screen (validation loss and exact answers over the night, speed, how
-it ended, and one answer the model got wrong). To ask the model a question
+it ended, and one answer the model got wrong).
+
+For MoE models, `night.sh` also writes `runs/night1.load.csv` (or
+`runs/$RUN.load.csv`): `step,layer,expert_0,...,max_load_ratio`. You can
+request this on any CPU or GPU run with `train --load-log FILE`.
+Layer and expert numbers start at zero. Each row covers the successful
+training steps since the previous row, every `--log-every` steps, plus a
+final partial interval when the run stops. Validation and skipped updates
+do not count. Shares divide each expert's assignments by all assignments
+in that layer, so they sum to one even with top-2 routing. The last column
+is the largest share times the number of experts: 1 means equal use.
+The existing console `load` still describes the last step's worst layer;
+new warning lines name experts below 1% during the logging interval.
+`report.sh` shows each layer's final shares and the first logged step
+with a share below 1%. Resuming appends rows to the same file; use a new
+file for a different run. Dense models have no expert rows.
+
+To ask the model a question
 yourself (`--temp 0`: its most likely answer; `--answer`: stop after the
 `#### answer` line):
 ```sh

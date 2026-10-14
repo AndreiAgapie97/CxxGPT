@@ -30,6 +30,25 @@ awk '
     for (i = 1; i <= k; i++) printf "  %7d  %9s  %s\n", steps[i], val[steps[i]], acc[steps[i]]
     if (last != "") printf "\n  last logged: step %d, training loss %s, %s\n", last, train, speed
   }' "$log"
+load_log=runs/$RUN.load.csv
+if [ -f "$load_log" ]; then
+  awk -F, '
+    $1 ~ /^[0-9]+$/ && $2 ~ /^[0-9]+$/ {
+      layer = $2 + 0
+      shares[layer] = ""
+      for (e = 3; e < NF; e++) {
+        shares[layer] = shares[layer] sprintf("%s%.4f", e == 3 ? "" : " ", $e)
+        if ($e + 0 < 0.01 && !(layer in first)) first[layer] = $1
+      }
+      seen[layer] = 1
+      if (layer > last_layer) last_layer = layer
+    }
+    END {
+      for (layer = 0; layer <= last_layer; layer++) if (layer in seen)
+        printf "  layer %d: final shares [%s]; first under 1%%: %s\n", layer, shares[layer],
+               (layer in first) ? "step " first[layer] : "never"
+    }' "$load_log"
+fi
 echo
 # How it ended (the last start or resume only).
 tail -n 50 "$log" | grep -E "^(time limit reached|stopping: |not saved: |saved |step [0-9]+: loss .* update skipped)" | tail -n 3 | sed 's/^/  /' || true
