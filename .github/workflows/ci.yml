@@ -25,6 +25,19 @@ jobs:
           make test
           ./research_experiment --steps 5 --seeds 1 --threads 2 --continual --rl-steps 5 --out runs/ci-smoke.csv
 
+  windows:
+    name: Windows clang-cl CPU
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake -S . -B build -G "Visual Studio 17 2022" -T ClangCL -A x64
+      - name: Build CPU engine and tests
+        run: cmake --build build --config Release --parallel
+      - name: Test
+        run: ctest --test-dir build -C Release --output-on-failure
+
   # ISA paths the runner may not be able to execute still have to compile.
   compile-only:
     name: compile ${{ matrix.cxx }} -march=${{ matrix.march }}

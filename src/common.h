@@ -35,6 +35,23 @@ inline FILE* create_file(const std::string& path, const char* mode) {
     return std::fopen(path.c_str(), mode);
 }
 
+// Windows' long is 32-bit, even on x64. Use its 64-bit file APIs when
+// skipping optimizer arrays in a checkpoint larger than 2 GB.
+inline int64_t file_tell(FILE* f) {
+#ifdef _WIN32
+    return _ftelli64(f);
+#else
+    return std::ftell(f);
+#endif
+}
+inline int file_seek(FILE* f, int64_t offset, int origin) {
+#ifdef _WIN32
+    return _fseeki64(f, offset, origin);
+#else
+    return std::fseek(f, offset, origin);
+#endif
+}
+
 // Our own RNG, so runs are reproducible across compilers and standard
 // libraries (std::normal_distribution is not). xoshiro256**, seeded with
 // splitmix64.
@@ -100,14 +117,14 @@ public:
     AlignedBuffer() = default;
     AlignedBuffer(const AlignedBuffer&) = delete;
     AlignedBuffer& operator=(const AlignedBuffer&) = delete;
-    ~AlignedBuffer() { std::free(p_); }
+    ~AlignedBuffer() { ::operator delete(p_, std::align_val_t(64)); }
 
     T* get(size_t n) {
         if (n > cap_) {
-            std::free(p_);
             const size_t bytes = (n * sizeof(T) + 63) / 64 * 64;
-            p_ = static_cast<T*>(std::aligned_alloc(64, bytes));
-            if (!p_) throw std::bad_alloc();
+            T* replacement = static_cast<T*>(::operator new(bytes, std::align_val_t(64)));
+            ::operator delete(p_, std::align_val_t(64));
+            p_ = replacement;
             cap_ = n;
         }
         return p_;

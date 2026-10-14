@@ -15,43 +15,43 @@ namespace reasoning_check {
 struct Parser {
     const std::string& s;
     size_t i = 0;
-    long number() {
-        long v = 0;
+    int64_t number() {
+        int64_t v = 0;
         while (i < s.size() && std::isdigit(static_cast<unsigned char>(s[i]))) v = v * 10 + (s[i++] - '0');
         return v;
     }
-    long atom() {
+    int64_t atom() {
         if (s[i] == '(') {
             ++i;
-            const long v = sum();
+            const int64_t v = sum();
             ++i;  // ')'
             return v;
         }
         return number();
     }
-    long product() {
-        long v = atom();
+    int64_t product() {
+        int64_t v = atom();
         while (i < s.size() && s[i] == '*') ++i, v *= atom();
         return v;
     }
-    long sum() {
-        long v = product();
+    int64_t sum() {
+        int64_t v = product();
         while (i < s.size() && (s[i] == '+' || s[i] == '-')) {
             const char op = s[i++];
-            const long r = product();
+            const int64_t r = product();
             v = op == '+' ? v + r : v - r;
         }
         return v;
     }
 };
 
-inline long eval(const std::string& s) {
+inline int64_t eval(const std::string& s) {
     Parser p{s};
     return p.sum();
 }
 
 // "b=a+4; a=3; c=b*k; ...; c?" -> value of c
-inline long solve_chain(const std::string& q) {
+inline int64_t solve_chain(const std::string& q) {
     std::map<char, std::string> defs;
     size_t pos = 0;
     char target = 0;
@@ -63,7 +63,7 @@ inline long solve_chain(const std::string& q) {
         if (end == std::string::npos) break;
         pos = end + 2;
     }
-    std::function<long(char)> value = [&](char v) -> long {
+    std::function<int64_t(char)> value = [&](char v) -> int64_t {
         std::string e;
         for (char ch : defs.at(v)) e += std::islower(static_cast<unsigned char>(ch)) ? std::to_string(value(ch)) : std::string(1, ch);
         return eval(e);
@@ -77,8 +77,8 @@ inline std::string solve(const Problem& p) {
     if (p.task == "add" || p.task == "mul" || p.task == "expr") return std::to_string(eval(q));
     if (p.task == "eq") {  // a*x+b=c or a*x-b=c: try every x
         const size_t eqpos = q.find('=');
-        const long c = std::stol(q.substr(eqpos + 1));
-        for (long x = 0; x < 100000; ++x) {
+        const int64_t c = std::stoll(q.substr(eqpos + 1));
+        for (int64_t x = 0; x < 100000; ++x) {
             const std::string lhs = q.substr(0, eqpos);
             std::string e;
             for (char ch : lhs) e += ch == 'x' ? std::to_string(x) : std::string(1, ch);
@@ -88,7 +88,7 @@ inline std::string solve(const Problem& p) {
     }
     if (p.task == "cmp") {  // max(a,b)
         const size_t comma = q.find(',');
-        return std::to_string(std::max(std::stol(q.substr(4, comma - 4)), std::stol(q.substr(comma + 1))));
+        return std::to_string(std::max(std::stoll(q.substr(4, comma - 4)), std::stoll(q.substr(comma + 1))));
     }
     return "?";
 }
@@ -120,8 +120,8 @@ inline void check_expr_rewrite(const Problem& plain, const Problem& rw) {
                qs[i].c_str(), ps[i].c_str());
         if (colon == std::string::npos) continue;
         const std::string left = qs[i].substr(colon + 2);
-        const long ops = std::count_if(left.begin(), left.end(), [](char c) { return c == '+' || c == '-' || c == '*'; });
-        EXPECT(ops == long(ps.size() - 1 - i) && std::to_string(reasoning_check::eval(left)) == rw.answer,
+        const int64_t ops = std::count_if(left.begin(), left.end(), [](char c) { return c == '+' || c == '-' || c == '*'; });
+        EXPECT(ops == int64_t(ps.size() - 1 - i) && std::to_string(reasoning_check::eval(left)) == rw.answer,
                "expr rewrite of %s: '%s' after step %zu", rw.question.c_str(), left.c_str(), i + 1);
     }
 }
@@ -170,10 +170,10 @@ inline void test_formats() {
 
 inline bool multiplication_steps_correct(const Problem& p) {
     const size_t star = p.question.find('*');
-    const long a = std::stol(p.question.substr(0,star)), b = std::stol(p.question.substr(star+1));
+    const int64_t a = std::stoll(p.question.substr(0,star)), b = std::stoll(p.question.substr(star+1));
     const auto statements = split_steps(p.steps);
-    std::vector<long> multipliers;
-    for (long rest=b, place=1; rest; rest/=10, place*=10)
+    std::vector<int64_t> multipliers;
+    for (int64_t rest=b, place=1; rest; rest/=10, place*=10)
         if (rest%10) multipliers.push_back((rest%10)*place);
     if (statements.size() != multipliers.size() + (multipliers.size()>1)) return false;
     std::string partials;
@@ -181,7 +181,7 @@ inline bool multiplication_steps_correct(const Problem& p) {
         const auto& statement = statements[i];
         const size_t eq = statement.find('=');
         if (eq == statement.npos || eq+1 >= statement.size() || statement.back()=='=' || statement.substr(0,eq) != std::to_string(a)+"*"+std::to_string(multipliers[i])) return false;
-        const long expected = a*multipliers[i];
+        const int64_t expected = a*multipliers[i];
         for (size_t pos=eq+1; pos<statement.size();) {
             const auto end=statement.find('=',pos);
             const auto expression=statement.substr(pos,end-pos);

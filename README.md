@@ -48,6 +48,29 @@ C++20; builds warning-free under g++ and clang++. CI builds with both
 compilers on several `-march` targets, runs every test under the
 sanitizers, and compiles the CUDA backend with nvcc 12.8 and 13.0.
 
+### Native Windows CPU build
+
+Install Visual Studio's C++ tools, LLVM/clang-cl, CMake and Ninja. From an
+**x64 Native Tools Command Prompt for VS**, run:
+
+```bat
+cmake -S . -B build -G Ninja -DCMAKE_CXX_COMPILER=clang-cl -DCMAKE_BUILD_TYPE=Release
+cmake --build build --parallel
+ctest --test-dir build --output-on-failure
+```
+
+This builds `build\cxxgpt.exe`, `build\ternary_moe.exe` and
+`build\test_engine.exe`. The tests run directly on Windows; the shell CLI
+tests stay on Linux. Windows CI uses the same commands. This is a CPU build;
+the CUDA build and laptop training scripts continue to use WSL2.
+
+The Windows binary includes AVX2, AVX-512 and VNNI row kernels, each compiled
+with its own instruction settings. At runtime it checks both the CPU's
+features and Windows' support for saving vector registers, then chooses the
+widest available int8 kernel, using the same preference as Linux. The rest
+of the binary uses baseline x86-64 instructions, so an older CPU can use the
+scalar kernels safely. The Linux Makefile and its `-march` choices are unchanged.
+
 ## Quick start
 
 Train a small model on the reasoning curriculum, then test it on held-out

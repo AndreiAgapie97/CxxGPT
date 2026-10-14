@@ -5,6 +5,13 @@
 #include <cerrno>
 #ifdef _WIN32
 #include <io.h>
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
 #else
 #include <unistd.h>
 #endif
@@ -506,7 +513,14 @@ inline bool save_checkpoint(const std::string& path, const Model<float>& model, 
         return fail("error writing or syncing");
     }
     // Rename is atomic; no directory-fsync/power-loss guarantee is claimed.
-    if (std::rename(tmp.c_str(), path.c_str()) != 0) {
+#ifdef _WIN32
+    // Windows' C rename refuses to replace an existing destination. Keep
+    // the old checkpoint until the new, fully flushed file can replace it.
+    const bool renamed = MoveFileExA(tmp.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING) != 0;
+#else
+    const bool renamed = std::rename(tmp.c_str(), path.c_str()) == 0;
+#endif
+    if (!renamed) {
         std::remove(tmp.c_str());
         return fail("cannot rename");
     }
@@ -553,13 +567,13 @@ inline void load_checkpoint(const std::string& path, Model<float>& model, AdamW*
     } else if (has_opt) {
         // fseek beyond EOF succeeds on regular files. Check the extent before
         // skipping moments, even for dense models with no following biases.
-        const long current = std::ftell(f);
-        CHECK(current >= 0 && n <= uint64_t(std::numeric_limits<long>::max()) / 8,
+        const int64_t current = file_tell(f);
+        CHECK(current >= 0 && n <= uint64_t(std::numeric_limits<int64_t>::max()) / 8,
               "optimizer state exceeds seek range");
-        CHECK(std::fseek(f, 0, SEEK_END) == 0, "cannot seek checkpoint");
-        const long end = std::ftell(f), bytes = long(n * 8);
+        CHECK(file_seek(f, 0, SEEK_END) == 0, "cannot seek checkpoint");
+        const int64_t end = file_tell(f), bytes = int64_t(n * 8);
         CHECK(end >= current && end - current >= bytes, "truncated optimizer state");
-        CHECK(std::fseek(f, current + bytes, SEEK_SET) == 0, "cannot seek optimizer state");
+        CHECK(file_seek(f, current + bytes, SEEK_SET) == 0, "cannot seek optimizer state");
     }
     for (auto& b : model.router_bias)
         CHECK(std::fread(b.data(), 4, b.size(), f) == b.size(), "truncated router bias");

@@ -26,8 +26,8 @@
 template <class T>
 struct MatView {
     const T* p;
-    long rs, cs;
-    T at(long r, long c) const { return p[r * rs + c * cs]; }
+    int64_t rs, cs;
+    T at(int64_t r, int64_t c) const { return p[r * rs + c * cs]; }
 };
 
 namespace gemm_detail {
@@ -77,7 +77,7 @@ constexpr int NC = NR * 128;  // columns of B packed at a time
 
 // C[0:mr, 0:nr] = (overwrite ? 0 : C) + Ap · Bp, where Ap holds kc steps of
 // MR values and Bp holds kc steps of NR values (zero-padded past mr / nr).
-inline void micro_kernel(int kc, const float* Ap, const float* Bp, float* C, long ldc,
+inline void micro_kernel(int kc, const float* Ap, const float* Bp, float* C, int64_t ldc,
                          int mr, int nr, bool overwrite) {
     vf c0[MR], c1[MR];
     for (int i = 0; i < MR; ++i) c0[i] = c1[i] = vzero();
@@ -141,7 +141,7 @@ inline void pack_a(MatView<float> A, int i0, int mc, int p0, int kc, float* Ap) 
 // columns. jr0 and jr1 are multiples of NR, relative to the panel start j0.
 inline void pack_b(MatView<float> B, int p0, int kc, int j0, int nc, int jr0, int jr1, float* Bp) {
     for (int jr = jr0; jr < jr1; jr += NR) {
-        float* bp = Bp + long(jr / NR) * NR * kc;
+        float* bp = Bp + int64_t(jr / NR) * NR * kc;
         const int nr = std::min(NR, nc - jr);
         if (B.rs == 1 && B.cs != 1) {  // columns are contiguous: walk down them
             for (int j = 0; j < NR; ++j) {
@@ -165,7 +165,7 @@ inline void pack_b(MatView<float> B, int p0, int kc, int j0, int nc, int jr0, in
 // columns are both contiguous (Y = X · Wᵀ in decoding): plain dot products,
 // four columns at a time, without packing. Packing B would copy the whole
 // weight matrix on every call to serve a single row of A.
-inline void gemv_rows(int M, int K, MatView<float> A, MatView<float> B, float* C, long ldc,
+inline void gemv_rows(int M, int K, MatView<float> A, MatView<float> B, float* C, int64_t ldc,
                       bool accumulate, int j0, int j1) {
     auto hsum = [](vf v) {
         alignas(64) float t[W];
@@ -175,11 +175,11 @@ inline void gemv_rows(int M, int K, MatView<float> A, MatView<float> B, float* C
         return s;
     };
     for (int i = 0; i < M; ++i) {
-        const float* a = A.p + long(i) * A.rs;
-        float* c = C + long(i) * ldc;
+        const float* a = A.p + int64_t(i) * A.rs;
+        float* c = C + int64_t(i) * ldc;
         int j = j0;
         for (; j + 4 <= j1; j += 4) {
-            const float* b0 = B.p + long(j) * B.cs;
+            const float* b0 = B.p + int64_t(j) * B.cs;
             const float* b1 = b0 + B.cs;
             const float* b2 = b1 + B.cs;
             const float* b3 = b2 + B.cs;
@@ -202,7 +202,7 @@ inline void gemv_rows(int M, int K, MatView<float> A, MatView<float> B, float* C
             for (int q = 0; q < 4; ++q) c[j + q] = accumulate ? c[j + q] + r[q] : r[q];
         }
         for (; j < j1; ++j) {
-            const float* b = B.p + long(j) * B.cs;
+            const float* b = B.p + int64_t(j) * B.cs;
             vf s0 = vzero();
             int k = 0;
             for (; k + W <= K; k += W) s0 = vfma(vload(a + k), vload(b + k), s0);
@@ -218,7 +218,7 @@ inline void gemv_rows(int M, int K, MatView<float> A, MatView<float> B, float* C
 // C[M, N] = (accumulate ? C : 0) + A[M, K] · B[K, N]. C is row-major with
 // row stride ldc and must not overlap A or B. threaded = false runs on the
 // calling thread only, for callers already inside a parallel_for.
-inline void gemm(int M, int N, int K, MatView<float> A, MatView<float> B, float* C, long ldc,
+inline void gemm(int M, int N, int K, MatView<float> A, MatView<float> B, float* C, int64_t ldc,
                  bool accumulate, bool threaded = true) {
     using namespace gemm_detail;
     if (M <= 0 || N <= 0) return;
@@ -257,7 +257,7 @@ inline void gemm(int M, int N, int K, MatView<float> A, MatView<float> B, float*
                     pack_a(A, i0, mc, p0, kc, Ap);
                     for (int jr = 0; jr < nc; jr += NR)
                         for (int ir = 0; ir < mc; ir += MR)
-                            micro_kernel(kc, Ap + long(ir) * kc, Bp + long(jr) * kc,
+                            micro_kernel(kc, Ap + int64_t(ir) * kc, Bp + int64_t(jr) * kc,
                                          C + (i0 + ir) * ldc + j0 + jr, ldc,
                                          std::min(MR, mc - ir), std::min(NR, nc - jr), overwrite);
                 }
@@ -267,7 +267,7 @@ inline void gemm(int M, int N, int K, MatView<float> A, MatView<float> B, float*
 }
 
 // Double precision: the reference the gradient checks run on. Same contract.
-inline void gemm(int M, int N, int K, MatView<double> A, MatView<double> B, double* C, long ldc,
+inline void gemm(int M, int N, int K, MatView<double> A, MatView<double> B, double* C, int64_t ldc,
                  bool accumulate, bool /*threaded*/ = true) {
     for (int i = 0; i < M; ++i)
         for (int j = 0; j < N; ++j) {

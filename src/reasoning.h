@@ -59,11 +59,11 @@ struct Formats {
 namespace reasoning_detail {
 
 // A number with exactly `digits` digits (no leading zero unless 1 digit).
-inline long rand_digits(Rng& rng, int digits) {
+inline int64_t rand_digits(Rng& rng, int digits) {
     if (digits <= 1) return rand_in(rng, 0, 9);
-    long lo = 1;
+    int64_t lo = 1;
     for (int i = 1; i < digits; ++i) lo *= 10;
-    return lo + long(rng.below(uint64_t(9 * lo)));
+    return lo + int64_t(rng.below(uint64_t(9 * lo)));
 }
 
 inline std::string join(const std::vector<std::string>& parts, const std::string& sep) {
@@ -146,9 +146,9 @@ inline Problem chain(Rng& rng, int d, bool plan) {
 
 inline Problem add(Rng& rng, int d) {
     const int digits = d + 1;
-    const long a = rand_digits(rng, digits), b = rand_digits(rng, rand_in(rng, std::max(1, digits - 1), digits));
+    const int64_t a = rand_digits(rng, digits), b = rand_digits(rng, rand_in(rng, std::max(1, digits - 1), digits));
     std::vector<std::string> cols;
-    long x = a, y = b;
+    int64_t x = a, y = b;
     int carry = 0;
     while (x > 0 || y > 0) {
         const int dx = int(x % 10), dy = int(y % 10), s = dx + dy + carry;
@@ -171,21 +171,21 @@ inline Problem mul(Rng& rng, int d) {
     // d=1: 2-digit x 1-digit ... d=5: 3-digit x 3-digit.
     static const int shapes[5][2] = {{2, 1}, {3, 1}, {2, 2}, {3, 2}, {3, 3}};
     const auto& s = shapes[std::clamp(d, 1, 5) - 1];
-    const long a = rand_digits(rng, s[0]);
-    const long b = s[1] == 1 ? rand_in(rng, 2, 9) : rand_digits(rng, s[1]);
+    const int64_t a = rand_digits(rng, s[0]);
+    const int64_t b = s[1] == 1 ? rand_in(rng, 2, 9) : rand_digits(rng, s[1]);
     // a times each nonzero digit of b (at its place value), each product
     // split over a's digits; then the partial products are added.
     std::vector<std::string> steps, partials;
-    long total = 0, place = 1;
-    for (long bb = b; bb > 0; bb /= 10, place *= 10) {
-        const long m = (bb % 10) * place;
+    int64_t total = 0, place = 1;
+    for (int64_t bb = b; bb > 0; bb /= 10, place *= 10) {
+        const int64_t m = (bb % 10) * place;
         if (m == 0) continue;
         std::vector<std::string> terms;
-        long ap = 1;
-        for (long aa = a; aa > 0; aa /= 10, ap *= 10)
+        int64_t ap = 1;
+        for (int64_t aa = a; aa > 0; aa /= 10, ap *= 10)
             if (aa % 10) terms.push_back(std::to_string((aa % 10) * ap * m));
         std::reverse(terms.begin(), terms.end());
-        const long prod = a * m;
+        const int64_t prod = a * m;
         std::string step = std::to_string(a) + "*" + std::to_string(m) + "=";
         if (terms.size() > 1) step += join(terms, "+") + "=";
         steps.push_back(step + std::to_string(prod));
@@ -205,7 +205,7 @@ inline Problem mul(Rng& rng, int d) {
 // A random expression tree with `ops` operators over single digits.
 struct Expr {
     char op = 0;  // 0 = leaf
-    long value = 0;
+    int64_t value = 0;
     int left = -1, right = -1;
 };
 
@@ -220,10 +220,10 @@ inline Problem expr(Rng& rng, int d, bool rewrite) {
         const int left_ops = int(rng.below(uint64_t(n_ops)));
         const int l = build(left_ops), r = build(n_ops - 1 - left_ops);
         char op = "+-*"[rng.below(3)];
-        const long a = nodes[l].value, b = nodes[r].value;
+        const int64_t a = nodes[l].value, b = nodes[r].value;
         if (op == '*' && a * b > 999) op = '+';
         if (op == '-' && a < b) op = '+';
-        const long v = op == '+' ? a + b : op == '-' ? a - b : a * b;
+        const int64_t v = op == '+' ? a + b : op == '-' ? a - b : a * b;
         nodes.push_back({op, v, l, r});
         return int(nodes.size()) - 1;
     };
@@ -278,13 +278,13 @@ inline Problem eq(Rng& rng, int d) {
 
 inline Problem cmp(Rng& rng, int d) {
     const int digits = d + 1;
-    const long a = rand_digits(rng, digits);
+    const int64_t a = rand_digits(rng, digits);
     // Usually share a prefix with a, so the comparison needs several digits.
     std::string bs = std::to_string(a);
     const int keep = int(rng.below(uint64_t(digits)));
     for (int i = keep; i < digits; ++i) bs[i] = char('0' + rng.below(10));
     if (bs[0] == '0' && digits > 1) bs[0] = '1';
-    long b = std::stol(bs);
+    int64_t b = std::stoll(bs);
     if (b == a) b = a + 1;
     const std::string sa = std::to_string(a), sb = std::to_string(b);
     std::vector<std::string> steps;
