@@ -276,8 +276,9 @@ tiny models and runs do not establish a ranking of architectures.
 
 ### Memory and computation
 
-Training-array bytes count master weights, gradients, full-sized quantized
-copies and Adam moments. They exclude activations, caches, routing buffers,
+The historical training-array bytes below count master weights, gradients,
+full-sized quantized copies and Adam moments. The 2026-10-14 memory follow-up
+removes the unused quantized copy for fp32 CPU models. They exclude activations, caches, routing buffers,
 allocator capacity and replay. Inference bytes count the actual packed weight
 arrays and scales plus the unquantized weights; they exclude KV caches and
 work buffers. They are not peak process memory.
@@ -329,8 +330,10 @@ The matrix was repeated with one/two threads at `891f990`, with no concurrent
 build or experiment during measurements. All 1,008 trials and 48 summaries
 are retained in [follow-up/decode](results/2026-10-13/follow-up/decode).
 
-The following rows use two threads and a 128-token prefix. Times are medians
-of 21 trials in milliseconds, with warm code/weights and a reset KV cache.
+The following historical rows use two threads and a 128-token prefix. Times
+are medians of 21 trials in milliseconds, with warm code/weights and a reset
+KV cache. The trained-MoE row is confounded by omitted fp32 router bias; see
+the corrected 2026-10-14 measurements below.
 
 | Scenario | fp32 / packed ms | Observed ratio | fp32 / packed weight bytes | Weight reduction |
 | --- | ---: | ---: | ---: | ---: |
@@ -443,10 +446,73 @@ Compiler, native/CLI, sanitizer and CUDA compile results, hashes, probe records,
 per-seed outcomes and reproduction evidence are retained in
 [results/2026-10-14](results/2026-10-14). GPU runtime validation remains pending.
 
+## CPU memory and capacity follow-up: 2026-10-14
+
+Claude's CLI help, BOS/answer sampling, generation-length correction,
+fp32-to-ternary warm starts and conditional GPU weight-copy allocation through
+`ab1b092` were merged as `f83a87b`. Compatible conflicts retain warmup/raw
+benchmark controls, context defaults and both model test sets. All native,
+compiler and sanitizer checks pass after integration; CUDA host/device and
+GPU-enabled translation units compile. NVIDIA runtime remains pending.
+
+`50efa7d` adds vector payload/capacity accounting and removes the unused fp32
+CPU quantized copy. Independent shape formulas check dense activations,
+backward scratch, rotary/routing state, KV caches and packed matrices,
+including retained training buffers and inactive MoE placeholders. Four
+before/after actual CLI checkpoints (dense/MoE, AdamW/Muon) are byte-identical.
+Warm-start tests also verify `--init` with `--ternary` converts the saved config
+while preserving master weights and resetting optimizer/RNG.
+
+CPU research scripts now default to two threads (decode compares one/two);
+explicit overrides remain available. A quiet native memory sweep runs 72 configurations in three fresh processes
+each, two threads under the two-CPU quota. Owned payload/capacity match in
+every repeat. It covers two vocabulary sizes, training sequences, decode
+contexts/batches, optimizers and float/ternary dense/MoE. The fp32 fix saves
+394,496/593,152 bytes for the tested dimension-64, two-layer dense/MoE models:
+20% of the former five parameter-sized arrays, less of total training memory.
+Dense B2/T128 training owns 5,854,232 bytes float versus 6,248,728 ternary.
+CPU Muon still keeps full-sized m/v; worker scratch appears in process RSS.
+
+Packed dense KV cache rises from 131,072 to 524,288 bytes between reserved
+contexts 128 and 512, consuming 56% then 80% of its array payload. Decoding
+only 16 tokens does not reduce the reserved cache. Embeddings dominate at
+vocabulary 8192. Model-based decode retains gradients/backward arrays;
+therefore its footprint difference from packed inference does not isolate
+ternary storage. Process peaks include unpacked construction and cloning,
+even after source arrays are freed. Linux VmRSS and getrusage are approximate
+counters and can disagree; these records do not establish exact peak heap
+allocation or GPU memory. All raw measurements and definitions are in
+[memory results](results/2026-10-14/memory-follow-up).
+
+`ce302b7` fixes a capacity experiment before scoring: original full objective,
+2,000 updates, batch two, sequence 128, AdamW lr 0.003, warmup 20, three seeds.
+Larger models change dimension 64 / one layer / FFN 128 to dimension 128 / two layers / FFN 256
+(expert width 64 to 128). Every paired data RNG matches. A fresh 600-question
+probe excludes train/validation and both older probes; an independent parser
+confirms exclusion. The existing train/validation sets share 51 question
+strings, so sampled validation remains a development metric.
+
+| Variant | Small exact /600, seeds 1/2/3 | Large exact /600 | Small / large median final-digit CE |
+| --- | --- | --- | ---: |
+| Dense | 16 / 19 / 7 | 10 / 14 / 20 | 2.373 / 2.398 |
+| Ternary MoE | 12 / 6 / 8 | 13 / 19 / 64 | 2.616 / 2.271 |
+
+Larger ternary MoE improves counts in all three seeds, with substantial
+variation (2.2–10.7%). Dense improves in one seed and declines in two. The
+best MoE seed answers zero difficulty-3 questions on either task: its gains
+are on the training difficulty range. This changes width/depth together and
+uses approximately 6.3x more linear forward MACs per token, not equal compute.
+It does not rank architectures or show that capacity alone solves reasoning.
+The fixed learning rate need not suit both sizes. The new probe now becomes
+development data and must be excluded from future independent final holdouts.
+No environmental or multi-step reinforcement learning ran in this follow-up.
+[Capacity results](results/2026-10-14/capacity) preserve exact counts, role loss,
+hashes, transcripts, both probes and trained-checkpoint memory profiles.
+
 ## Publishing and continuation status
 
 The local research branch preserves all earlier work and ordinary Claude
-merges through `1d660db`. There are no unresolved merge conflicts. GitHub
+merges through `ab1b092`. There are no unresolved merge conflicts. GitHub
 reads and fetches work, but Git HTTPS still denies push with HTTP 403 and
 the GitHub app's tree-write check returns `Resource not accessible by
 integration` (403). No remote `gpt/research` branch or research PR exists.
@@ -456,7 +522,6 @@ and remaining draft until NVIDIA runtime validation is recorded.
 The local bundle and binary patch in `/workspace` are refreshed after the
 final documentation commit. The existing hourly follow-up remains enabled;
 its context tracks completed token weighting, CPU-quota-aware benchmarks,
-pending GPU loss/accumulation/Muon validation, mixed supervision and intermediate
-step correctness, and access
-checks. It must inspect the preserved artifacts before recreating missing
+pending GPU loss/accumulation/Muon validation, seed variation and hard-level
+reasoning, mixed supervision, resource measurements, and access checks. It must inspect the preserved artifacts before recreating missing
 remote work and must never force-push or alter Claude's branches.

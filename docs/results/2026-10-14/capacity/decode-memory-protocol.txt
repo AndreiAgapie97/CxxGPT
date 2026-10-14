@@ -1,0 +1,1 @@
+Source memory_probe 50efa7d, native Bash launches, batch1, 16 forced tokens, three rounds; source checkpoint configs retained. No concurrent research builds or experiments during memory measurements. Same CPU quota and kernel counter definitions as memory-follow-up.

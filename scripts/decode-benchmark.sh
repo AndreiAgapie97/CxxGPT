@@ -6,7 +6,7 @@ cd "$(dirname "$0")/.."
 RUN_DIR=${1:?provide a new run directory followed by bench-infer model options}
 shift
 MODEL_ARGS=("$@")
-BENCH_THREADS=${BENCH_THREADS:-'1 3'}
+BENCH_THREADS=${BENCH_THREADS:-'1 2'}
 BENCH_TOKENS=${BENCH_TOKENS:-'16 64 128'}
 BENCH_REPS=${BENCH_REPS:-21}
 mkdir -p "$(dirname "$RUN_DIR")"

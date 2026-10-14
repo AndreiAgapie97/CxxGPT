@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 # A small reasoning comparison using Claude's existing native data/train/eval
 # path. Every variant has the same active FFN width, steps, and data samples.
-# scripts/reasoning-baseline.sh RUN_DIRECTORY [steps=200] [seeds=3] [threads=3]
+# scripts/reasoning-baseline.sh RUN_DIRECTORY [steps=200] [seeds=3] [threads=2]
 set -euo pipefail
 cd "$(dirname "$0")/.."
 RUN_DIR=${1:?provide a new run directory}
 STEPS=${2:-200}
 SEEDS=${3:-3}
-THREADS=${4:-3}
+THREADS=${4:-2}
 mkdir -p "$(dirname "$RUN_DIR")"
 mkdir "$RUN_DIR"
 make -B "CXX=${CXX:-g++}" EXTRA=-Werror cxxgpt > "$RUN_DIR/build.log" 2>&1

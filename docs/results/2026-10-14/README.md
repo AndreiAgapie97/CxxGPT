@@ -53,3 +53,9 @@ missing baseline routing state. Original raw records remain preserved.
 
 `validation/` records compiler, native/CLI, and sanitizer checks. The `runbook-*` logs cover the final integration through `1d660db`. CUDA host
 and device compile checks passed; no NVIDIA runtime tests ran.
+
+`memory-follow-up/` adds 216 isolated native CPU memory probes, payload/capacity
+checks and process-counter limitations. `capacity/` records a fixed larger-model
+experiment and a second fresh 600-question probe, with strong seed variation
+and no hardest-level success for its best seed. Both development probes are
+retained as text for exclusion from future independent holdouts.

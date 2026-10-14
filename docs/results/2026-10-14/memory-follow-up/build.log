@@ -1,0 +1,1 @@
+g++ -O3 -march=native -std=c++20 -pthread -Wall -Wextra  -Werror experiments/memory_probe.cpp -o memory_probe

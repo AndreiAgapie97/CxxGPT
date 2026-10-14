@@ -1,0 +1,3 @@
+Clang 19 / CUDA 12.4 / sm_89: CUDA device PTX and host object compilation passed after ab1b092 integration.
+GCC 14.2: GPU-enabled CLI and CPU/GPU test translation units compiled after CPU memory change.
+No nvcc or NVIDIA device is available; no linking or GPU runtime validation was performed.

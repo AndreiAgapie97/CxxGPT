@@ -20,13 +20,23 @@ and final digits.
 
 Native C++ experiments compare dense, ternary, MoE and ternary MoE with recorded
 seeds and matched active FFN width. They demonstrate bounded replay retention
-and reward-based bandit learning. Reasoning runs at 200 and 2,000 steps improve
+and reward-based bandit learning. The original tiny reasoning runs at 200 and
+2,000 steps improve
 token loss but achieve only 0–3.3% exact answers. Raw results and limitations are
 recorded in `docs/research.md` and `docs/results/2026-10-13`. All twelve
 2,000-step checkpoints reproduce byte-identically with token-weighted validation.
 A new disjoint 600-question experiment finds that final-digit-only training
 lowers teacher-forced digit loss but gives no consistent exact-answer gain.
-The full default objective is retained; new records are in `docs/results/2026-10-14`.
+The full default objective is retained; new records are in
+`docs/results/2026-10-14`. A fixed larger-capacity follow-up
+improves ternary MoE to 13/19/64 exact answers out of a fresh 600-question
+probe across three seeds, from 12/6/8 for the small controls. Dense changes
+from 16/19/7 to 10/14/20. The best MoE seed still answers no difficulty-3
+questions; compute grows about 6.3x, so this is not an architecture ranking.
+CPU memory accounting separates vector payload/capacity from process RSS.
+Fp32 models drop an unused quantized copy; four pre/post CLI checkpoints are
+byte-identical. A 216-process sweep demonstrates context-cache growth,
+embedding dominance and transient construction costs. GPU runtime remains pending.
 
 Claude's CUDA backend, streaming pipeline, laptop/overnight setup, Muon
 optimizer, evaluation/loading updates, and compact GPU optimizer state are
