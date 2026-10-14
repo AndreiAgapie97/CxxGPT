@@ -78,7 +78,7 @@ public:
 
     // Learns merges from text until the vocabulary has vocab_size tokens.
     void train(const std::string& text, int vocab_size, bool verbose = false) {
-        CHECK(vocab_size >= 256, "vocab_size must be at least 256");
+        CHECK(vocab_size >= 256 && vocab_size <= 65536, "vocab_size must be in [256,65536] for uint16 token ids");
         reset_vocab();
         merges_.clear();
         // Unique chunks with their counts; each as a token sequence.
@@ -200,6 +200,7 @@ public:
         size_t n = 0;
         CHECK(std::fscanf(f, "cxxgpt-bpe %d %zu", &version, &n) == 2 && version == 1,
               "%s is not a tokenizer file", path.c_str());
+        CHECK(n <= 65280, "tokenizer has too many merges for uint16 token ids");
         reset_vocab();
         merges_.clear();
         for (size_t i = 0; i < n; ++i) {

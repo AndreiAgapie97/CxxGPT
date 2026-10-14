@@ -3,8 +3,14 @@
 #include <set>
 #include "test_accumulation.h"
 #include "../src/reasoning.h"
+#include "../src/tokenizer.h"
 
 int main(int argc, char** argv) {
+    if (argc == 2 && std::string(argv[1]) == "bad-tokenizer-vocab") {
+        Tokenizer tok; tok.train("a a",65537);
+        return 2;
+    }
+
     if (argc == 3 && std::string(argv[1]) == "repeat-backward") {
         Config cfg; cfg.vocab = 3; cfg.seq_len = 2; cfg.d_model = 4; cfg.n_heads = 1; cfg.n_layers = 1;
         Model<float> m(cfg); m.init(7);

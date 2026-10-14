@@ -47,6 +47,18 @@ status=0
 [[ "$status" == 1 ]] && grep -q 'one-logit softmax has zero task gradient' "$TEST_DIR/top1.log"
 
 "$CXXGPT_TRAINING_CLI" generate "$TEST_DIR"
+status=0
+"$CXXGPT_TRAINING_CLI" bad-tokenizer-vocab > "$TEST_DIR/core-vocab.log" 2>&1 || status=$?
+[[ "$status" == 1 ]] && grep -q 'uint16 token ids' "$TEST_DIR/core-vocab.log"
+printf 'cxxgpt-bpe 1\n65281\n' > "$TEST_DIR/oversized.bpe"
+status=0
+"$CXXGPT" text2tok --in "$TEST_DIR/text.txt" --out "$TEST_DIR/oversized.tok" --bpe "$TEST_DIR/oversized.bpe" \
+    > "$TEST_DIR/oversized.log" 2>&1 || status=$?
+[[ "$status" == 1 ]] && grep -q 'too many merges' "$TEST_DIR/oversized.log"
+status=0
+"$CXXGPT" bpe-train --in "$TEST_DIR/text.txt" --out "$TEST_DIR/too-large.bpe" --vocab 65537 \
+    > "$TEST_DIR/too-large.log" 2>&1 || status=$?
+[[ "$status" == 1 ]] && grep -q 'uint16' "$TEST_DIR/too-large.log"
 for options in '--min-diff 4 --max-diff 2' '--max-diff 10' '--test-max-diff 17' '--test-per-cell 0'; do
     status=0
     "$CXXGPT" gen-reasoning --out "$TEST_DIR/invalid-reason" $options --train 0 --val 0 \
