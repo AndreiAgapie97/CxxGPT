@@ -1,0 +1,113 @@
+// Fresh paired add/cmp curricula with explicit question exclusions. Training
+// and model execution remain native; this also replays the exact data budget.
+#include <filesystem>
+#include <fstream>
+#include <set>
+#include "../src/args.h"
+#include "../src/reasoning.h"
+#include "../src/train.h"
+
+std::vector<std::string> files(const std::string& list) {
+    std::vector<std::string> out;
+    for (size_t at = 0; at < list.size();) {
+        const auto end = list.find(',', at); out.push_back(list.substr(at, end - at));
+        if (end == list.npos) break;
+        at = end + 1;
+    }
+    return out;
+}
+void exclude_corpus(const TokenData& data, std::set<std::string>& seen) {
+    CHECK(data.vocab == 256 && !data.tokens.empty() && data.tokens[0] == kBos,
+          "requires byte reasoning corpora starting with BOS");
+    for (size_t bos = 0; bos < data.tokens.size();) {
+        size_t end = bos + 1; std::string doc;
+        while (end < data.tokens.size() && data.tokens[end] != kBos) {
+            CHECK(data.tokens[end] < 256, "corpus contains a non-byte token");
+            doc += char(data.tokens[end++]);
+        }
+        const size_t prompt = doc.find("\nA: ");
+        CHECK(doc.starts_with("Q: ") && prompt != doc.npos, "malformed prior reasoning corpus");
+        seen.insert(doc.substr(3, prompt - 3)); bos = end;
+    }
+}
+void save_tokens(const std::string& path, const std::vector<Problem>& problems) {
+    TokenData data; data.vocab = 256;
+    for (const auto& p : problems) {
+        const std::string prompt = std::string(1, char(kBos)) + p.prompt(), text = prompt + p.completion();
+        for (size_t i = 0; i < text.size(); ++i) {
+            data.tokens.push_back(uint8_t(text[i])); data.mask.push_back(i >= prompt.size());
+        }
+    }
+    data.save(path);
+}
+int main(int argc, char** argv) {
+    Args a(argc, argv, 1);
+    const std::string mode = a.str("mode", "prepare");
+    if (mode == "budget") {
+        const auto path = a.str("data"), ckpt = a.str("ckpt");
+        const long steps = a.integer("steps", 1000), seed = a.integer("seed", 101);
+        const int batch = int(a.integer("batch", 2)), seq = int(a.integer("seq", 128));
+        a.done(); CHECK(steps > 0 && batch > 0 && seq > 0 && batch <= INT32_MAX / seq, "invalid budget");
+        const auto data = TokenData::load(path); Rng rng(uint64_t(seed) + 1);
+        std::vector<int> inputs(size_t(batch) * seq), targets(inputs.size());
+        size_t valid = 0, minimum = inputs.size();
+        for (long i = 0; i < steps; ++i) {
+            data.sample_batch(rng, batch, seq, 0, data.tokens.size(), inputs.data(), targets.data());
+            const size_t n = count_targets(targets.data(), targets.size());
+            valid += n; minimum = std::min(minimum, n);
+        }
+        CHECK(minimum > 0, "empty sampled group changes the successful-update budget");
+        if (!ckpt.empty()) {
+            Model<float> m(peek_checkpoint_config(ckpt)); Rng actual(0);
+            load_checkpoint(ckpt, m, nullptr, &actual);
+            for (int i = 0; i < 4; ++i) CHECK(actual.state()[i] == rng.state()[i], "checkpoint sampler budget mismatch");
+        }
+        std::printf("steps,sampled_tokens,valid_targets,min_valid_per_step\n%ld,%zu,%zu,%zu\n",
+                    steps, size_t(steps) * inputs.size(), valid, minimum);
+        return 0;
+    }
+    CHECK(mode == "prepare", "unknown curriculum mode");
+    const auto dir = a.str("out"), corpora = a.str("exclude-corpora"), old = a.str("exclude-problems");
+    const int train = int(a.integer("train", 2400)), per_cell = int(a.integer("per-cell", 100));
+    const int val_cell = int(a.integer("val-per-cell", 60));
+    Rng rng(uint64_t(a.integer("seed", 20261017)));
+    a.done(); CHECK(!dir.empty() && !corpora.empty() && !old.empty() && train > 0 && train % 12 == 0 &&
+                    per_cell > 0 && val_cell > 0, "invalid curriculum arguments");
+    std::set<std::string> seen;
+    for (const auto& file : files(corpora)) exclude_corpus(TokenData::load(file), seen);
+    for (const auto& file : files(old)) for (const auto& p : load_problems(file)) seen.insert(p.question);
+    const auto prior = seen;
+    auto fresh = [&](const std::string& task, int difficulty) {
+        for (int tries = 0; tries < 1000000; ++tries) {
+            auto p = make_problem(task, difficulty, rng);
+            if (seen.insert(p.question).second) return p;
+        }
+        CHECK(false, "question domain exhausted"); return Problem{};
+    };
+    std::vector<Problem> probe, validation, control, expanded;
+    for (const std::string task : {"add", "cmp"}) {
+        for (int d = 1; d <= 4; ++d)
+            for (int i = 0; i < per_cell; ++i) probe.push_back(fresh(task, d));
+        for (int d = 1; d <= 3; ++d)
+            for (int i = 0; i < val_cell; ++i) validation.push_back(fresh(task, d));
+    }
+    for (int i = 0; i < train; ++i) {
+        const std::string task = i % 2 == 0 ? "add" : "cmp";
+        if (i % 3 != 2) {
+            const auto p = fresh(task, i % 3 + 1); control.push_back(p); expanded.push_back(p);
+        } else {
+            control.push_back(fresh(task, (i / 6) % 2 + 1)); expanded.push_back(fresh(task, 3));
+        }
+    }
+    CHECK(std::filesystem::create_directory(dir), "output directory exists or cannot be created");
+    std::ofstream exclusion(dir + "/excluded-questions.txt");
+    for (const auto& q : prior) exclusion << q << '\n';
+    exclusion.close(); CHECK(exclusion, "exclusion archive failed");
+    for (const auto& [name, problems] : std::vector<std::pair<std::string, std::vector<Problem>>>{
+             {"control", control}, {"expanded", expanded}, {"validation", validation}}) {
+        save_problems(dir + "/" + name + ".txt", problems); save_tokens(dir + "/" + name + ".tok", problems);
+    }
+    save_problems(dir + "/probe.txt", probe);
+    std::printf("prior excluded=%zu; final=%zu; validation=%zu; control=%zu; expanded=%zu; shared=%d\n",
+                prior.size(), probe.size(), validation.size(), control.size(), expanded.size(), train * 2 / 3);
+}

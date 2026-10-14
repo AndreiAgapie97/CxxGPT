@@ -1,0 +1,4 @@
+g++ -O3 -march=native -std=c++20 -pthread -Wall -Wextra  -Werror src/cxxgpt.cpp -o cxxgpt
+g++ -O3 -march=native -std=c++20 -pthread -Wall -Wextra  -Werror experiments/reasoning_audit.cpp -o reasoning_audit
+g++ -O3 -march=native -std=c++20 -pthread -Wall -Wextra  -Werror experiments/reasoning_targets.cpp -o reasoning_targets
+g++ -O3 -march=native -std=c++20 -pthread -Wall -Wextra  -Werror tests/test_training_cli.cpp -o test_training_cli

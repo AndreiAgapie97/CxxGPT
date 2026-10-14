@@ -1,0 +1,24 @@
+model: vocab 256, seq 128, dim 128, layers 2, heads 4, MoE 4 experts (top-2, hidden 128, 0 shared), ternary BitLinear
+params: 0.559 M total, 0.362 M active per token
+data: 80102 train tokens, 20009 val tokens; 2 x 128 x 1 = 256 tokens per step
+step    100 | loss 2.4754 | lr 2.99e-03 | gnorm  2.376 |   21.2 ms |   12059 tok/s | load 1.45
+step    200 | loss 1.2566 | lr 2.95e-03 | gnorm  2.729 |   24.1 ms |   10632 tok/s | load 1.30
+step    300 | loss 1.0015 | lr 2.87e-03 | gnorm  2.096 |   25.3 ms |   10117 tok/s | load 1.70
+step    400 | loss 0.9186 | lr 2.76e-03 | gnorm  1.789 |   25.3 ms |   10135 tok/s | load 1.58
+step    500 | loss 0.8525 | lr 2.63e-03 | gnorm  1.740 |   25.5 ms |   10038 tok/s | load 1.54
+step    600 | loss 0.7627 | lr 2.47e-03 | gnorm  1.729 |   25.1 ms |   10206 tok/s | load 1.49
+step    700 | loss 0.6783 | lr 2.29e-03 | gnorm  2.283 |   23.6 ms |   10859 tok/s | load 1.45
+step    800 | loss 0.5843 | lr 2.09e-03 | gnorm  2.802 |   21.7 ms |   11783 tok/s | load 1.34
+step    900 | loss 0.4455 | lr 1.89e-03 | gnorm  1.807 |   24.5 ms |   10448 tok/s | load 1.27
+step   1000 | loss 0.3615 | lr 1.67e-03 | gnorm  2.509 |   23.4 ms |   10954 tok/s | load 1.27
+step   1100 | loss 0.2697 | lr 1.46e-03 | gnorm  3.505 |   23.0 ms |   11113 tok/s | load 1.09
+step   1200 | loss 0.2347 | lr 1.25e-03 | gnorm  1.859 |   22.2 ms |   11537 tok/s | load 1.22
+step   1300 | loss 0.2234 | lr 1.05e-03 | gnorm  1.644 |   21.4 ms |   11937 tok/s | load 1.20
+step   1400 | loss 0.1959 | lr 8.69e-04 | gnorm  2.670 |   21.7 ms |   11795 tok/s | load 1.14
+step   1500 | loss 0.1839 | lr 7.05e-04 | gnorm  1.179 |   20.6 ms |   12440 tok/s | load 1.10
+step   1600 | loss 0.1708 | lr 5.64e-04 | gnorm  3.116 |   24.9 ms |   10270 tok/s | load 1.24
+step   1700 | loss 0.1552 | lr 4.51e-04 | gnorm  0.936 |   26.7 ms |    9605 tok/s | load 1.24
+step   1800 | loss 0.1486 | lr 3.68e-04 | gnorm  2.502 |   21.4 ms |   11981 tok/s | load 1.45
+step   1900 | loss 0.1389 | lr 3.17e-04 | gnorm  0.972 |   24.1 ms |   10601 tok/s | load 1.16
+step   2000 | loss 0.1336 | val 0.1370 | lr 3.00e-04 | gnorm  0.788 |   23.0 ms |   11143 tok/s | load 1.28
+saved runs/reasoning-optimizer-20261014/moe-ternary-seed3-muon-lr003.ckpt at step 2000

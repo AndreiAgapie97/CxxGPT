@@ -1,0 +1,22 @@
+CLI: single-window train/validation and eleven invalid configurations passed
+  CLI checkpoint partition: params 4.7e-09 moments 9.3e-10; four updates, RNG matched
+  CLI checkpoint partition: params 0.0e+00 moments 0.0e+00; four updates, RNG matched
+  CLI checkpoint partition: params 1.3e-08 moments 9.3e-10; four updates, RNG matched
+  CLI checkpoint partition: params 0.0e+00 moments 0.0e+00; four updates, RNG matched
+  CLI checkpoint partition: params 3.7e-09 moments 9.3e-10; four updates, RNG matched
+  CLI checkpoint partition: params 0.0e+00 moments 0.0e+00; four updates, RNG matched
+  CLI checkpoint partition: params 1.1e-08 moments 9.3e-10; four updates, RNG matched
+  CLI checkpoint partition: params 0.0e+00 moments 0.0e+00; four updates, RNG matched
+  CLI checkpoint partition: params 5.6e-09 moments 9.3e-10; four updates, RNG matched
+  CLI checkpoint partition: params 0.0e+00 moments 0.0e+00; four updates, RNG matched
+  CLI checkpoint partition: params 6.0e-08 moments 4.7e-10; four updates, RNG matched
+  CLI checkpoint partition: params 0.0e+00 moments 0.0e+00; four updates, RNG matched
+  CLI checkpoint partition: params 3.7e-09 moments 9.3e-10; four updates, RNG matched
+  CLI checkpoint partition: params 0.0e+00 moments 0.0e+00; four updates, RNG matched
+  CLI checkpoint partition: params 1.5e-08 moments 1.9e-09; four updates, RNG matched
+  CLI checkpoint partition: params 0.0e+00 moments 0.0e+00; four updates, RNG matched
+CLI: AdamW/Muon masked/sparse accumulation, weighted validation, empty-group skips, and fully masked rejection passed
+CLI: benchmark emits alternating raw trials and rejects zero repeats
+CLI: warm start/reset, resume precedence, truncated moments and checkpoint protection passed
+CLI: reasoning audit covers the gold completion and preserves weighted segment loss
+CLI: final-digit masks preserve tokens and fresh probes exclude known questions

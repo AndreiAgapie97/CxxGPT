@@ -59,7 +59,7 @@ if [ -n "${INIT:-}" ]; then
   model=()
   case "${TERNARY:-0}" in
     1) model=(--ternary --fp-attn) ;;
-    all) model=(--ternary) ;;
+    all) model=(--ternary --fp-attn 0) ;;
     0) ;;
     *) echo "TERNARY must be 0, 1 or all"; exit 1 ;;
   esac

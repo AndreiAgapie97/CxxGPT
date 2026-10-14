@@ -1,0 +1,121 @@
+g++ -O1 -g -march=native -std=c++20 -pthread  -Werror -fsanitize=thread ternary_moe.cpp -o ternary_moe_tsan
+g++ -O1 -g -march=native -std=c++20 -pthread  -Werror -fsanitize=thread tests/test_engine.cpp -o test_engine_tsan
+g++ -O1 -g -march=native -std=c++20 -pthread  -Werror -fsanitize=thread experiments/toy_world.cpp -o research_experiment_tsan
+g++ -O1 -g -march=native -std=c++20 -pthread  -Werror -fsanitize=thread src/cxxgpt.cpp -o cxxgpt_tsan
+g++ -O1 -g -march=native -std=c++20 -pthread  -Werror -fsanitize=thread experiments/reasoning_audit.cpp -o reasoning_audit_tsan
+g++ -O1 -g -march=native -std=c++20 -pthread  -Werror -fsanitize=thread experiments/reasoning_targets.cpp -o reasoning_targets_tsan
+g++ -O1 -g -march=native -std=c++20 -pthread  -Werror -fsanitize=thread experiments/memory_probe.cpp -o memory_probe_tsan
+g++ -O1 -g -march=native -std=c++20 -pthread  -Werror -fsanitize=thread experiments/reasoning_traces.cpp -o reasoning_traces_tsan
+g++ -O1 -g -march=native -std=c++20 -pthread  -Werror -fsanitize=thread experiments/reasoning_curriculum.cpp -o reasoning_curriculum_tsan
+./ternary_moe_tsan --tests
+Correctness tests
+  all passed
+
+./test_engine_tsan
+ops
+  gemm: 328 shapes, worst relative error 2.49e-07
+  ok (5.33 s)
+model
+  BitLinear identity STE: surrogate errors dx 2.5e-11, dw 2.8e-11
+  dense: 1216 params in 14 tensors, worst gradient error 4.5e-09
+  dense, half NoPE: 1216 params in 14 tensors, worst gradient error 2.9e-08
+  moe+shared: 2144 params in 20 tensors, worst gradient error 9.9e-10
+  moe top-1: 1856 params in 16 tensors, worst gradient error 5.1e-09
+  ok (5.47 s)
+memory
+  ok (0.01 s)
+reasoning
+  9000 problems verified by an independent solver
+  500 chain plans rebuilt from their questions, 500 expression rewrites checked
+  ok (0.31 s)
+reasoning metrics
+  ok (0.00 s)
+tokenizer
+  ok (0.02 s)
+data
+  ok (0.00 s)
+numerics
+  ok (0.00 s)
+policy gradient
+  ok (0.00 s)
+train
+  masked global-loss finite-difference error 1.5e-08
+  variant 0 masked accumulation: double grad 2.8e-17; float grad 6.0e-08 param 6.0e-08 moment 9.3e-10
+  variant 1 masked accumulation: double grad 2.8e-17; float grad 3.0e-08 param 3.7e-09 moment 4.7e-10
+  variant 2 masked accumulation: double grad 5.6e-17; float grad 3.0e-08 param 8.4e-09 moment 4.7e-10
+  variant 3 masked accumulation: double grad 4.2e-17; float grad 3.4e-08 param 3.7e-09 moment 5.8e-10
+  variant 4 masked accumulation: double grad 5.6e-17; float grad 3.0e-08 param 1.5e-08 moment 9.3e-10
+  variant 5 masked accumulation: double grad 2.8e-17; float grad 3.0e-08 param 1.9e-08 moment 9.3e-10
+  variant 6 masked accumulation: double grad 5.6e-17; float grad 3.0e-08 param 6.5e-09 moment 9.3e-10
+  variant 7 masked accumulation: double grad 5.6e-17; float grad 3.4e-08 param 4.1e-09 moment 9.3e-10
+  ternary MoE learned: 2.588 -> 1.285; checkpoint continuation identical
+  ok (0.89 s)
+optim
+  ok (3.54 s)
+generated traces
+  ok (0.01 s)
+all passed
+CXXGPT=./cxxgpt_tsan CXXGPT_AUDIT=./reasoning_audit_tsan CXXGPT_TARGETS=./reasoning_targets_tsan CXXGPT_TRACES=./reasoning_traces_tsan CXXGPT_CURRICULUM=./reasoning_curriculum_tsan bash tests/test_cli.sh
+CLI: single-window train/validation and twelve invalid configurations passed
+  CLI checkpoint partition: params 5.6e-09 moments 9.3e-10; four updates, RNG matched
+  CLI checkpoint partition: params 0.0e+00 moments 0.0e+00; four updates, RNG matched
+  CLI checkpoint partition: params 1.7e-08 moments 9.3e-10; four updates, RNG matched
+  CLI checkpoint partition: params 0.0e+00 moments 0.0e+00; four updates, RNG matched
+  CLI checkpoint partition: params 7.5e-09 moments 1.4e-09; four updates, RNG matched
+  CLI checkpoint partition: params 0.0e+00 moments 0.0e+00; four updates, RNG matched
+  CLI checkpoint partition: params 1.3e-08 moments 9.3e-10; four updates, RNG matched
+  CLI checkpoint partition: params 0.0e+00 moments 0.0e+00; four updates, RNG matched
+  CLI checkpoint partition: params 1.9e-08 moments 9.3e-10; four updates, RNG matched
+  CLI checkpoint partition: params 1.9e-09 moments 2.7e-12; four updates, RNG matched
+  CLI checkpoint partition: params 2.0e-08 moments 9.3e-10; four updates, RNG matched
+  CLI checkpoint partition: params 1.8e-08 moments 9.3e-10; four updates, RNG matched
+  CLI checkpoint partition: params 3.7e-09 moments 9.3e-10; four updates, RNG matched
+  CLI checkpoint partition: params 1.9e-09 moments 1.8e-12; four updates, RNG matched
+  CLI checkpoint partition: params 1.5e-08 moments 9.3e-10; four updates, RNG matched
+  CLI checkpoint partition: params 1.7e-08 moments 3.4e-13; four updates, RNG matched
+  CLI checkpoint partition: params 3.7e-09 moments 4.7e-10; four updates, RNG matched
+  CLI checkpoint partition: params 0.0e+00 moments 0.0e+00; four updates, RNG matched
+  CLI checkpoint partition: params 1.5e-08 moments 4.7e-10; four updates, RNG matched
+  CLI checkpoint partition: params 0.0e+00 moments 0.0e+00; four updates, RNG matched
+  CLI checkpoint partition: params 1.9e-09 moments 2.3e-10; four updates, RNG matched
+  CLI checkpoint partition: params 1.9e-09 moments 9.1e-13; four updates, RNG matched
+  CLI checkpoint partition: params 1.7e-08 moments 9.3e-10; four updates, RNG matched
+  CLI checkpoint partition: params 1.5e-08 moments 9.1e-13; four updates, RNG matched
+  CLI checkpoint partition: params 3.7e-09 moments 9.3e-10; four updates, RNG matched
+  CLI checkpoint partition: params 0.0e+00 moments 0.0e+00; four updates, RNG matched
+  CLI checkpoint partition: params 1.9e-08 moments 1.9e-09; four updates, RNG matched
+  CLI checkpoint partition: params 0.0e+00 moments 0.0e+00; four updates, RNG matched
+  CLI checkpoint partition: params 3.7e-09 moments 9.3e-10; four updates, RNG matched
+  CLI checkpoint partition: params 1.9e-09 moments 1.8e-12; four updates, RNG matched
+  CLI checkpoint partition: params 1.1e-08 moments 4.7e-10; four updates, RNG matched
+  CLI checkpoint partition: params 1.5e-08 moments 1.8e-12; four updates, RNG matched
+CLI: AdamW/Muon masked/sparse accumulation, weighted validation, empty-group skips, and fully masked rejection passed
+CLI: benchmark emits alternating raw trials and rejects zero repeats
+CLI: warm start/reset, resume precedence, truncated moments and checkpoint protection passed
+CLI: reasoning audit covers the gold completion and preserves weighted segment loss
+CLI: final-digit masks preserve tokens and fresh probes exclude known questions
+CLI: paired curriculum excludes known questions; sampled budget and generated trace audit passed
+./research_experiment_tsan --steps 5 --seeds 1 --threads 2 --continual --rl-steps 5 --out runs/tsan-smoke-$$.csv
+steps=5 seeds=1 threads=2 continual=1 rl_steps=5
+baseline dense seed=1 initial: A 2.3262/0.0% B 2.4252/0.0%
+baseline dense seed=1 learn_A: A 1.7643/50.8% B 2.5443/0.0%
+continual dense seed=1 B_no_replay: A 2.0926/1.7% B 1.7943/40.8%
+continual dense seed=1 B_half_replay: A 1.8434/30.8% B 1.8313/21.7%
+bandit dense seed=1: greedy 0.0% -> 12.5%, sampled reward 0.125
+baseline dense-ternary seed=1 initial: A 2.3223/0.0% B 2.4233/0.0%
+baseline dense-ternary seed=1 learn_A: A 1.8684/2.5% B 2.6190/0.0%
+continual dense-ternary seed=1 B_no_replay: A 1.9021/26.7% B 2.1605/14.2%
+continual dense-ternary seed=1 B_half_replay: A 1.7490/50.0% B 2.2095/8.3%
+bandit dense-ternary seed=1: greedy 0.0% -> 0.0%, sampled reward 0.125
+baseline moe seed=1 initial: A 2.3271/0.0% B 2.4248/0.0%
+baseline moe seed=1 learn_A: A 1.8104/31.7% B 2.5537/0.0%
+continual moe seed=1 B_no_replay: A 1.9617/25.0% B 1.9323/21.7%
+continual moe seed=1 B_half_replay: A 1.8008/45.0% B 1.9002/21.7%
+bandit moe seed=1: greedy 0.0% -> 0.0%, sampled reward 0.125
+baseline moe-ternary seed=1 initial: A 2.3226/0.0% B 2.4236/0.0%
+baseline moe-ternary seed=1 learn_A: A 1.8895/1.7% B 2.6238/0.0%
+continual moe-ternary seed=1 B_no_replay: A 1.9116/23.3% B 2.2189/12.5%
+continual moe-ternary seed=1 B_half_replay: A 1.7522/48.3% B 2.3126/4.2%
+bandit moe-ternary seed=1: greedy 0.0% -> 0.0%, sampled reward 0.125
+./memory_probe_tsan --mode train --ternary --experts 4 --muon --batch 2 --seq 8 --steps 1 > /dev/null
+./memory_probe_tsan --mode packed --ternary --experts 4 --batch 1 > /dev/null

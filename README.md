@@ -1,9 +1,9 @@
 # CxxGPT
 
-A language model built from scratch in C++, aiming at strong reasoning on
-an architecture far more efficient than today's Python stacks:
+A native C++20 language-model research engine, aiming at strong reasoning
+and more efficient training and inference:
 
-- **ternary weights** (each weight is −1, 0 or +1: 1.58 bits) with int8
+- **ternary weights** (each projection weight is −1, 0 or +1) with int8
   activations, as in BitNet b1.58;
 - **sparse Mixture-of-Experts**: many expert FFNs, each token uses a few;
 - **hand-written kernels**, CPU (AVX2, AVX-512, VNNI) and CUDA, with no
@@ -14,12 +14,18 @@ engine and optimizers, the BPE tokenizer, the data pipeline, the reasoning
 curriculum and the inference engine. Python appears only in one small
 script that downloads public datasets.
 
+Ternary projection inference stores two bitplanes (two bits per weight) plus
+scales; `log2(3)` is the information bound. Embeddings, norms and routers retain
+fp32 weights. Training retains fp32 master weights, gradients, quantized
+copies and optimizer moments, so packed inference storage does not describe
+training memory.
+
 ## Where things stand
 
 | part | state |
 |---|---|
 | training engine (CPU) | transformer with RoPE, RMSNorm, SwiGLU, tied embeddings; ternary BitLinear; top-k MoE with shared experts and bias-based load balancing; AdamW and Muon; checkpoints and resume |
-| training engine (GPU) | the same model in CUDA + cuBLAS, op for op, with fused attention kernels; compiled in CI, tested against the CPU on the laptop |
+| training engine (GPU) | the same model in CUDA + cuBLAS, op for op; compiled in CI, tested against the CPU on the laptop's RTX 4070; fused attention kernels opt-in (`--fused-attn`) |
 | tokenizer | byte-level BPE, trained by our own code; parallel streaming encoder |
 | data | synthetic reasoning curriculum; GSM8K and other public math and text sets (`scripts/get_data.py`) |
 | evaluation | exact-answer accuracy on held-out problems, per task and difficulty |
@@ -31,7 +37,7 @@ laptop's GPU is next: see [docs/LAPTOP.md](docs/LAPTOP.md).
 ## Build and test
 
 ```sh
-make            # ternary_moe, test_engine, cxxgpt (g++ -O3 -march=native)
+make            # ternary_moe, test_engine, cxxgpt, test_training_cli (g++ -O3 -march=native)
 make test       # every CPU test
 make asan tsan  # the same under AddressSanitizer+UBSan and ThreadSanitizer
 make gpu        # cxxgpt-gpu and test_gpu (needs the CUDA toolkit)
@@ -90,6 +96,21 @@ OpenMathInstruct-2 and MetaMathQA (`scripts/get_data.py`, which needs only
 [docs/LAPTOP.md](docs/LAPTOP.md) has the whole setup, from a fresh Windows
 laptop to a night of training.
 
+## Reproducible research
+
+```sh
+scripts/research.sh runs/toy-01 200 3 3 500
+scripts/reasoning-baseline.sh runs/reason-01 200 3 3
+```
+
+The first compares four variants on a tiny transition environment, a continual
+task switch with bounded replay, and a contextual bandit. The second trains
+and evaluates the reasoning curriculum. Run directories must be new; seeds,
+source hashes, flags and raw results are preserved. See [the research log](docs/research.md)
+for gradient contracts, numerical corrections, measured results and limits.
+The research CUDA stable-loss and masked-accumulation tests require
+`make gpu-test` on NVIDIA hardware before the research PR leaves draft.
+
 ## Code
 
 | file | contents |
@@ -113,6 +134,10 @@ laptop to a night of training.
 
 ### Architecture comparison
 
+The following larger-model results are reported by Claude's `main` at
+`9130fbe`; this research run has not reproduced them. Our smaller, independently
+recorded multi-seed probes are in [docs/research.md](docs/research.md).
+
 Four variants with the same width (dim 256, 4 layers, 4 heads), data,
 steps and learning rate: 2500 steps of 4096 tokens on the reasoning
 curriculum, CPU. The MoE variants have 8 experts (top-2) with the same
@@ -127,8 +152,9 @@ harder than anything in training.
 | MoE | 9.8 M (3.3 M) | **0.0986** | **62.0%** | **81.0%** | 5.0% |
 | MoE, ternary | 9.8 M (3.3 M) | 0.1116 | 55.2% | 72.4% | 3.8% |
 
-One seed each; with 960 problems, accuracy has a standard error of about
-1.6 points, so the validation loss is the steadier signal.
+One seed each. A binomial standard error of about 1.6 points assumes
+independent problems; it does not measure seed variance or correlations
+between related synthetic problems.
 
 - **MoE helps:** at the same compute per token, its validation loss is
   13% lower than dense.
@@ -372,6 +398,7 @@ vocabulary that layer is under 1 MB.
   GPU): full-precision attention, and for length generalization layers
   without RoPE (`--nope-every`) and rewritten expressions
   (`gen-reasoning --expr-rewrite`).
-- Faster GPU training: fused attention and bf16 are written; the laptop
-  tests them, and `--profile` says what to speed up next.
+- Faster GPU training: fused attention and bf16 are written but opt-in;
+  on the laptop they still miss three GPU checks (docs/LAPTOP.md, "GPU
+  options"), and `--profile` says what to speed up next.
 - Benchmark the inference engine against bitnet.cpp at equal model size.

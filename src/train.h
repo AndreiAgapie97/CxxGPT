@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -154,13 +155,13 @@ inline double clip_grad_norm(Model<float>& model, double max_norm) {
     pool().parallel_for(blocks, [&](int b0, int b1) {
         for (int b = b0; b < b1; ++b) {
             const size_t i0 = size_t(b) * kBlock, i1 = std::min(n, i0 + kBlock);
-            float acc[8] = {};
+            double acc[8] = {};
             size_t i = i0;
             for (; i + 8 <= i1; i += 8)
-                for (int j = 0; j < 8; ++j) acc[j] += g[i + j] * g[i + j];
+                for (int j = 0; j < 8; ++j) acc[j] += double(g[i + j]) * g[i + j];
             double s = 0.0;
             for (; i < i1; ++i) s += double(g[i]) * g[i];
-            for (float a : acc) s += a;
+            for (double a : acc) s += a;
             partial[b] = s;
         }
     }, 1);
@@ -288,9 +289,10 @@ public:
     // B windows of Tn + 1 tokens starting at random offsets in [lo, hi - Tn - 1].
     // Targets that the mask excludes become -1.
     void sample_batch(Rng& rng, int B, int Tn, size_t lo, size_t hi, int* inputs, int* targets) const {
-        CHECK(hi > lo + size_t(Tn) + 1, "data range of %zu tokens is shorter than a sequence", hi - lo);
+        CHECK(B > 0 && Tn > 0 && lo <= hi && hi <= tokens.size(), "invalid data sampling range or shape");
+        CHECK(hi - lo >= size_t(Tn) + 1, "data range of %zu tokens is shorter than a sequence", hi - lo);
         for (int b = 0; b < B; ++b) {
-            const size_t s = lo + rng.below(hi - lo - Tn - 1);
+            const size_t s = lo + rng.below(hi - lo - Tn);
             for (int t = 0; t < Tn; ++t) {
                 inputs[b * Tn + t] = tokens[s + t];
                 const bool train = mask.empty() || mask[s + t + 1];
@@ -299,6 +301,85 @@ public:
         }
     }
 };
+
+// Count loss-bearing positions; the model treats every negative target as
+// ignored. Use the same denominator for training and validation metrics.
+inline size_t count_targets(const int* targets, size_t n) {
+    size_t count = 0;
+    for (size_t i = 0; i < n; ++i) count += targets[i] >= 0;
+    return count;
+}
+
+struct TokenLossMean {
+    double sum = 0;
+    size_t count = 0;
+    void add(double mean_loss, size_t valid) {
+        if (!valid) return;
+        sum += mean_loss * double(valid);
+        count += valid;
+    }
+    double value() const { return count ? sum / double(count) : 0.0; }
+};
+
+// Stage only host token IDs, not activations, so all denominators are known
+// before backward. This avoids accumulating large unnormalized gradients.
+class AccumulationBatch {
+public:
+    const int batch, seq, micros;
+    const size_t per_micro;
+    std::vector<int> inputs, targets;
+    std::vector<size_t> valid;
+    size_t total_valid = 0;
+
+    AccumulationBatch(int B, int Tn, int accum)
+        : batch(B), seq(Tn), micros(accum), per_micro(checked_rows(B, Tn, accum)) {
+        CHECK(size_t(accum) <= inputs.max_size() / per_micro, "accumulation buffer is too large");
+        inputs.resize(per_micro * size_t(accum));
+        targets.resize(inputs.size());
+        valid.resize(accum);
+    }
+
+    int* input(int micro) { return inputs.data() + size_t(micro) * per_micro; }
+    int* target(int micro) { return targets.data() + size_t(micro) * per_micro; }
+    const int* input(int micro) const { return inputs.data() + size_t(micro) * per_micro; }
+    const int* target(int micro) const { return targets.data() + size_t(micro) * per_micro; }
+
+    void refresh_counts() {
+        total_valid = 0;
+        for (int micro = 0; micro < micros; ++micro) {
+            valid[micro] = count_targets(target(micro), per_micro);
+            total_valid += valid[micro];
+        }
+    }
+    void sample(const TokenData& data, Rng& rng, size_t lo, size_t hi) {
+        for (int micro = 0; micro < micros; ++micro)
+            data.sample_batch(rng, batch, seq, lo, hi, input(micro), target(micro));
+        refresh_counts();
+    }
+
+private:
+    static size_t checked_rows(int B, int Tn, int accum) {
+        CHECK(B > 0 && Tn > 0 && accum > 0, "batch, sequence and accumulation must be positive");
+        CHECK(B <= std::numeric_limits<int>::max() / Tn, "batch times sequence exceeds engine index range");
+        return size_t(B) * Tn;
+    }
+};
+
+// Forward returns a microbatch mean. Multiplying its backward by n_i / N
+// makes each valid token contribute 1/N, including unequal masks. Engine is
+// Model<T>, GpuTrainer, or the CLI Backend; all share this interface.
+template <class Engine>
+double accumulated_backward(Engine& engine, const AccumulationBatch& group) {
+    engine.zero_grad();
+    if (!group.total_valid) return 0.0;
+    TokenLossMean loss;
+    for (int micro = 0; micro < group.micros; ++micro) {
+        const double l = engine.forward(group.input(micro), group.target(micro), group.batch, group.seq, true);
+        loss.add(l, group.valid[micro]);
+        engine.backward(double(group.valid[micro]) / double(group.total_valid));
+    }
+    return loss.value();
+}
 
 // Writes a token file (TokenData's format, without a mask) piece by piece,
 // for data too big to hold in memory. The count goes into the header last.
@@ -370,6 +451,13 @@ inline Config read_config(FILE* f) {
 
 inline void save_checkpoint(const std::string& path, const Model<float>& model, const AdamW& opt,
                             const Rng& data_rng) {
+    auto finite = [](const auto& values) {
+        return std::all_of(values.begin(), values.end(), [](float x) { return std::isfinite(x); });
+    };
+    CHECK(finite(model.params) && finite(opt.m) && finite(opt.v), "non-finite checkpoint state");
+    for (const auto& bias : model.router_bias) CHECK(finite(bias), "non-finite router bias");
+    CHECK(opt.m.empty() ? opt.v.empty() : opt.m.size() == model.params.size() && opt.v.size() == opt.m.size(),
+          "invalid checkpoint optimizer size");
     const std::string tmp = path + ".tmp";
     FILE* f = create_file(tmp, "wb");
     CHECK(f, "cannot write %s", tmp.c_str());
@@ -432,7 +520,15 @@ inline void load_checkpoint(const std::string& path, Model<float>& model, AdamW*
         opt->m = std::move(m);
         opt->v = std::move(v);
     } else if (has_opt) {
-        CHECK(std::fseek(f, long(2 * n * 4), SEEK_CUR) == 0, "truncated optimizer state");
+        // fseek beyond EOF succeeds on regular files. Check the extent before
+        // skipping moments, even for dense models with no following biases.
+        const long current = std::ftell(f);
+        CHECK(current >= 0 && n <= uint64_t(std::numeric_limits<long>::max()) / 8,
+              "optimizer state exceeds seek range");
+        CHECK(std::fseek(f, 0, SEEK_END) == 0, "cannot seek checkpoint");
+        const long end = std::ftell(f), bytes = long(n * 8);
+        CHECK(end >= current && end - current >= bytes, "truncated optimizer state");
+        CHECK(std::fseek(f, current + bytes, SEEK_SET) == 0, "cannot seek optimizer state");
     }
     for (auto& b : model.router_bias)
         CHECK(std::fread(b.data(), 4, b.size(), f) == b.size(), "truncated router bias");

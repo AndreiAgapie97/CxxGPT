@@ -69,6 +69,18 @@ inline void round_to_engine_int8(Model<float>& m) {
     m.weights_dirty = true;
 }
 
+// Decode baseline with the same effective weights and routing state, using
+// fp32 activations. Router biases affect expert selection and must be copied.
+inline Model<float> make_fp32_decode_baseline(Model<float>& source) {
+    source.quantize_weights();
+    Config cfg = source.cfg; cfg.ternary = cfg.fp_attention = false;
+    Model<float> out(cfg);
+    for (const ParamInfo& p : source.infos)
+        std::copy_n(&(p.ternary ? source.qparams : source.params)[p.offset], p.size, &out.params[p.offset]);
+    out.router_bias = source.router_bias;
+    return out;
+}
+
 class TernaryEngine {
 public:
     explicit TernaryEngine(const Model<float>& m) : cfg_(m.cfg), kernel_(default_int8_kernel()) {
@@ -135,17 +147,42 @@ public:
     int position() const { return pos_; }
 
     // Bytes of weight storage: bitplanes for the ternary matrices, int8 rows
-    // for the embedding and full-precision attention, float for the rest.
+    // for the embedding and full-precision attention, float for the rest,
+    // including the routing biases.
     size_t weight_bytes() const {
         size_t b = wte_.bytes() + lnf_.size() * 4;
         auto bp = [](const TernaryMatrixBitplane& W) { return (W.pos.size() + W.neg.size()) * 4 + 4; };
         for (const auto& L : layers_) {
-            b += (L.ln1.size() + L.ln2.size() + L.router.size()) * 4;
+            b += (L.ln1.size() + L.ln2.size() + L.router.size() + L.bias.size()) * 4;
             b += cfg_.fp_attention ? L.wqkv8.bytes() + L.wo8.bytes() : bp(L.wqkv) + bp(L.wo);
             if (F_ > 0) b += bp(L.wfc) + bp(L.wproj);
             for (const auto& W : L.efc) b += bp(W);
             for (const auto& W : L.eproj) b += bp(W);
         }
+        return b;
+    }
+
+    // Vector payload, including inactive placeholder matrices; scales and
+    // vector/object metadata are not elements. weight_bytes() remains the
+    // active logical weight count, including its scalar scales.
+    PackedMemory memory_bytes() const {
+        PackedMemory b;
+        auto i8 = [&](const Int8Rows& w) { b.weights.add(w.q); b.weights.add(w.scale); };
+        i8(wte_); b.weights.add(lnf_);
+        auto bp = [&](const TernaryMatrixBitplane& w) { b.weights.add(w.pos); b.weights.add(w.neg); };
+        for (const auto& l : layers_) {
+            b.weights.add(l.ln1); b.weights.add(l.ln2); b.weights.add(l.router); b.weights.add(l.bias);
+            i8(l.wqkv8); i8(l.wo8);
+            bp(l.wqkv); bp(l.wo); bp(l.wfc); bp(l.wproj);
+            for (const auto& w : l.efc) bp(w);
+            for (const auto& w : l.eproj) bp(w);
+        }
+        b.rope.add(rope_.cos); b.rope.add(rope_.sin);
+        for (const auto& v : kcache_) b.kv.add(v);
+        for (const auto& v : vcache_) b.kv.add(v);
+        for (const auto* v : {&x_, &h_, &qkv_, &att_, &tmp_, &scores_, &fc_, &sw_, &down_,
+                             &logits_, &rlogits_, &sw_scale_}) b.scratch.add(*v);
+        b.scratch.add(xq_); b.scratch.add(swq_);
         return b;
     }
 

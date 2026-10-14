@@ -1,0 +1,11 @@
+checkpoint,metric,tokens,mean_loss,correct,total
+dense-seed2-muon-lr003,all_completion,16431,0.427227696,15466,16431
+dense-seed2-muon-lr003,step_digit,5224,0.522032343,4720,5224
+dense-seed2-muon-lr003,step_other,5103,0.185992471,4966,5103
+dense-seed2-muon-lr003,delimiter,3600,0.007048124,3593,3600
+dense-seed2-muon-lr003,answer_digit,1904,1.742556276,1587,1904
+dense-seed2-muon-lr003,answer_other,600,0.000602226,600,600
+dense-seed2-muon-lr003,teacher_coverage,0,0,600,600
+dense-seed2-muon-lr003,exact_answer,0,0,383,600
+dense-seed2-muon-lr003,sampled_val_token_mean,694,0.103795365,0,0
+dense-seed2-muon-lr003,sampled_val_legacy_batch_mean,694,0.097665571,0,0

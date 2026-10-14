@@ -6,11 +6,16 @@
 
 #include "test_attention.h"
 #include "test_model.h"
+#include "test_memory.h"
 #include "test_ops.h"
 #include "test_reasoning.h"
+#include "test_reasoning_metrics.h"
 #include "test_tokenizer.h"
 #include "test_data.h"
+#include "test_numerics.h"
+#include "test_train.h"
 #include "test_optim.h"
+#include "test_reasoning_traces.h"
 
 int main(int argc, char** argv) {
     int threads = int(std::thread::hardware_concurrency());
@@ -22,10 +27,16 @@ int main(int argc, char** argv) {
     struct { const char* name; void (*fn)(); } suites[] = {
         {"ops", test_ops},
         {"model", test_model},
+        {"memory", test_memory},
         {"reasoning", test_reasoning},
+        {"reasoning metrics", test_reasoning_metrics},
         {"tokenizer", test_tokenizer},
         {"data", test_data},
+        {"numerics", test_numerics},
+        {"policy gradient", test_policy_gradient_expectation},
+        {"train", test_train},
         {"optim", test_optim},
+        {"generated traces", test_reasoning_traces},
         {"attention", test_attention},
     };
     for (auto& s : suites) {

@@ -1,0 +1,10 @@
+checkpoint,task,difficulty,problems,exact,full_grounded_trace,exact_and_grounded,expected_statements,generated_statements,local_correct,grounded_correct
+moe-ternary-seed2-expanded,add,1,100,94,94,94,200,200,194,192
+moe-ternary-seed2-expanded,add,2,100,76,80,76,300,309,292,278
+moe-ternary-seed2-expanded,add,3,100,42,50,42,400,382,374,327
+moe-ternary-seed2-expanded,add,4,100,0,0,0,500,363,346,127
+moe-ternary-seed2-expanded,cmp,1,100,99,94,94,138,132,126,126
+moe-ternary-seed2-expanded,cmp,2,100,98,98,98,202,202,200,199
+moe-ternary-seed2-expanded,cmp,3,100,92,94,90,245,243,239,236
+moe-ternary-seed2-expanded,cmp,4,100,0,32,0,305,224,203,152
+moe-ternary-seed2-expanded,overall,0,800,501,542,494,2290,2055,1974,1637

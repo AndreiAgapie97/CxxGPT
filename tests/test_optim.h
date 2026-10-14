@@ -200,6 +200,13 @@ inline void checkpoint_config_fields() {
     EXPECT(o.vocab == 300 && o.n_experts == 8 && o.n_shared == 1 && o.ternary && !o.fp_attention &&
                o.nope_every == 0,
            "an 11-field config read wrong");
+    std::rewind(f);
+    const int32_t previous[] = {12, 300, 256, 256, 4, 4, 0, 8, 2, 0, 1, 1, 1};
+    std::fwrite(previous, 4, std::size(previous), f);
+    std::rewind(f);
+    const Config p = read_config(f);
+    EXPECT(p.ternary && p.fp_attention && p.nope_every == 0,
+           "a 12-field checkpoint lost hybrid attention or invented NoPE");
     std::fclose(f);
 }
 

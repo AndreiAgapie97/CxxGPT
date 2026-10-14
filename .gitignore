@@ -1,6 +1,7 @@
 ternary_moe
 test_engine
 cxxgpt
+research_experiment
 cxxgpt-gpu
 test_gpu
 gpu.o
@@ -10,4 +11,10 @@ data/
 *.ckpt
 runs/
 .venv/
+test_training_cli
+reasoning_audit
+reasoning_targets
+reasoning_traces
+reasoning_curriculum
+memory_probe
 __pycache__/

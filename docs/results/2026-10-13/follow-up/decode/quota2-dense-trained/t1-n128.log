@@ -1,0 +1,6 @@
+model: vocab 256, seq 128, dim 64, layers 1, heads 4, dense FFN 128, ternary BitLinear
+params: 0.058 M total, 0.058 M active per token
+decode, 1 sequence, 128 tokens, median of 21, 1 threads (2 warmup pairs, alternating order):
+  fp32      108636.1 tok/s   weights     0.23 MB
+  ternary   141627.2 tok/s   weights     0.08 MB
+  speedup 1.30x, memory 3.0x smaller; same argmax as fp32 on 98% of positions

@@ -1,0 +1,11 @@
+checkpoint,metric,tokens,mean_loss,correct,total
+moe-seed3,all_completion,1644,0.778339890,1266,1644
+moe-seed3,step_digit,518,1.163840918,318,518
+moe-seed3,step_other,516,0.200211455,476,516
+moe-seed3,delimiter,360,0.027780610,357,360
+moe-seed3,answer_digit,190,2.489030094,70,190
+moe-seed3,answer_other,60,1.508255592,45,60
+moe-seed3,teacher_coverage,0,0,60,60
+moe-seed3,exact_answer,0,0,2,60
+moe-seed3,sampled_val_token_mean,694,0.570395990,0,0
+moe-seed3,sampled_val_legacy_batch_mean,694,0.571908985,0,0

@@ -1,0 +1,2 @@
+3972b366c6b4c86cc5f9d4274bb9576bec0cb64d29fcbfe6ac4e68c9078c129c  scripts/reasoning-optimizer.sh
+d754c6b02fc8700622b1a5e0177812a7b910171ccc604abc2eb7ad623b651c04  scripts/reasoning-optimizer.sh

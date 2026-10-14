@@ -1,0 +1,9 @@
+starting from the weights in runs/reasoning-2000-20261013/moe-ternary-seed2.ckpt
+model: vocab 256, seq 128, dim 64, layers 1, heads 4, MoE 4 experts (top-2, hidden 64, 0 shared), ternary BitLinear
+params: 0.082 M total, 0.058 M active per token
+data: 80102 train tokens, 20009 val tokens; 2 x 128 x 1 = 256 tokens per step
+step     50 | loss 0.6395 | lr 4.37e-04 | gnorm  1.337 |    3.5 ms |   74008 tok/s | load 1.16
+step    100 | loss 0.6217 | lr 2.79e-04 | gnorm  1.382 |    3.4 ms |   75526 tok/s | load 1.20
+step    150 | loss 0.6385 | lr 1.18e-04 | gnorm  1.084 |    3.4 ms |   76343 tok/s | load 1.13
+step    200 | loss 0.6373 | val 0.6203 | lr 5.00e-05 | gnorm  1.520 |    3.4 ms |   75242 tok/s | load 1.19
+saved runs/reasoning-focus-20261013/moe-ternary-seed2-all.ckpt at step 200

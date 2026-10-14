@@ -1,0 +1,2 @@
+49c817b22dbca5bba9928e6871ef789e5be57287905123e05c87d68e654a45d5  runs/reasoning-curriculum-20261014/protocol.txt
+3bc418b0ec3240970f0a643ae7bb35e1a99da3a9a121c31fa4ebfece453ecfa1  runs/reasoning-curriculum-20261014/settings.txt

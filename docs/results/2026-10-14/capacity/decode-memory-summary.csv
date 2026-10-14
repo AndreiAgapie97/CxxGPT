@@ -1,0 +1,11 @@
+configuration,runs,payload_bytes,capacity_bytes,median_rss_bytes,median_peak_rss_bytes
+dense-large-decode,3,3191388,3191388,5484544,5296128
+dense-large-fp32,3,3191388,3191388,5488640,7921664
+dense-small-decode,3,543032,543032,2834432,2535424
+dense-small-fp32,3,543032,543032,2834432,3067904
+moe-ternary-large-decode,3,7014236,7014236,9302016,9117696
+moe-ternary-large-fp32,3,4779356,4779356,7073792,13279232
+moe-ternary-large-packed,3,558025,558025,2998272,9420800
+moe-ternary-small-decode,3,1073616,1073616,3366912,3293184
+moe-ternary-small-fp32,3,744144,744144,3035136,3706880
+moe-ternary-small-packed,3,163577,163577,2478080,3207168

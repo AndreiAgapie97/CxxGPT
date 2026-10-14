@@ -5,6 +5,7 @@
 #include "../src/infer.h"
 #include "../src/model.h"
 #include "test_util.h"
+#include "test_ste.h"
 
 // Random parameters with enough spread that the loss is far from flat and
 // MoE routing decisions are far from ties (a tie flipping under a 1e-5
@@ -425,6 +426,41 @@ inline void test_eval_reasoning() {
     EXPECT(same, "eval answers depend on the batch size");
 }
 
+// Missing biases change the baseline's selected experts even though all
+// matrix weights are identical. Compare decoding against an explicit clone,
+// with a zero-bias negative control that must produce different logits.
+inline void test_decode_baseline_routing_state() {
+  for (bool hybrid : {false, true}) {
+    Config cfg; cfg.vocab = 32; cfg.seq_len = 8; cfg.d_model = 32;
+    cfg.n_heads = 2; cfg.n_layers = 1; cfg.n_experts = 4;
+    cfg.top_k = 2; cfg.expert_hidden = 32; cfg.ternary = true;
+    cfg.fp_attention = hybrid;
+    cfg.nope_every = hybrid ? 1 : 0;
+    Model<float> source(cfg); source.init(7);
+    source.router_bias[0] = {1000, -1000, -1000, 1000};
+    auto baseline = make_fp32_decode_baseline(source);
+    Config fcfg = cfg; fcfg.ternary = fcfg.fp_attention = false;
+    Model<float> reference(fcfg), zero_bias(fcfg);
+    for (const auto& p : source.infos)
+        for (size_t i = p.offset; i < p.offset + p.size; ++i)
+            reference.params[i] = zero_bias.params[i] = p.ternary ? source.qparams[i] : source.params[i];
+    reference.router_bias = source.router_bias;
+    baseline.decode_begin(1, {0}); reference.decode_begin(1, {0}); zero_bias.decode_begin(1, {0});
+    double missing_bias_difference = 0;
+    for (int pos = 0; pos < 8; ++pos) {
+        const int token = (3 * pos + 1) % cfg.vocab;
+        const float* a = baseline.decode_step(&token, pos);
+        const float* b = reference.decode_step(&token, pos);
+        const float* z = zero_bias.decode_step(&token, pos);
+        for (int v = 0; v < cfg.vocab; ++v) {
+            EXPECT(std::isfinite(a[v]) && a[v] == b[v], "baseline did not preserve routed reference logits");
+            missing_bias_difference = std::max(missing_bias_difference, std::abs(double(a[v]) - z[v]));
+        }
+    }
+    EXPECT(missing_bias_difference > 1e-6, "routing-state fixture cannot detect missing biases");
+  }
+}
+
 // generate gives exactly max_new tokens, or as many as the context allows
 // (seq_len - L + 1 for prompts of up to L tokens), and stops each sequence
 // where done says.
@@ -452,6 +488,8 @@ inline void test_generate_length() {
 }
 
 inline void test_model() {
+    test_decode_baseline_routing_state();
+    test_bitlinear_ste();
     test_generate_length();
     test_eval_reasoning();
     test_int8_rows();

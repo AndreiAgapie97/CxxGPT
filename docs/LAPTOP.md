@@ -136,6 +136,8 @@ switch it to ternary, which is what our kernels run: `TERNARY=1` with
 `TERNARY=1` keeps attention in full precision (`--fp-attn`, the best
 curriculum run so far, though not yet a settled result: README "Ternary
 FFN, full-precision attention"); `TERNARY=all` makes it ternary too.
+`TERNARY=all` passes `--fp-attn 0`, which clears a saved `--fp-attn`, so it
+also works when `INIT` is a checkpoint from a `TERNARY=1` night.
 On the curriculum, switching for the last third of training cost half as
 much as training ternary throughout (README, "Full precision first,
 ternary at the end").
@@ -147,17 +149,31 @@ day.
 
 ### GPU options
 
-Two GPU speed changes have so far run only on a CPU emulator of the
-kernels, not on a real GPU. `./test_gpu`, which `setup_wsl.sh` runs,
-checks both against the CPU engine:
-- fused attention, on by default: the attention weights are never
-  stored, which saves about 1.2 GB of GPU memory at the night-1 size and
-  leaves room for a larger batch or model. If `test_gpu` fails on it,
-  `--no-fused-attn` goes back to the cuBLAS attention, for the probe and
-  the night alike: `GPU="--gpu --no-fused-attn"` before the command;
+Two GPU speed options are off by default. `./test_gpu`, which
+`setup_wsl.sh` runs, checks both against the CPU engine:
+- `--fused-attn`: fused attention kernels that never store the attention
+  weights, which saves about 1.2 GB of GPU memory at the night-1 size and
+  leaves room for a larger batch or model. The default is the cuBLAS
+  attention (`--no-fused-attn` says so explicitly);
 - `--matmul bf16`: matrix products on the tensor cores at twice the TF32
   rate, with coarser rounding of each input; only worth having if the
   probe shows it faster: `GPU="--gpu --matmul bf16" scripts/probe.sh`.
+
+Their first run on the laptop's RTX 4070 (2026-10-14) left three
+`test_gpu` checks failing, so `test_gpu` ends without `all passed` and
+`setup_wsl.sh` without `All set` until they are fixed; everything the
+nights use by default passes:
+- `dense bf16`: gradients 9.9e-2 from the CPU's, against 5e-2 allowed;
+- `heads of 64` (70 tokens, fused): 4.1e-4 against 1e-4. The cuBLAS
+  attention misses that bound too there (1.8e-4); at 24, 128, 256 and 512
+  tokens both are within it and equal (6.0e-5 fused, 6.9e-5 cuBLAS at
+  512, the night-1 head size);
+- `head of 128` (fused): 1.3e-4, and 1.9e-4 at 128 tokens, about three
+  times the cuBLAS attention's error (5e-5 to 6e-5) at every length tried.
+  No night size uses head 128 (all have head 64), but this is the one to
+  find before turning fused attention on by default.
+To try fused attention anyway, `GPU="--gpu --fused-attn"` in front of
+`scripts/probe.sh` and `scripts/night.sh`.
 
 Where a training step spends its GPU time (if it runs out of memory, use
 `--batch 4 --accum 32`):

@@ -5,6 +5,7 @@
 #include <cmath>
 #include <cstdio>
 #include <functional>
+#include <limits>
 #include <vector>
 
 #include "../src/common.h"
@@ -35,6 +36,9 @@ std::vector<T> random_vec(size_t n, Rng& rng, double sd = 1.0) {
 inline double grad_error(std::vector<double>& x, const std::vector<double>& analytic,
                          const std::function<double()>& loss, Rng& rng, int max_checks = 400,
                          double eps = 1e-5) {
+    // std::max can silently discard NaN operands. A numerical checker must
+    // fail on non-finite values instead of reporting an error of zero.
+    if (analytic.size() != x.size()) return std::numeric_limits<double>::infinity();
     std::vector<size_t> idx;
     if (x.size() <= size_t(max_checks)) {
         for (size_t i = 0; i < x.size(); ++i) idx.push_back(i);
@@ -42,7 +46,10 @@ inline double grad_error(std::vector<double>& x, const std::vector<double>& anal
         for (int i = 0; i < max_checks; ++i) idx.push_back(rng.below(x.size()));
     }
     double max_diff = 0.0, max_grad = 1e-12;
-    for (double g : analytic) max_grad = std::max(max_grad, std::abs(g));
+    for (double g : analytic) {
+        if (!std::isfinite(g)) return std::numeric_limits<double>::infinity();
+        max_grad = std::max(max_grad, std::abs(g));
+    }
     for (size_t i : idx) {
         const double saved = x[i];
         x[i] = saved + eps;
@@ -50,7 +57,9 @@ inline double grad_error(std::vector<double>& x, const std::vector<double>& anal
         x[i] = saved - eps;
         const double lm = loss();
         x[i] = saved;
+        if (!std::isfinite(lp) || !std::isfinite(lm)) return std::numeric_limits<double>::infinity();
         const double numeric = (lp - lm) / (2 * eps);
+        if (!std::isfinite(numeric)) return std::numeric_limits<double>::infinity();
         max_diff = std::max(max_diff, std::abs(numeric - analytic[i]));
     }
     return max_diff / max_grad;
@@ -65,7 +74,10 @@ inline double project(const std::vector<double>& out, const std::vector<double>&
 
 inline double max_abs_diff(const float* a, const double* b, size_t n) {
     double m = 0.0;
-    for (size_t i = 0; i < n; ++i) m = std::max(m, std::abs(double(a[i]) - b[i]));
+    for (size_t i = 0; i < n; ++i) {
+        if (!std::isfinite(a[i]) || !std::isfinite(b[i])) return std::numeric_limits<double>::infinity();
+        m = std::max(m, std::abs(double(a[i]) - b[i]));
+    }
     return m;
 }
 

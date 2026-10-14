@@ -1,0 +1,44 @@
+model: vocab 256, seq 128, dim 64, layers 1, heads 4, MoE 4 experts (top-2, hidden 64, 0 shared), ternary BitLinear
+params: 0.082 M total, 0.058 M active per token
+data: 80102 train tokens, 20009 val tokens; 2 x 128 x 1 = 256 tokens per step
+step     50 | loss 3.3054 | lr 3.00e-03 | gnorm  1.008 |   10.8 ms |   23789 tok/s | load 1.67
+step    100 | loss 1.8733 | lr 2.99e-03 | gnorm  1.339 |   11.7 ms |   21958 tok/s | load 1.13
+step    150 | loss 1.3300 | lr 2.97e-03 | gnorm  1.228 |   11.7 ms |   21882 tok/s | load 1.16
+step    200 | loss 1.0831 | lr 2.95e-03 | gnorm  1.607 |   10.8 ms |   23630 tok/s | load 1.13
+step    250 | loss 0.9977 | lr 2.91e-03 | gnorm  1.390 |   10.8 ms |   23600 tok/s | load 1.12
+step    300 | loss 0.9630 | lr 2.87e-03 | gnorm  0.858 |    9.2 ms |   27947 tok/s | load 1.16
+step    350 | loss 0.9509 | lr 2.82e-03 | gnorm  1.589 |    6.0 ms |   42598 tok/s | load 1.31
+step    400 | loss 0.9254 | lr 2.76e-03 | gnorm  1.002 |    5.4 ms |   47242 tok/s | load 1.21
+step    450 | loss 0.9365 | lr 2.70e-03 | gnorm  1.244 |    4.6 ms |   55897 tok/s | load 1.12
+step    500 | loss 0.9081 | lr 2.63e-03 | gnorm  0.622 |    5.4 ms |   47188 tok/s | load 1.20
+step    550 | loss 0.9147 | lr 2.55e-03 | gnorm  0.947 |    3.9 ms |   64941 tok/s | load 1.12
+step    600 | loss 0.9047 | lr 2.47e-03 | gnorm  1.240 |    2.6 ms |  100021 tok/s | load 1.03
+step    650 | loss 0.8824 | lr 2.38e-03 | gnorm  1.457 |    3.2 ms |   79289 tok/s | load 1.09
+step    700 | loss 0.8638 | lr 2.29e-03 | gnorm  1.262 |    2.6 ms |   97955 tok/s | load 1.37
+step    750 | loss 0.8544 | lr 2.19e-03 | gnorm  1.198 |    3.5 ms |   72617 tok/s | load 1.20
+step    800 | loss 0.8481 | lr 2.09e-03 | gnorm  0.750 |    4.0 ms |   63540 tok/s | load 1.17
+step    850 | loss 0.8291 | lr 1.99e-03 | gnorm  2.784 |    5.5 ms |   46537 tok/s | load 1.12
+step    900 | loss 0.8177 | lr 1.89e-03 | gnorm  1.083 |    4.8 ms |   53734 tok/s | load 1.07
+step    950 | loss 0.7853 | lr 1.78e-03 | gnorm  0.815 |    5.4 ms |   47525 tok/s | load 1.16
+step   1000 | loss 0.7800 | lr 1.67e-03 | gnorm  0.997 |    4.3 ms |   59351 tok/s | load 1.14
+step   1050 | loss 0.7550 | lr 1.57e-03 | gnorm  1.115 |    2.6 ms |  100260 tok/s | load 1.09
+step   1100 | loss 0.7420 | lr 1.46e-03 | gnorm  1.193 |    3.2 ms |   79185 tok/s | load 1.05
+step   1150 | loss 0.7370 | lr 1.35e-03 | gnorm  1.021 |    2.4 ms |  105064 tok/s | load 1.07
+step   1200 | loss 0.7364 | lr 1.25e-03 | gnorm  1.389 |    2.6 ms |   99880 tok/s | load 1.05
+step   1250 | loss 0.7189 | lr 1.15e-03 | gnorm  1.054 |    3.5 ms |   72768 tok/s | load 1.04
+step   1300 | loss 0.7086 | lr 1.05e-03 | gnorm  1.369 |    3.3 ms |   76895 tok/s | load 1.29
+step   1350 | loss 0.7038 | lr 9.58e-04 | gnorm  1.905 |    3.9 ms |   65471 tok/s | load 1.05
+step   1400 | loss 0.6966 | lr 8.69e-04 | gnorm  1.204 |    2.8 ms |   90681 tok/s | load 1.19
+step   1450 | loss 0.6887 | lr 7.84e-04 | gnorm  1.656 |    3.4 ms |   76126 tok/s | load 1.26
+step   1500 | loss 0.6936 | lr 7.05e-04 | gnorm  1.335 |    2.8 ms |   90735 tok/s | load 1.14
+step   1550 | loss 0.6807 | lr 6.31e-04 | gnorm  1.588 |    5.4 ms |   47074 tok/s | load 1.09
+step   1600 | loss 0.6677 | lr 5.64e-04 | gnorm  1.248 |    6.0 ms |   42755 tok/s | load 1.16
+step   1650 | loss 0.6692 | lr 5.04e-04 | gnorm  1.218 |    6.0 ms |   42940 tok/s | load 1.24
+step   1700 | loss 0.6496 | lr 4.51e-04 | gnorm  1.778 |    6.2 ms |   41624 tok/s | load 1.11
+step   1750 | loss 0.6470 | lr 4.06e-04 | gnorm  1.278 |    2.7 ms |   96123 tok/s | load 1.06
+step   1800 | loss 0.6427 | lr 3.68e-04 | gnorm  1.399 |    3.7 ms |   68568 tok/s | load 1.05
+step   1850 | loss 0.6365 | lr 3.39e-04 | gnorm  3.690 |    3.4 ms |   74820 tok/s | load 1.20
+step   1900 | loss 0.6401 | lr 3.17e-04 | gnorm  1.831 |    2.9 ms |   88587 tok/s | load 1.06
+step   1950 | loss 0.6432 | lr 3.04e-04 | gnorm  1.151 |    3.2 ms |   80601 tok/s | load 1.13
+step   2000 | loss 0.6347 | val 0.6425 | lr 3.00e-04 | gnorm  1.390 |    2.7 ms |   95968 tok/s | load 1.20
+saved runs/reasoning-weighted-20261013/moe-ternary-seed2.ckpt at step 2000

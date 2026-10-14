@@ -1,0 +1,6 @@
+a99debd7ca0cbd500ebe1e05f8839a8f6afe2ade961e8729babc414e008fbebe  runs/reasoning-capacity-20261014/dense-seed1-large.ckpt
+8118189afc773a57f92fb1cca899f7bc46719e192138abc894f9c9cb69c8ee75  runs/reasoning-capacity-20261014/dense-seed2-large.ckpt
+b530790c882ed2d8eabb00a50bec2c85c76207942a94e832ee15551b8c296741  runs/reasoning-capacity-20261014/dense-seed3-large.ckpt
+61a161acaa52696f8d121c0527eb82c0c555c59f1d408b0cf43cdaa8d524239d  runs/reasoning-capacity-20261014/moe-ternary-seed1-large.ckpt
+4b26f4fc98ae0bf011c11861496726c179f207057b0b1086fdbd03a4e81f066c  runs/reasoning-capacity-20261014/moe-ternary-seed2-large.ckpt
+00ddeefb52e6c427d7133f67ab13352604d3f8b7cd4b583f30d1880d15772502  runs/reasoning-capacity-20261014/moe-ternary-seed3-large.ckpt

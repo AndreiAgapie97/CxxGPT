@@ -1,0 +1,5 @@
+runs/reasoning-2000-20261013/reason.test.txt: OK
+runs/reasoning-2000-20261013/reason.train.tok: OK
+runs/reasoning-2000-20261013/reason.val.tok: OK
+runs/reasoning-optimizer-20261014/dev-probe.txt: OK
+runs/reasoning-optimizer-20261014/targets/probe.txt: OK

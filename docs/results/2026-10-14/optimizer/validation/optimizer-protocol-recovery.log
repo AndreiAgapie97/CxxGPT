@@ -1,0 +1,2 @@
+python3 tests/test_optimizer_selection.py
+Optimizer selection: median/sum/loss/ID rules, immutable manifest, final-score gate and non-finite rejection passed

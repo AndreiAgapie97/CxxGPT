@@ -390,6 +390,11 @@ double cross_entropy_forward(T* probs, T* losses, const int* targets, int N, int
             T* p = probs + long(n) * V;
             T mx = p[0];
             for (int i = 1; i < V; ++i) mx = std::max(mx, p[i]);
+            // Save the target logit before replacing logits by probabilities.
+            // log(sum exp(z - max(z))) + max(z) - z_target stays meaningful
+            // even when p_target underflows. A clamped -log(p_target) would
+            // flatten the loss while backward still returns p - onehot.
+            const T target_gap = targets[n] < 0 ? T(0) : mx - p[targets[n]];
             T sum = 0;
             for (int i = 0; i < V; ++i) {
                 p[i] = fast_exp(p[i] - mx);
@@ -397,10 +402,7 @@ double cross_entropy_forward(T* probs, T* losses, const int* targets, int N, int
             }
             const T inv = T(1) / sum;
             for (int i = 0; i < V; ++i) p[i] *= inv;
-            // Clamped so a probability that underflowed to 0 gives a large
-            // finite loss instead of inf.
-            losses[n] = targets[n] < 0 ? T(0)
-                                       : -std::log(std::max(p[targets[n]], std::numeric_limits<T>::min()));
+            losses[n] = targets[n] < 0 ? T(0) : target_gap + std::log(sum);
         }
     });
     double total = 0;
@@ -473,4 +475,23 @@ void act_quantize(T* xq, const T* x, int N, int C) {
             for (int c = 0; c < C; ++c) q[c] = std::clamp(std::nearbyint(xn[c] * inv), T(-127), T(127)) * scale;
         }
     });
+}
+
+// BitLinear with already-quantized weights. Caller owns xq[N, IC] scratch;
+// master weights are quantized once per optimizer update by the model.
+template <class T>
+void bitlinear_forward(T* y, const T* x, const T* wq, T* xq, int N, int IC, int OC) {
+    act_quantize(xq, x, N, IC);
+    linear_forward(y, xq, wq, N, IC, OC);
+}
+
+// Identity straight-through estimator (STE): dx += dy Wq and
+// dW_master += dy^T xq. Scales and rounding decisions are detached.
+// This is the derivative of a local surrogate with quantizer Jacobians I,
+// not the exact derivative of the discrete forward function.
+template <class T>
+void bitlinear_backward(T* dx, T* dw, const T* dy, const T* x, const T* wq, T* xq,
+                        int N, int IC, int OC) {
+    act_quantize(xq, x, N, IC);
+    linear_backward(dx, dw, dy, xq, wq, N, IC, OC);
 }

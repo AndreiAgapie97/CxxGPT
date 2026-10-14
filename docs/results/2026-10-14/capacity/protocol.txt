@@ -1,0 +1,2 @@
+steps=2000 threads=2 batch=2 sequence=128 AdamW lr=0.003 warmup=20 clip=1 wd=0.1 probe_seed=20261015 cells=add/cmp-difficulty1/2/3 per_cell=100
+small=dim64 layers1 dense_ffn128 expert_ffn64; large=dim128 layers2 dense_ffn256 expert_ffn128; heads4 topk2 experts4 shared0; fresh initialization/data seeds1/2/3

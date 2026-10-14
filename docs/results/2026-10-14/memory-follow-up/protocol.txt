@@ -1,0 +1,1 @@
+rounds=3 threads=2 dim=64 layers=2 heads=4 dense_ffn=128 expert_ffn=64 experts=4 topk=2 shared=0 seed=1 train_steps=3 train_batch=2 decode_tokens=16

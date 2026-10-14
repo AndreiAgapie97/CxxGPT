@@ -1,0 +1,11 @@
+Native memory follow-up protocol (fixed before observations)
+Measure float and ternary dense/MoE CPU models, matched active FFN width, dim64/layers2/heads4.
+Vocabulary256/8192; context128/512. Batch1/4 decode; batch2/seq32 and128 training.
+Packed decode only batch1; one fresh process per configuration, three rounds with rotated order.
+Training: three AdamW or Muon updates, fixed deterministic cyclic labels, seed1, lr0.001, clip1.
+Decode: feed16 tokens after reserving full context; touch every cache element allocated by resize/assign.
+Count vector size bytes and capacity bytes by categories independently of Linux RSS/ru_maxrss.
+Report stage startup/model-loaded/ready/post-work. Process peak includes construction/source model and is cumulative.
+Exclude metadata objects, strings, allocator overhead and external/thread-local scratch from array counts.
+RSS includes those and libraries/threads; no claim of isolated kernel time, task accuracy or GPU memory.
+Before/after float training checkpoint comparison: dense/MoE x AdamW/Muon, actual CLI four updates on same masked data.

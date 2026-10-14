@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <limits>
 #include <vector>
 
 #include "cuda_emu.h"
@@ -18,14 +19,16 @@ namespace attention_test {
 
 // max |got - want| / max |want| over the columns [c0, c1) of rows of width w.
 inline double rel_err(const std::vector<float>& got, const std::vector<double>& want, int w, int c0, int c1) {
+    if (got.size() != want.size()) return INFINITY;
     double diff = 0, mx = 0;
     for (size_t i = 0; i < want.size(); ++i) {
         const int c = int(i % size_t(w));
         if (c < c0 || c >= c1) continue;
+        if (!std::isfinite(got[i]) || !std::isfinite(want[i])) return INFINITY;
         diff = std::max(diff, std::abs(got[i] - want[i]));
         mx = std::max(mx, std::abs(want[i]));
     }
-    return diff / mx;
+    return mx > 0 ? diff / mx : diff == 0 ? 0 : INFINITY;
 }
 
 inline void check(int B, int NH, int HS, int Tn, uint64_t seed) {
@@ -91,6 +94,9 @@ inline void check(int B, int NH, int HS, int Tn, uint64_t seed) {
 }  // namespace attention_test
 
 inline void test_attention() {
+    EXPECT(std::isinf(attention_test::rel_err({NAN}, {1.0}, 1, 0, 1)), "attention error metric ignored NaN");
+    EXPECT(std::isinf(attention_test::rel_err({1.0f}, {INFINITY}, 1, 0, 1)), "attention error metric ignored infinity");
+    EXPECT(attention_test::rel_err({0.0f}, {0.0}, 1, 0, 1) == 0, "zero reference error is not zero");
     using attention_test::check;
     check(2, 2, 16, 5, 1);    // shorter than a tile
     check(2, 3, 16, 33, 2);   // one row past a tile

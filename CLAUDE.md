@@ -42,12 +42,17 @@ Reasoning is the first capability we go after.
   prep-qa` turns GSM8K-style JSON Lines into the same format.
 - `src/gpu.cu` (interface `src/gpu.h`): the CUDA training backend, the
   same model op for op, fp32 with cuBLAS (TF32 by default; `--matmul
-  bf16`), and fused attention kernels (`src/attention.cuh`, tested on a
-  CPU emulator, `tests/cuda_emu.h`; `--no-fused-attn` goes back to
-  cuBLAS). `--profile` times each part of a step. `tests/test_gpu.cpp`
-  compares it with the CPU engine. Build with `make gpu`, giving
-  `cxxgpt-gpu` (`train --gpu`) and `test_gpu`. The fused attention and
-  bf16 had not yet run on a real GPU when they were merged.
+  bf16`), and fused attention kernels (`src/attention.cuh`, opt-in with
+  `--fused-attn`; tested on a CPU emulator, `tests/cuda_emu.h`).
+  `--profile` times each part of a step. `tests/test_gpu.cpp` compares it
+  with the CPU engine. Build with `make gpu`, giving `cxxgpt-gpu` (`train
+  --gpu`) and `test_gpu`. On the laptop's RTX 4070, everything passes
+  except three opt-in checks: `dense bf16`, and fused attention at
+  `heads of 64` (70 tokens, where cuBLAS also misses the bound) and
+  `head of 128` (about 3x cuBLAS's error); docs/LAPTOP.md "GPU options".
+- `docs/research.md`: the research log from the merged `gpt/research`
+  branch (stable cross-entropy, token-weighted accumulation, optimizer
+  grids, digit curricula), with raw results under `docs/results/`.
 - `src/cxxgpt.cpp`: the CLI (train, sample, eval, data prep, benchmarks).
 - `scripts/get_data.py`: downloads public datasets (GSM8K, TinyStories,
   FineWeb-Edu, OpenMathInstruct-2, MetaMathQA) into `data/`, as text with

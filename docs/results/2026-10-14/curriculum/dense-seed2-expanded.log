@@ -1,0 +1,15 @@
+starting from the weights in runs/reasoning-curriculum-20261014/dense-seed2-initial.ckpt
+model: vocab 256, seq 128, dim 128, layers 2, heads 4, dense FFN 256
+params: 0.361 M total, 0.361 M active per token
+data: 106720 train tokens, 16122 val tokens; 2 x 128 x 1 = 256 tokens per step
+step    100 | loss 0.2865 | lr 4.93e-04 | gnorm  1.103 |   16.6 ms |   15415 tok/s
+step    200 | loss 0.1946 | lr 4.64e-04 | gnorm  6.223 |   17.1 ms |   14930 tok/s
+step    300 | loss 0.1804 | lr 4.16e-04 | gnorm  3.057 |   16.0 ms |   16003 tok/s
+step    400 | loss 0.1665 | lr 3.53e-04 | gnorm  1.617 |   14.9 ms |   17178 tok/s
+step    500 | loss 0.1530 | lr 2.83e-04 | gnorm  1.312 |   16.8 ms |   15279 tok/s
+step    600 | loss 0.1458 | lr 2.12e-04 | gnorm  1.227 |   14.5 ms |   17692 tok/s
+step    700 | loss 0.1420 | lr 1.47e-04 | gnorm  1.961 |   16.1 ms |   15943 tok/s
+step    800 | loss 0.1357 | lr 9.51e-05 | gnorm  0.638 |   17.5 ms |   14602 tok/s
+step    900 | loss 0.1435 | lr 6.17e-05 | gnorm  0.782 |   15.6 ms |   16403 tok/s
+step   1000 | loss 0.1177 | val 0.1118 | lr 5.00e-05 | gnorm  0.434 |   16.6 ms |   15376 tok/s
+saved runs/reasoning-curriculum-20261014/dense-seed2-expanded.ckpt at step 1000

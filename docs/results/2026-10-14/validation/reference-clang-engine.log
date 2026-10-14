@@ -1,0 +1,33 @@
+ops
+  gemm: 328 shapes, worst relative error 2.53e-07
+  ok (0.95 s)
+model
+  BitLinear identity STE: surrogate errors dx 2.6e-11, dw 2.8e-11
+  dense: 1216 params in 14 tensors, worst gradient error 4.5e-09
+  moe+shared: 2144 params in 20 tensors, worst gradient error 1.0e-09
+  moe top-1: 1856 params in 16 tensors, worst gradient error 5.2e-09
+  ok (0.14 s)
+reasoning
+  9000 problems verified by an independent solver
+  ok (0.01 s)
+reasoning metrics
+  ok (0.00 s)
+tokenizer
+  ok (0.00 s)
+data
+  ok (0.00 s)
+numerics
+  ok (0.00 s)
+policy gradient
+  ok (0.00 s)
+train
+  masked global-loss finite-difference error 1.5e-08
+  variant 0 masked accumulation: double grad 5.6e-17; float grad 6.0e-08 param 6.0e-08 moment 9.3e-10
+  variant 1 masked accumulation: double grad 2.8e-17; float grad 3.7e-08 param 3.7e-09 moment 4.7e-10
+  variant 2 masked accumulation: double grad 3.5e-17; float grad 3.0e-08 param 3.7e-09 moment 4.7e-10
+  variant 3 masked accumulation: double grad 5.6e-17; float grad 3.4e-08 param 3.7e-09 moment 7.0e-10
+  ternary MoE learned: 2.588 -> 1.285; checkpoint continuation identical
+  ok (0.01 s)
+optim
+  ok (0.09 s)
+all passed

@@ -1,0 +1,2 @@
+dense muon-lr0015
+moe-ternary muon-lr003

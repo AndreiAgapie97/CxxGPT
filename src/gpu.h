@@ -14,10 +14,9 @@
 //   rounded to 8 significant bits. The rounding happens inside cuBLAS, so
 //   whether it is faster overall is for the GPU to show (scripts/probe.sh).
 //
-// Attention runs on fused kernels (attention.cuh) that never store the
-// Tn x Tn matrix of attention weights; fused_attention = false goes back to
-// cuBLAS products through that matrix (more memory, kept as a fallback and
-// a second reference for the tests).
+// Fused attention (attention.cuh) is opt-in until NVIDIA runtime validation.
+// It never stores the Tn x Tn matrix of attention weights; the default
+// retains cuBLAS products through that matrix and supplies a second reference.
 //
 // This header is plain C++, so the rest of the code (built by g++ or
 // clang++) can use the GPU without including any CUDA header.
@@ -36,7 +35,10 @@ enum class Matmul { fp32, tf32, bf16 };
 class GpuTrainer {
 public:
     GpuTrainer(const Config& cfg, const std::vector<ParamInfo>& infos, Matmul matmul = Matmul::tf32,
-               bool fused_attention = true);
+               bool fused_attention = false);
+    // Preserve the earlier precision-selector API and its cuBLAS attention.
+    GpuTrainer(const Config& cfg, const std::vector<ParamInfo>& infos, bool tf32)
+        : GpuTrainer(cfg, infos, tf32 ? Matmul::tf32 : Matmul::fp32, false) {}
     ~GpuTrainer();
     GpuTrainer(const GpuTrainer&) = delete;
     GpuTrainer& operator=(const GpuTrainer&) = delete;

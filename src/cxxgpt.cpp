@@ -19,6 +19,7 @@
 #include <memory>
 #include <set>
 #include <thread>
+#include <utility>
 
 #include "args.h"
 #include "common.h"
@@ -572,12 +573,12 @@ struct GpuBackend : Backend {
 double eval_loss(Backend& be, const TokenData& data, size_t lo, size_t hi, int B, int Tn, int batches) {
     Rng rng(12345);  // the same batches every time, so evals are comparable
     std::vector<int> inp(size_t(B) * Tn), tgt(size_t(B) * Tn);
-    double total = 0.0;
+    TokenLossMean total;
     for (int i = 0; i < batches; ++i) {
         data.sample_batch(rng, B, Tn, lo, hi, inp.data(), tgt.data());
-        total += be.forward(inp.data(), tgt.data(), B, Tn, false);
+        total.add(be.forward(inp.data(), tgt.data(), B, Tn, false), count_targets(tgt.data(), tgt.size()));
     }
-    return total / batches;
+    return total.value();
 }
 
 int cmd_train(Args& a) {
@@ -588,7 +589,7 @@ int cmd_train(Args& a) {
             "        --bpe tok.bpe (the tokenizer the data was made with, for --reason-test)\n"
             "model:  --seq 256 --dim 256 --layers 4 --heads 4 --ffn 0(auto)\n"
             "        --experts 0 --topk 2 --ehidden 0(auto) --shared 0 --ternary\n"
-            "        --fp-attn (with --ternary: attention stays full precision)\n"
+            "        --fp-attn (with --ternary: attention stays full precision; --fp-attn 0 clears it on --init)\n"
             "        --nope-every 0 (N: every Nth layer has no position encoding; 1: none has)\n"
             "train:  --batch 16 --accum 1 --steps 2000 --lr 1e-3 --min-lr-frac 0.1\n"
             "        --warmup 100 --wd 0.1 --clip 1.0 --bias-rate 1e-3 --seed 1\n"
@@ -600,7 +601,8 @@ int cmd_train(Args& a) {
             "        --time-limit MINUTES --threads N --profile\n"
             "gpu:    --gpu (train on the GPU; needs cxxgpt-gpu, from make gpu)\n"
             "        --matmul tf32 (tensor cores; fp32: exact, slower; bf16: coarser, maybe faster)\n"
-            "        --no-fused-attn (attention through cuBLAS and the full matrix of weights: more memory)\n"
+            "        --no-tf32 is an alias for fp32; --fused-attn opts into experimental kernels\n"
+            "        default attention uses cuBLAS until NVIDIA runtime validation\n"
             "reason: --reason-test FILE --reason-every STEPS --reason-limit 300\n"
             "Ctrl-C saves a checkpoint and stops; --resume continues from --out, and\n"
             "takes precedence over --init once --out exists.\n");
@@ -625,9 +627,12 @@ int cmd_train(Args& a) {
         // weights ternary from here on: the same weights, used differently
         // (and --fp-attn keeps attention in full precision).
         const bool to_ternary = cfg.ternary, fp_attn = cfg.fp_attention;
+        const bool switch_attn = a.has("fp-attn"), switch_nope = a.has("nope-every");
+        const int nope = cfg.nope_every;
         cfg = peek_checkpoint_config(init);
         cfg.ternary = cfg.ternary || to_ternary;
-        cfg.fp_attention = cfg.fp_attention || fp_attn;
+        if (switch_attn) cfg.fp_attention = fp_attn;
+        if (switch_nope) cfg.nope_every = nope;
     }
     const int B = int(a.integer("batch", 16)), accum = int(a.integer("accum", 1));
     const int Tn = std::min(cfg.seq_len, int(a.integer("seq", cfg.seq_len)));
@@ -642,14 +647,20 @@ int cmd_train(Args& a) {
     const Tokenizer tok = load_tokenizer(a.str("bpe"));
     const int reason_every = int(a.integer("reason-every", 0)), reason_limit = int(a.integer("reason-limit", 300));
     g_profiler.enabled = a.flag("profile");
-    const bool use_gpu = a.flag("gpu"), fused_attn = !a.flag("no-fused-attn");
-    const std::string matmul = a.str("matmul", "tf32");
+    const bool use_gpu = a.flag("gpu"), request_fused = a.flag("fused-attn"), disable_fused = a.flag("no-fused-attn");
+    CHECK(!request_fused || !disable_fused, "choose only one of --fused-attn and --no-fused-attn");
+    const bool fused_attn = request_fused;
+    const bool no_tf32 = a.flag("no-tf32");
+    const std::string matmul = a.str("matmul", no_tf32 ? "fp32" : "tf32");
+    CHECK(!no_tf32 || matmul == "fp32", "--no-tf32 conflicts with --matmul %s", matmul.c_str());
     CHECK(matmul == "fp32" || matmul == "tf32" || matmul == "bf16", "--matmul takes fp32, tf32 or bf16");
     AdamW opt;
     opt.weight_decay = a.real("wd", 0.1);
     opt.muon = a.flag("muon");
     a.done();
     CHECK(cfg.vocab >= int(data.vocab), "model vocab %d < data vocab %u", cfg.vocab, data.vocab);
+    CHECK(log_every > 0 && eval_batches > 0, "log interval and evaluation batch count must be positive");
+    AccumulationBatch group(B, Tn, accum);
 
     Model<float> model(cfg);
     model.init(uint64_t(seed));
@@ -683,13 +694,20 @@ int cmd_train(Args& a) {
     const TokenData* val = &val_data;
     size_t val_lo = 0, val_hi = val_data.tokens.size();
     if (val_path.empty()) {
+        CHECK(val_frac >= 0 && val_frac < 1, "--val-frac must be in [0, 1)");
         train_end = size_t(double(data.tokens.size()) * (1.0 - val_frac));
         val = &data;
         val_lo = train_end;
         val_hi = data.tokens.size();
     }
-    std::printf("data: %zu train tokens, %zu val tokens; %d x %d x %d = %d tokens per step\n",
-                train_end, val_hi - val_lo, B, Tn, accum, B * Tn * accum);
+    if (steps > opt.step) {
+        CHECK(train_end >= size_t(Tn) + 1, "training range is shorter than a sequence");
+        CHECK(data.mask.empty() || std::any_of(data.mask.begin() + 1, data.mask.begin() + train_end,
+                                              [](uint8_t m) { return m != 0; }),
+              "training range contains no predictable targets");
+    }
+    std::printf("data: %zu train tokens, %zu val tokens; %d x %d x %d = %zu tokens per step\n",
+                train_end, val_hi - val_lo, B, Tn, accum, group.inputs.size());
 
     FILE* log = nullptr;
     if (!log_path.empty()) {
@@ -722,37 +740,46 @@ int cmd_train(Args& a) {
         }
     };
 
-    std::vector<int> inp(size_t(B) * Tn), tgt(size_t(B) * Tn);
     const double t_start = now_seconds();
     double loss_acc = 0, ms_acc = 0;
     int n_acc = 0;
     long step = opt.step;
     const long first_step = step;
+    size_t empty_groups = 0;
     constexpr int kMaxBadSteps = 10;
     int bad_steps = 0;
     bool diverged = false;
     long saved_step = resume ? first_step : -1;  // what --out holds
-    for (; step < steps && !g_stop; ++step) {
+    for (; step < steps && !g_stop;) {
         const double t0 = now_seconds();
-        be.zero_grad();
-        double loss = 0.0;
-        for (int micro = 0; micro < accum; ++micro) {
-            data.sample_batch(data_rng, B, Tn, 0, train_end, inp.data(), tgt.data());
-            loss += be.forward(inp.data(), tgt.data(), B, Tn, true) / accum;
-            be.backward(1.0 / accum);
+        group.sample(data, data_rng, 0, train_end);
+        if (!group.total_valid) {
+            if (++empty_groups == 1) std::printf("skipping sampled groups with no predictable targets\n");
+            if (time_limit > 0 && now_seconds() - t_start > time_limit) {
+                std::printf("time limit reached\n");
+                break;
+            }
+            continue;  // no Adam moments, decay, balancing, or schedule step
         }
+        const double loss = accumulated_backward(be, group);
         const double lr_now = lr_at(step, warmup, steps, lr, min_frac);
-        const double gnorm = be.step(lr_now, clip);
+        const double gnorm = std::isfinite(loss) ? be.step(lr_now, clip)
+                                               : std::numeric_limits<double>::quiet_NaN();
         // A non-finite gradient leaves the weights untouched (Backend::step). A run
         // of them stops training rather than spending the night on NaNs.
         if (!std::isfinite(gnorm) || !std::isfinite(loss)) {
             std::printf("step %ld: loss %g, gradient norm %g; update skipped\n", step + 1, loss, gnorm);
+            be.balance(0);  // discard this attempt's loads without changing biases
             if (++bad_steps == kMaxBadSteps) {
                 std::printf("stopping: %d diverged steps in a row\n", kMaxBadSteps);
                 diverged = true;
                 break;
             }
-            continue;
+            if (time_limit > 0 && now_seconds() - t_start > time_limit) {
+                diverged = true;
+                break;
+            }
+            continue;  // failed attempts do not advance optimizer or schedule
         }
         bad_steps = 0;
         const double load = be.balance(bias_rate);
@@ -765,13 +792,13 @@ int cmd_train(Args& a) {
 
         const bool last = step + 1 == steps;
         double vloss = -1;
-        if (eval_every > 0 && ((step + 1) % eval_every == 0 || last) && val_hi > val_lo + Tn + 1)
+        if (eval_every > 0 && ((step + 1) % eval_every == 0 || last) && val_hi >= val_lo + Tn + 1)
             vloss = eval_loss(be, *val, val_lo, val_hi, B, Tn, eval_batches);
         if ((step + 1) % log_every == 0 || last || vloss >= 0) {
             std::printf("step %6ld | loss %.4f", step + 1, loss_acc / n_acc);
             if (vloss >= 0) std::printf(" | val %.4f", vloss);
             std::printf(" | lr %.2e | gnorm %6.3f | %6.1f ms | %7.0f tok/s", lr_now, gnorm,
-                        ms_acc / n_acc, B * Tn * accum / (ms_acc / n_acc) * 1e3);
+                        ms_acc / n_acc, double(group.inputs.size()) / (ms_acc / n_acc) * 1e3);
             if (cfg.moe()) std::printf(" | load %.2f", load);
             std::printf("\n");
             std::fflush(stdout);
@@ -789,13 +816,14 @@ int cmd_train(Args& a) {
             saved_step = opt.step;
         }
         if (reason_every > 0 && (step + 1) % reason_every == 0 && !last) reason_eval(step + 1);
+        ++step;
         if (time_limit > 0 && now_seconds() - t_start > time_limit) {
             std::printf("time limit reached\n");
-            ++step;
             break;
         }
     }
     if (g_profiler.enabled) g_profiler.report(int(step - first_step));
+    if (empty_groups) std::printf("skipped %zu empty sampled groups\n", empty_groups);
     if (diverged) {
         // The weights are finite, but whatever overflowed is in them by now:
         // the last checkpoint is the one to keep.
@@ -863,9 +891,17 @@ int cmd_bench_infer(Args& a) {
     ThreadPool tp(threads_arg(a));
     g_pool = &tp;
     const std::string ckpt = a.str("ckpt");
+    if (a.help()) {
+        std::printf("cxxgpt bench-infer [--ckpt FILE | model options]\n"
+                    "    --tokens 128 --reps 7 --warmup 2 --threads N --log FILE.csv\n"
+                    "Alternates fp32/packed run order on the same forced token stream.\n");
+        return 0;
+    }
     int tokens = int(a.integer("tokens", 128));
     const bool tokens_given = a.has("tokens");
     const int reps = int(a.integer("reps", 7));
+    const int warmup = int(a.integer("warmup", 2));
+    const std::string log_path = a.str("log");
     Config cfg = config_from_args(a, 256);
     a.done();
     if (!ckpt.empty()) cfg = peek_checkpoint_config(ckpt);
@@ -878,23 +914,18 @@ int cmd_bench_infer(Args& a) {
     print_config(cfg, model);
     if (!tokens_given) tokens = std::min(tokens, cfg.seq_len);  // a shorter context: all of it
     CHECK(tokens > 0 && tokens <= cfg.seq_len, "--tokens must be in [1, seq_len]");
+    CHECK(reps > 0 && warmup >= 0, "--reps must be positive and --warmup nonnegative");
 
     // fp32 baseline: the quantized weights as plain floats, no activation
     // quantization.
-    model.quantize_weights();
-    Config fcfg = cfg;
-    fcfg.ternary = fcfg.fp_attention = false;
-    Model<float> fp32(fcfg);
-    for (const ParamInfo& p : model.infos)
-        std::copy_n(&(p.ternary ? model.qparams : model.params)[p.offset], p.size, &fp32.params[p.offset]);
+    Model<float> fp32 = make_fp32_decode_baseline(model);
     TernaryEngine engine(model);
 
     Rng rng(7);
     std::vector<int> seq(tokens);
     for (int& t : seq) t = int(rng.below(cfg.vocab));
-    // What the model computes as trained (ternary weights and int8
-    // activations, in fp32 arithmetic): the engine should pick the same
-    // next token everywhere. The fp32 baseline skips the int8 rounding, so
+    // Quantized training-model reference, including converted checkpoints
+    // in speed-only mode. The fp32 baseline skips int8 rounding, so
     // where the top two tokens are close (random input makes them close
     // often) it can pick the other one.
     std::vector<int> top_model;
@@ -902,41 +933,69 @@ int cmd_bench_infer(Args& a) {
     for (int pos = 0; pos < tokens; ++pos)
         top_model.push_back(pick_token(model.decode_step(&seq[pos], pos), cfg.vocab, 0.0, nullptr));
     std::vector<double> t_fp32, t_tern;
-    double agree = 0, agree_model = 0;
-    for (int r = 0; r < reps; ++r) {
-        double t0 = now_seconds();
-        fp32.decode_begin(1, {0});
-        std::vector<int> top_fp32;
-        for (int pos = 0; pos < tokens; ++pos) {
-            const float* lg = fp32.decode_step(&seq[pos], pos);
-            top_fp32.push_back(pick_token(lg, cfg.vocab, 0.0, nullptr));
-        }
-        t_fp32.push_back(now_seconds() - t0);
-        t0 = now_seconds();
-        engine.reset();
-        std::vector<int> top_tern;
-        for (int pos = 0; pos < tokens; ++pos)
-            top_tern.push_back(pick_token(engine.step(seq[pos]), cfg.vocab, 0.0, nullptr));
-        t_tern.push_back(now_seconds() - t0);
+    std::vector<int> top_fp32(tokens), top_tern(tokens);
+    auto run_pair = [&](bool fp32_first, double& elapsed_fp32, double& elapsed_tern) {
+        auto run_fp32 = [&] {
+            const double t0 = now_seconds();
+            fp32.decode_begin(1, {0});
+            for (int pos = 0; pos < tokens; ++pos)
+                top_fp32[pos] = pick_token(fp32.decode_step(&seq[pos], pos), cfg.vocab, 0.0, nullptr);
+            elapsed_fp32 = now_seconds() - t0;
+        };
+        auto run_tern = [&] {
+            const double t0 = now_seconds();
+            engine.reset();
+            for (int pos = 0; pos < tokens; ++pos)
+                top_tern[pos] = pick_token(engine.step(seq[pos]), cfg.vocab, 0.0, nullptr);
+            elapsed_tern = now_seconds() - t0;
+        };
+        if (fp32_first) { run_fp32(); run_tern(); }
+        else { run_tern(); run_fp32(); }
         int same = 0, same_model = 0;
         for (int pos = 0; pos < tokens; ++pos) {
-            same += top_tern[pos] == top_fp32[pos];
-            same_model += top_tern[pos] == top_model[pos];
+            same += top_fp32[pos] == top_tern[pos];
+            same_model += top_model[pos] == top_tern[pos];
         }
-        agree = double(same) / tokens;
-        agree_model = double(same_model) / tokens;
+        return std::pair<double, double>{double(same) / tokens, double(same_model) / tokens};
+    };
+    size_t fp32_weight_bytes = fp32.params.size() * sizeof(float);
+    if (cfg.moe())
+        for (const auto& bias : fp32.router_bias) fp32_weight_bytes += bias.size() * sizeof(float);
+    FILE* log = nullptr;
+    if (!log_path.empty()) {
+        CHECK(!std::filesystem::exists(log_path), "benchmark log already exists: %s", log_path.c_str());
+        log = std::fopen(log_path.c_str(), "w");
+        CHECK(log, "cannot write %s", log_path.c_str());
+        std::fprintf(log, "trial,fp32_first,tokens,threads,fp32_ms,ternary_ms,argmax_agreement,fp32_weight_bytes,ternary_weight_bytes,ternary_model_agreement\n");
     }
+    double agree = 0, agree_model = 0;
+    for (int r = 0; r < warmup; ++r) {
+        double f, t;
+        run_pair(r % 2 == 0, f, t);
+    }
+    for (int r = 0; r < reps; ++r) {
+        double f, t;
+        const auto [same, same_model] = run_pair(r % 2 == 0, f, t);
+        t_fp32.push_back(f); t_tern.push_back(t);
+        agree += same / reps; agree_model += same_model / reps;
+        if (log) std::fprintf(log, "%d,%d,%d,%d,%.9f,%.9f,%.9f,%zu,%zu,%.9f\n", r,
+                              int(r % 2 == 0), tokens, tp.size(), f * 1e3, t * 1e3, same,
+                              fp32_weight_bytes, engine.weight_bytes(), same_model);
+    }
+    if (log) std::fclose(log);
     auto median = [](std::vector<double> v) {
         std::sort(v.begin(), v.end());
-        return v[v.size() / 2];
+        const size_t i = v.size() / 2;
+        return v.size() % 2 ? v[i] : (v[i - 1] + v[i]) / 2;
     };
     const double f = tokens / median(t_fp32), t = tokens / median(t_tern);
-    const double fb = double(model.num_params()) * 4, tb = double(engine.weight_bytes());
-    std::printf("decode, 1 sequence, %d tokens, median of %d, %d threads:\n", tokens, reps, tp.size());
+    const double fb = double(fp32_weight_bytes), tb = double(engine.weight_bytes());
+    std::printf("decode, 1 sequence, %d tokens, median of %d, %d threads (%d warmup pairs, alternating order):\n",
+                tokens, reps, tp.size(), warmup);
     std::printf("  fp32     %9.1f tok/s   weights %8.2f MB\n", f, fb / 1e6);
     std::printf("  ternary  %9.1f tok/s   weights %8.2f MB\n", t, tb / 1e6);
     std::printf("  speedup %.2fx, memory %.1fx smaller\n", t / f, fb / tb);
-    std::printf("  same next token as the model as trained on %.0f%% of positions (as fp32: %.0f%%)\n",
+    std::printf("  same next token as the ternary training-model path on %.0f%% of positions (as fp32: %.0f%%)\n",
                 100 * agree_model, 100 * agree);
     return 0;
 }

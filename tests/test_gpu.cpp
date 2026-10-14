@@ -22,6 +22,8 @@
 #include "../src/model.h"
 #include "../src/train.h"
 #include "test_util.h"
+#include "extreme_loss_fixture.h"
+#include "test_accumulation.h"
 
 namespace {
 
@@ -125,6 +127,54 @@ void compare(const char* name, const Config& cfg, double tol_loss, double tol_gr
     EXPECT(worst_param <= tol_param, "%s: weights after the optimizer step differ by %g", name, worst_param);
 }
 
+// The production accumulation helper must preserve the CPU macro-batch
+// objective on CUDA too. Runtime validation requires physical GPU hardware.
+void masked_accumulation() {
+    const auto group = masked_accumulation_fixture();
+  for (bool fused : {false, true}) {
+    for (int variant = 0; variant < 8; ++variant) {
+        Config cfg;
+        cfg.vocab = 13; cfg.seq_len = 8; cfg.d_model = 32;
+        cfg.n_heads = 2; cfg.n_layers = 1; cfg.ffn_hidden = 48;
+        cfg.ternary = variant % 2 || variant == 4;
+        cfg.fp_attention = variant == 4 || variant == 5;
+        if (variant >= 4) cfg.n_layers = 2;
+        if (variant >= 5) cfg.nope_every = variant == 6 ? 1 : 2;
+        if (variant == 2 || variant == 3 || variant == 5 || variant == 7) {
+            cfg.n_experts = 4; cfg.top_k = 2; cfg.expert_hidden = 24; cfg.n_shared = 1;
+        }
+        Model<float> cpu(cfg);
+        cpu.init(57);
+        GpuTrainer gpu(cfg, cpu.infos, Matmul::fp32, fused);
+        gpu.set_params(cpu.params.data());
+        cpu.zero_grad();
+        const double lc = cpu.forward(group.inputs.data(), group.targets.data(), 4, 8, true);
+        cpu.backward();
+        const double lg = accumulated_backward(gpu, group);
+        std::vector<float> grad(cpu.num_params());
+        gpu.get_grads(grad.data());
+        for (float g : grad) EXPECT(std::isfinite(g), "non-finite accumulated GPU gradient");
+        const double tol = cfg.ternary ? 3e-2 : 1e-4;
+        EXPECT(std::abs(lc - lg) < (cfg.ternary ? 1e-3 : 1e-5) * std::abs(lc),
+               "variant %d accumulated GPU loss %g vs CPU %g", variant, lg, lc);
+        double worst = 0;
+        for (const auto& p : cpu.infos) {
+            const double d = rel_l2(grad.data() + p.offset, cpu.grads.data() + p.offset, p.size);
+            EXPECT(std::isfinite(d) && d < tol, "variant %d accumulated GPU tensor %s error %g",
+                   variant, p.name.c_str(), d);
+            worst = std::max(worst, d);
+        }
+        std::printf("  variant %d masked GPU accumulation, fused=%d: loss difference %.1e gradient %.1e\n",
+                    variant, int(fused), std::abs(lc - lg), worst);
+        auto empty = group;
+        std::fill(empty.targets.begin(), empty.targets.end(), -1); empty.refresh_counts();
+        EXPECT(accumulated_backward(gpu, empty) == 0, "empty GPU accumulated loss nonzero");
+        gpu.get_grads(grad.data());
+        for (float g : grad) EXPECT(g == 0, "empty GPU group retained stale gradient");
+    }
+  }
+}
+
 // The GPU alone learns a repeating sequence.
 void learns_pattern(bool muon, Matmul matmul = Matmul::tf32) {
     Config cfg;
@@ -160,6 +210,41 @@ void learns_pattern(bool muon, Matmul matmul = Matmul::tf32) {
     const char* mm = matmul == Matmul::bf16 ? "bf16" : matmul == Matmul::fp32 ? "fp32" : "tf32";
     std::printf("  learns pattern (%s, %s): loss %.3f -> %.3f\n", opt, mm, first, last);
     EXPECT(last < 0.1 * first, "GPU training with %s did not learn the pattern: %.3f -> %.3f", opt, first, last);
+}
+
+// Zero block projections make the residual stream equal the embedding.
+// Constant +/-1000 embedding rows produce logits near +/-32000. The two
+// counted losses have a double reference near 64000 and 32000, even though
+// both target probabilities underflow. The middle row is ignored.
+void extreme_cross_entropy() {
+    ExtremeLossFixture fixture;
+    auto& cpu = fixture.model;
+    const auto& cfg = cpu.cfg;
+    const ParamInfo& embedding = *cpu.find("wte");
+    GpuTrainer gpu(cfg, cpu.infos, /*tf32=*/false);
+    gpu.set_params(cpu.params.data());
+    const int* tok = fixture.tokens.data();
+    const int* tgt = fixture.targets.data();
+    cpu.zero_grad(); gpu.zero_grad();
+    const double lc = cpu.forward(tok, tgt, 1, 3), lg = gpu.forward(tok, tgt, 1, 3);
+    const double ref = fixture.reference_loss();
+    EXPECT(std::isfinite(lc) && std::abs(lc - ref) < 0.05, "extreme CPU loss %g vs %g", lc, ref);
+    EXPECT(std::isfinite(lg) && std::abs(lg - ref) < 0.05, "extreme GPU loss %g vs %g", lg, ref);
+    cpu.backward(); gpu.backward(1.0);
+    std::vector<float> grad(cpu.num_params());
+    gpu.get_grads(grad.data());
+    for (float g : grad) EXPECT(std::isfinite(g), "non-finite extreme GPU gradient");
+    for (int i = 0; i < cfg.d_model; ++i)
+        EXPECT(std::abs(grad[embedding.offset + cfg.d_model + i] + 0.5f) < 1e-5f,
+               "underflowed target lost its output-weight gradient");
+    EXPECT(rel_l2(grad.data(), cpu.grads.data(), grad.size()) < 1e-4,
+           "extreme loss gradients disagree between CPU and GPU");
+    const int ignored[] = {-1, -1, -1};
+    gpu.zero_grad();
+    EXPECT(gpu.forward(tok, ignored, 1, 3) == 0, "all-ignored GPU loss nonzero");
+    gpu.backward(1.0); gpu.get_grads(grad.data());
+    for (float g : grad) EXPECT(g == 0, "all-ignored GPU gradient nonzero");
+    std::printf("  extreme cross-entropy: CPU %.1f GPU %.1f reference %.1f\n", lc, lg, ref);
 }
 
 // Profiling names the parts of a step, with times from CUDA events.
@@ -207,6 +292,8 @@ int main() {
     ThreadPool tp(4);
     g_pool = &tp;
     std::printf("%s\n", GpuTrainer::device_name().c_str());
+    extreme_cross_entropy();
+    masked_accumulation();
 
     Config dense;
     dense.vocab = 61;

@@ -1,0 +1,13 @@
+variant,seed,curriculum,wall_nanoseconds
+dense,1,control,15712821515
+dense,1,expanded,16211473922
+moe-ternary,1,control,22082585543
+moe-ternary,1,expanded,23770806978
+moe-ternary,2,expanded,22733529233
+moe-ternary,2,control,22468162635
+dense,2,expanded,16205576869
+dense,2,control,15619738368
+dense,3,control,15537051545
+dense,3,expanded,15887536295
+moe-ternary,3,control,23254699784
+moe-ternary,3,expanded,24710498826
