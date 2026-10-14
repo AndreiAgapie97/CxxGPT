@@ -117,12 +117,6 @@ std::vector<std::string> split(const std::string& s, char sep) {
     return out;
 }
 
-std::string trim(const std::string& s) {
-    const size_t b = s.find_first_not_of(" \t\r\n");
-    if (b == std::string::npos) return "";
-    return s.substr(b, s.find_last_not_of(" \t\r\n") - b + 1);
-}
-
 // The tokenizer at path, or the byte-level one (no merges) if path is empty.
 Tokenizer load_tokenizer(const std::string& path) {
     Tokenizer tok;
@@ -311,19 +305,6 @@ int cmd_gen_reasoning(Args& a) {
     std::printf("%s.test.txt: %zu problems (%zu tasks x difficulty %d..%d x %d)\n", out.c_str(),
                 test.size(), tasks.size(), min_d, test_max_d, per_cell);
     return 0;
-}
-
-// "1,080" -> "1080": commas that group digits go, so the exact-match check
-// ignores digit grouping; other commas, as in "(1, 2)", stay.
-std::string strip_digit_commas(const std::string& s) {
-    auto digit = [&](size_t i) { return i < s.size() && s[i] >= '0' && s[i] <= '9'; };
-    std::string o;
-    for (size_t i = 0; i < s.size(); ++i) {
-        const bool grouping = s[i] == ',' && i > 0 && digit(i - 1) && digit(i + 1) && digit(i + 2) &&
-                              digit(i + 3) && !digit(i + 4);
-        if (!grouping) o += s[i];
-    }
-    return o;
 }
 
 // A JSON number as an answer: 18 -> "18", 2.5 -> "2.5".

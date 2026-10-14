@@ -12,7 +12,7 @@ struct Cell {
     size_t expected = 0, generated = 0, local = 0, grounded = 0;
     void add(const Problem& p, const std::string& text) {
         const auto s = reasoning_traces::score(p, text);
-        const bool ok = completion_done(text) && extract_answer(text) == p.answer;
+        const bool ok = completion_done(text) && answer_matches(text, p.answer);
         ++problems; exact += ok; full_trace += s.all_grounded(); exact_trace += ok && s.all_grounded();
         expected += s.expected; generated += s.generated; local += s.local_correct; grounded += s.grounded_correct;
     }

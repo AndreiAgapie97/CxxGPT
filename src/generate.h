@@ -136,7 +136,7 @@ EvalResult eval_reasoning(Model<T>& model, const std::vector<Problem>& problems,
     EvalResult r;
     for (size_t i = 0; i < n; ++i) {
         const Problem& p = problems[i];
-        const bool ok = completion_done(texts[i]) && extract_answer(texts[i]) == p.answer;
+        const bool ok = completion_done(texts[i]) && answer_matches(texts[i], p.answer);
         auto& cell = r.by_task[{p.task, p.difficulty}];
         cell.first += ok;
         cell.second += 1;

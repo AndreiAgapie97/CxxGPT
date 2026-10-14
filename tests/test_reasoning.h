@@ -169,6 +169,14 @@ inline void test_formats() {
 }
 
 inline void test_reasoning() {
+    for (const std::string text : {"#### 1,080\n", "#### 1080 \n", "#### 1080\r\n"})
+        EXPECT(answer_matches(text, "1080"), "normalized generated answer was marked wrong: %s", text.c_str());
+    EXPECT(answer_matches("#### 14 \n", "14") && answer_matches("#### 14\r\n", "14"),
+           "generated trailing whitespace was not trimmed");
+    EXPECT(!answer_matches("#### 140\n", "14") && !answer_matches("no delimiter 14", "14"),
+           "normalization accepted a wrong/missing answer");
+    EXPECT(strip_digit_commas("1,234,567") == "1234567" && strip_digit_commas("(1, 2)") == "(1, 2)",
+           "normalization changed non-grouping commas");
     Rng rng(41);
     int checked = 0;
     for (const auto& task : reasoning_tasks())

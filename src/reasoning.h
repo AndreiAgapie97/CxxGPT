@@ -400,3 +400,27 @@ inline std::string extract_answer(const std::string& completion) {
     const size_t j = completion.find('\n', i);
     return completion.substr(i + 5, j == std::string::npos ? std::string::npos : j - i - 5);
 }
+
+// Shared by QA preparation and generated-answer scoring.
+inline std::string trim(const std::string& s) {
+    const size_t b = s.find_first_not_of(" \t\r\n");
+    if (b == std::string::npos) return "";
+    return s.substr(b, s.find_last_not_of(" \t\r\n") - b + 1);
+}
+
+// "1,080" -> "1080": commas that group digits go, so the exact-match check
+// ignores digit grouping; other commas, as in "(1, 2)", stay.
+inline std::string strip_digit_commas(const std::string& s) {
+    auto digit = [&](size_t i) { return i < s.size() && s[i] >= '0' && s[i] <= '9'; };
+    std::string o;
+    for (size_t i = 0; i < s.size(); ++i) {
+        const bool grouping = s[i] == ',' && i > 0 && digit(i - 1) && digit(i + 1) && digit(i + 2) &&
+                              digit(i + 3) && !digit(i + 4);
+        if (!grouping) o += s[i];
+    }
+    return o;
+}
+
+inline bool answer_matches(const std::string& completion, const std::string& gold) {
+    return strip_digit_commas(trim(extract_answer(completion))) == gold;
+}
