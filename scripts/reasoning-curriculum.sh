@@ -67,7 +67,7 @@ for seed in 1 2 3; do
         for arm in "${ARMS[@]}"; do
             prefix="$RUN_DIR/$variant-seed$seed-$arm"
             budget=(--mode budget --data "$RUN_DIR/data/$arm.tok" --seq 128 --batch 2 --steps "$STEPS" --seed "$((100+seed))")
-            if [[ -f "$prefix.ckpt" ]] && ./reasoning_curriculum "${budget[@]}" --ckpt "$prefix.ckpt" > "$prefix.budget.csv.tmp" 2> "$prefix.budget-check.log"; then
+            if [[ -f "$prefix.ckpt" ]] && ./reasoning_curriculum "${budget[@]}" --ckpt "$prefix.ckpt" --log "$prefix.log" > "$prefix.budget.csv.tmp" 2> "$prefix.budget-check.log"; then
                 mv "$prefix.budget.csv.tmp" "$prefix.budget.csv"
                 continue
             fi
@@ -82,7 +82,7 @@ for seed in 1 2 3; do
                 --save-every 200 --log-every 100 --log "$prefix.csv" "${CONTINUE[@]}" > "$prefix.log"
             finished=$(date +%s%N)
             printf '%s,%s,%s,%s\n' "$variant" "$seed" "$arm" "$((finished-started))" >> "$RUN_DIR/training-time.csv"
-            ./reasoning_curriculum "${budget[@]}" --ckpt "$prefix.ckpt" > "$prefix.budget.csv"
+            ./reasoning_curriculum "${budget[@]}" --ckpt "$prefix.ckpt" --log "$prefix.log" > "$prefix.budget.csv"
         done
     done
 done
@@ -101,13 +101,13 @@ for variant in dense moe-ternary; do
         for arm in initial control expanded; do
             prefix="$RUN_DIR/$variant-seed$seed-$arm"
             if [[ ! -f "$prefix.trace.csv" ]]; then
-                ./reasoning_traces --ckpt "$prefix.ckpt" --problems "$RUN_DIR/data/probe.txt" --threads "$THREADS" \
+                ./reasoning_traces --ckpt "$prefix.ckpt" --log "$prefix.log" --problems "$RUN_DIR/data/probe.txt" --threads "$THREADS" \
                     --transcripts "$prefix.transcripts.tsv.tmp" > "$prefix.trace.csv.tmp"
                 mv "$prefix.transcripts.tsv.tmp" "$prefix.transcripts.tsv"
                 mv "$prefix.trace.csv.tmp" "$prefix.trace.csv"
             fi
             if [[ ! -f "$prefix.audit.csv" ]]; then
-                ./reasoning_audit --ckpt "$prefix.ckpt" --problems "$RUN_DIR/data/probe.txt" --threads "$THREADS" \
+                ./reasoning_audit --ckpt "$prefix.ckpt" --log "$prefix.log" --problems "$RUN_DIR/data/probe.txt" --threads "$THREADS" \
                     > "$prefix.audit.csv.tmp"
                 mv "$prefix.audit.csv.tmp" "$prefix.audit.csv"
             fi

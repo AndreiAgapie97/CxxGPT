@@ -57,6 +57,25 @@ status=0
 grep -q 'one-logit softmax has zero task gradient' "$TEST_DIR/top1.log"
 
 "$CXXGPT_TRAINING_CLI" generate "$TEST_DIR"
+"$CXXGPT" train "${COMMON[@]}" --steps 2 --seed 7 --eval-every 0 --out "$TEST_DIR/budget-proof.ckpt" \
+    > "$TEST_DIR/budget-proof.log"
+"$CXXGPT_CURRICULUM" --mode budget --data "$TEST_DIR/data.tok" --ckpt "$TEST_DIR/budget-proof.ckpt" \
+    --log "$TEST_DIR/budget-proof.log" --seq 8 --batch 1 --steps 2 --seed 7 > "$TEST_DIR/budget-proof.csv"
+# A masked tail split has one predictable target per full training window;
+# using the whole corpus would sample a different range with identical draw counts.
+"$CXXGPT" train "${COMMON[@]}" --data "$TEST_DIR/masked.tok" --val '' --val-frac 0.3 \
+    --steps 2 --seed 7 --eval-every 0 --out "$TEST_DIR/range-proof.ckpt" > "$TEST_DIR/range-proof.log"
+"$CXXGPT_CURRICULUM" --mode budget --data "$TEST_DIR/masked.tok" --ckpt "$TEST_DIR/range-proof.ckpt" \
+    --log "$TEST_DIR/range-proof.log" --seq 8 --batch 1 --steps 2 --seed 7 > "$TEST_DIR/range-proof.csv"
+grep -q '^2,16,2,1$' "$TEST_DIR/range-proof.csv"
+for options in '--seq 4' '--batch 2' '--steps 1'; do
+    status=0
+    "$CXXGPT_CURRICULUM" --mode budget --data "$TEST_DIR/data.tok" --ckpt "$TEST_DIR/budget-proof.ckpt" \
+        --log "$TEST_DIR/budget-proof.log" --seq 8 --batch 1 --steps 2 --seed 7 $options \
+        > "$TEST_DIR/budget-mismatch.log" 2>&1 || status=$?
+    [[ "$status" == 1 ]]
+    grep -q 'sampling shape\|budget mismatch' "$TEST_DIR/budget-mismatch.log"
+done
 "$CXXGPT" train "${COMMON[@]}" --steps 10000000 --log-every 10000000 --eval-every 0 --save-every 1 \
     --out "$TEST_DIR/buffer.ckpt" > "$TEST_DIR/buffer.log" 2>&1 &
 trainer=$!

@@ -44,15 +44,33 @@ int main(int argc, char** argv) {
     Args a(argc, argv, 1);
     const std::string mode = a.str("mode", "prepare");
     if (mode == "budget") {
-        const auto path = a.str("data"), ckpt = a.str("ckpt");
+        const auto path = a.str("data"), ckpt = a.str("ckpt"), log_path = a.str("log");
         const long steps = a.integer("steps", 1000), seed = a.integer("seed", 101);
         const int batch = a.integer_int("batch", 2), seq = a.integer_int("seq", 128);
         a.done(); CHECK(steps > 0 && batch > 0 && seq > 0 && batch <= INT32_MAX / seq, "invalid budget");
         const auto data = TokenData::load(path); Rng rng(uint64_t(seed) + 1);
+        size_t hi = data.tokens.size();
+        if (!ckpt.empty()) {
+            CHECK(!log_path.empty(), "checkpoint budget validation requires --log runtime sampling evidence");
+            std::ifstream log(log_path); CHECK(log, "cannot read sampling log");
+            std::string source; bool shape = false;
+            for (std::string line; std::getline(log,line);) {
+                if (line.starts_with("data sources: ")) source = line.substr(14);
+                size_t train=0,val=0,tokens=0; int b=0,t=0,accum=0;
+                if (std::sscanf(line.c_str(), "data: %zu train tokens, %zu val tokens; %d x %d x %d = %zu tokens per step",
+                                &train,&val,&b,&t,&accum,&tokens)==6) {
+                    CHECK(b==batch && t==seq && accum==1 && tokens==size_t(batch)*seq,
+                          "runtime sampling shape differs from replay (accum must be 1)");
+                    CHECK(train<=data.tokens.size(), "runtime training range exceeds replay data");
+                    hi=train; shape=true;
+                }
+            }
+            CHECK(!log.bad() && shape && source==path, "missing or mismatched runtime sampling source/range evidence");
+        }
         std::vector<int> inputs(size_t(batch) * seq), targets(inputs.size());
         size_t valid = 0, minimum = inputs.size();
         for (long i = 0; i < steps; ++i) {
-            data.sample_batch(rng, batch, seq, 0, data.tokens.size(), inputs.data(), targets.data());
+            data.sample_batch(rng, batch, seq, 0, hi, inputs.data(), targets.data());
             const size_t n = count_targets(targets.data(), targets.size());
             valid += n; minimum = std::min(minimum, n);
         }
@@ -60,6 +78,11 @@ int main(int argc, char** argv) {
         if (!ckpt.empty()) {
             Model<float> m(peek_checkpoint_config(ckpt)); Rng actual(0);
             load_checkpoint(ckpt, m, nullptr, &actual);
+            FILE* f=std::fopen(ckpt.c_str(),"rb"); CHECK(f, "cannot read checkpoint step");
+            CHECK(std::fseek(f,8,SEEK_SET)==0, "cannot seek checkpoint config");
+            read_config(f); int64_t saved=0;
+            CHECK(std::fread(&saved,8,1,f)==1 && saved==steps, "checkpoint successful-update budget mismatch");
+            std::fclose(f);
             for (int i = 0; i < 4; ++i) CHECK(actual.state()[i] == rng.state()[i], "checkpoint sampler budget mismatch");
         }
         std::printf("steps,sampled_tokens,valid_targets,min_valid_per_step\n%ld,%zu,%zu,%zu\n",

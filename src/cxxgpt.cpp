@@ -749,6 +749,7 @@ int cmd_train(Args& a) {
                                               [](uint8_t m) { return m != 0; }),
               "training range contains no predictable targets");
     }
+    std::printf("data sources: %s\n", data_path.c_str());
     std::printf("data: %zu train tokens, %zu val tokens; %d x %d x %d = %zu tokens per step\n",
                 train_end, val_hi - val_lo, B, Tn, accum, group.inputs.size());
 
