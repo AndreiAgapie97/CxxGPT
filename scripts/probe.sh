@@ -22,6 +22,9 @@ CX=${CX:-./cxxgpt-gpu}
 GPU=${GPU---gpu}
 [ -x "$CX" ] || { echo "build it first: make gpu"; exit 1; }
 [ -f data/reason.train.tok ] || "$CX" gen-reasoning --out data/reason > /dev/null
+# The GPU's memory in MB (under WSL, nvidia-smi comes from Windows).
+if [ -d /usr/lib/wsl/lib ]; then export PATH=$PATH:/usr/lib/wsl/lib; fi
+total_mb=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2> /dev/null | head -1 || true)
 
 # Full precision for the first nights; the ternary size is what the last
 # nights train at, once night.sh's TERNARY=1 has switched the model.
@@ -49,10 +52,20 @@ while IFS= read -r line; do
   name=${line%%:*}
   args=${line#*:}
   # Out of memory: half the batch, twice the accumulation, same tokens per step.
+  # On Windows the driver may instead spill into system RAM (its "Sysmem
+  # Fallback" policy), which runs but several times slower; so a run that
+  # fills more than 90% of the GPU counts as out of memory too.
   b=$BATCH a=$ACCUM ok=0
   while :; do
-    if run "$b" "$a" "$args"; then ok=1; break; fi
-    if ! grep -qiE "out of memory|ALLOC_FAILED" "$tmp/log" || [ "$b" -le 1 ]; then break; fi
+    if run "$b" "$a" "$args"; then
+      mb=$(sed -n 's/^gpu memory: \([0-9]*\) MB.*/\1/p' "$tmp/log")
+      if [ -z "$total_mb" ] || [ -z "$mb" ] || [ "$mb" -le $((total_mb * 9 / 10)) ] || [ "$b" -le 1 ]; then
+        ok=1
+        break
+      fi
+    elif ! grep -qiE "out of memory|ALLOC_FAILED" "$tmp/log" || [ "$b" -le 1 ]; then
+      break
+    fi
     b=$((b / 2)) a=$((a * 2))
   done
   if [ $ok = 1 ]; then

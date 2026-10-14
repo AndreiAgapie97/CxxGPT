@@ -48,6 +48,9 @@ per_step=$((SEQ * BATCH * ACCUM))
 # 90% of the night: evaluations and checkpoints take the rest.
 steps=$(awk -v t="$TOKS" -v h="$HOURS" -v s="$per_step" 'BEGIN { printf "%d", 0.9 * t * h * 3600 / s }')
 minutes=$(awk -v h="$HOURS" 'BEGIN { printf "%d", h * 60 + 0.5 }')
+# Validation reads --eval-batches batches of BATCH sequences, drawn in a fixed
+# order: 160 sequences whatever BATCH is, so every night checks the same ones.
+eval_batches=$(((160 + BATCH - 1) / BATCH))
 mkdir -p runs
 resume=()
 [ -f "runs/$RUN.ckpt" ] && resume=(--resume)
@@ -72,5 +75,5 @@ echo "$RUN: $steps steps of $per_step tokens; stops after $minutes minutes at th
 "$CX" train $GPU --data "$MIX" --val "$DATA/gsm8k/test.tok" --bpe "$DATA/tok.bpe" \
   --reason-test "$DATA/gsm8k/test.txt" --reason-every 2000 --reason-limit 250 \
   "${model[@]}" $OPT --seq "$SEQ" --batch "$BATCH" --accum "$ACCUM" --steps "$steps" --warmup 500 --lr "$LR" \
-  --eval-every 500 --eval-batches 20 --save-every 1000 --log-every 50 --time-limit "$minutes" \
+  --eval-every 500 --eval-batches "$eval_batches" --save-every 1000 --log-every 50 --time-limit "$minutes" \
   --out "runs/$RUN.ckpt" --log "runs/$RUN.csv" "${resume[@]}" "$@" 2>&1 | tee -ia "runs/$RUN.log"

@@ -11,7 +11,15 @@ and can do everything else from there.
 
 1. **Update the NVIDIA driver**, with the NVIDIA app or from nvidia.com.
    WSL uses the Windows driver; nothing GPU-related gets installed inside
-   Linux except the compiler.
+   Linux except the compiler. Then, in the NVIDIA Control Panel (Manage 3D
+   settings), set **CUDA - Sysmem Fallback Policy** to **Prefer No Sysmem
+   Fallback**. Otherwise a model too big for the GPU's 8 GB does not fail:
+   the driver spills into system RAM and training runs several times
+   slower (d768-moe at batch 8: 2,900 tokens/s, against 17,800 for
+   d768-dense, which does the same work per token). On the owner's laptop
+   the setting did not reach programs running under WSL, so `probe.sh`
+   also halves the batch of any size that fills more than 90% of the GPU;
+   use the batch it prints.
 2. **Give Linux enough memory.** By default WSL gets half the RAM. Create
    the file `C:\Users\<you>\.wslconfig` containing:
    ```ini
