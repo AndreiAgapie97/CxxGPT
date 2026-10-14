@@ -574,7 +574,8 @@ int cmd_train(Args& a) {
             "train:  --batch 16 --accum 1 --steps 2000 --lr 1e-3 --min-lr-frac 0.1\n"
             "        --warmup 100 --wd 0.1 --clip 1.0 --bias-rate 1e-3 --seed 1\n"
             "        --muon (Muon instead of AdamW for the matrices in the blocks)\n"
-            "start:  --init FILE (FILE's weights and model; new optimizer, schedule and data order)\n"
+            "start:  --init FILE (FILE's weights and model; new optimizer, schedule and data order;\n"
+            "        with --ternary, the weights turn ternary from here on)\n"
             "output: --out model.ckpt --resume --log FILE.csv --log-every 10\n"
             "        --eval-every 200 --eval-batches 20 --save-every 500\n"
             "        --time-limit MINUTES --threads N --profile\n"
@@ -596,10 +597,15 @@ int cmd_train(Args& a) {
     const bool resume = a.flag("resume") && std::filesystem::exists(out);
 
     Config cfg = config_from_args(a, int(data.vocab));
-    if (resume)
+    if (resume) {
         cfg = peek_checkpoint_config(out);
-    else if (!init.empty())
+    } else if (!init.empty()) {
+        // The model comes from the checkpoint, but --ternary can turn its
+        // weights ternary from here on: the same weights, used differently.
+        const bool to_ternary = cfg.ternary;
         cfg = peek_checkpoint_config(init);
+        cfg.ternary = cfg.ternary || to_ternary;
+    }
     const int B = int(a.integer("batch", 16)), accum = int(a.integer("accum", 1));
     const int Tn = std::min(cfg.seq_len, int(a.integer("seq", cfg.seq_len)));
     const long steps = a.integer("steps", 2000), warmup = a.integer("warmup", 100);

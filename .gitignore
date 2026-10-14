@@ -10,3 +10,4 @@ data/
 *.ckpt
 runs/
 .venv/
+__pycache__/
