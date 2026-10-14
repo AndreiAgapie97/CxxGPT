@@ -73,6 +73,64 @@ inline void newton_schulz_cases() {
     }
 }
 
+
+// Independent scalar products: do not call production GEMM/Newton-Schulz.
+inline std::vector<double> ns_reference(std::vector<double> x, int m, int n, int steps) {
+    double ss = 0; for (double v : x) ss += v*v;
+    for (auto& v : x) v /= std::sqrt(ss)+1e-7;
+    for (int step = 0; step < steps; ++step) {
+        std::vector<double> a(m*m,0), b(m*m,0), y(m*n,0);
+        for (int i = 0; i < m; ++i) for (int j = 0; j < m; ++j) for (int k = 0; k < n; ++k)
+            a[i*m+j] += x[i*n+k]*x[j*n+k];
+        for (int i = 0; i < m; ++i) for (int j = 0; j < m; ++j) {
+            b[i*m+j] = -4.7750*a[i*m+j];
+            double aa = 0; for (int k = 0; k < m; ++k) aa += a[i*m+k]*a[k*m+j];
+            b[i*m+j] += 2.0315*aa;
+        }
+        for (int i = 0; i < m; ++i) for (int j = 0; j < n; ++j) {
+            y[i*n+j] = 3.4445*x[i*n+j];
+            for (int k = 0; k < m; ++k) y[i*n+j] += b[i*m+k]*x[k*n+j];
+        }
+        x = std::move(y);
+    }
+    return x;
+}
+
+// Construct matrices with a known SVD, then apply the declared scalar quintic
+// to their singular values. Five iterations approximate, not equal, UV^T.
+inline void test_muon_singular_contract() {
+    const double u[2][2] = {{0.6,-0.8},{0.8,0.6}};
+    const double v[3][2] = {{0.8,0},{0,1},{0.6,0}};
+    for (double small : {0.5,1e-9,0.0}) {
+        const double singular[2] = {1.5,small};
+        std::vector<double> x(6,0), expected(6,0), polar(6,0), scratch(14);
+        for (int i = 0; i < 2; ++i) for (int j = 0; j < 3; ++j) for (int k = 0; k < 2; ++k)
+            x[i*3+j] += u[i][k]*singular[k]*v[j][k];
+        double f[2], bound2 = 0;
+        for (int k = 0; k < 2; ++k) {
+            f[k] = singular[k]/(std::sqrt(2.25+small*small)+1e-7);
+            for (int step = 0; step < 5; ++step) {
+                const double z = f[k]*f[k]; f[k] *= 3.4445-4.7750*z+2.0315*z*z;
+            }
+            const double target = singular[k] > 0 ? 1.0 : 0.0;
+            bound2 += (f[k]-target)*(f[k]-target);
+            for (int i = 0; i < 2; ++i) for (int j = 0; j < 3; ++j) {
+                expected[i*3+j] += u[i][k]*f[k]*v[j][k];
+                polar[i*3+j] += u[i][k]*target*v[j][k];
+            }
+        }
+        const auto independent = ns_reference(x,2,3,5);
+        newton_schulz(x.data(),2,3,5,scratch.data(),false);
+        double error2 = 0;
+        for (int i = 0; i < 6; ++i) {
+            EXPECT(std::abs(x[i]-expected[i]) < 1e-12 && std::abs(x[i]-independent[i]) < 1e-12,
+                   "Muon differs from independent polynomial/SVD references");
+            error2 += (x[i]-polar[i])*(x[i]-polar[i]);
+        }
+        EXPECT(std::abs(error2-bound2) < 1e-12, "polar-factor error differs from declared singular-value approximation");
+    }
+}
+
 // One optimizer step, recomputed in double: AdamW elementwise, Muon per
 // (tensor, expert copy, fused part) block.
 struct RefOpt {
@@ -98,7 +156,7 @@ struct RefOpt {
                 for (int k = 0; k < parts; ++k) {
                     const size_t off = info.offset + copy * (info.size / info.count) + size_t(k) * r * c;
                     const bool tr = r > c;
-                    std::vector<double> X(size_t(r) * c), s(2 * size_t(std::min(r, c)) * std::min(r, c) + size_t(r) * c);
+                    std::vector<double> X(size_t(r) * c);
                     for (int i = 0; i < r; ++i)
                         for (int j = 0; j < c; ++j) {
                             const size_t q = off + size_t(i) * c + j;
@@ -106,7 +164,7 @@ struct RefOpt {
                             m[q] = mu * m[q] + (1 - mu) * g[q];
                             X[tr ? size_t(j) * r + i : size_t(i) * c + j] = (1 - mu) * g[q] + mu * m[q];
                         }
-                    newton_schulz(X.data(), std::min(r, c), std::max(r, c), o.muon_steps, s.data(), false);
+                    X = ns_reference(std::move(X), std::min(r, c), std::max(r, c), o.muon_steps);
                     const double scale = 0.2 * std::sqrt(double(std::max(r, c)));
                     for (int i = 0; i < r; ++i)
                         for (int j = 0; j < c; ++j) {
@@ -259,6 +317,7 @@ inline void muon_policy() {
 }
 
 inline void test_optim() {
+    optim_test::test_muon_singular_contract();
     using namespace optim_test;
     muon_policy();
     newton_schulz_cases();

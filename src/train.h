@@ -29,9 +29,9 @@
 
 // X [m, n] (row-major, m <= n) becomes approximately its orthogonal factor:
 // five steps of the quintic X <- aX + (b XXᵀ + c (XXᵀ)²) X, from Keller
-// Jordan's Muon, leave its singular values in about [0.7, 1.2] (it is tuned
-// to raise small ones fast, not to converge exactly). scratch holds
-// 2m² + mn values. The double version is the tests' reference.
+// Jordan's Muon, bring well-resolved singular values near one (tiny/zero
+// ones can stay small; it does not converge exactly). scratch holds 2m² + mn
+// values. Tests also use independent scalar products and known-SVD matrices.
 template <class T>
 void newton_schulz(T* X, int m, int n, int steps, T* scratch, bool threaded) {
     const T a = T(3.4445), b = T(-4.7750), c = T(2.0315);
