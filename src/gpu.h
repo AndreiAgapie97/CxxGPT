@@ -5,14 +5,18 @@
 // checkpoint moves freely between CPU and GPU, and the CPU's evaluation,
 // sampling and ternary inference engine all work on GPU-trained weights.
 //
-// Everything is stored in fp32. Matrix products go through cuBLAS, with fp32
-// inputs, outputs and sums; Matmul says how the inputs are multiplied:
+// The weights, the optimizer state and the gradients are fp32. Matrix
+// products go through cuBLAS with fp32 outputs and sums; Matmul says how
+// their inputs are multiplied:
 // - fp32: exactly, which the tests use to compare against the CPU engine;
 // - tf32 (the default): on the tensor cores, each input rounded to 11
 //   significant bits, the usual trade for training speed;
-// - bf16: on the tensor cores at twice tf32's rate (RTX 40xx), each input
-//   rounded to 8 significant bits. The rounding happens inside cuBLAS, so
-//   whether it is faster overall is for the GPU to show (scripts/probe.sh).
+// - bf16: the model's projections take inputs stored in bf16 (8
+//   significant bits): a bf16 copy of the weights, refreshed after each
+//   step, and activations written in bf16. The tensor cores multiply those
+//   at twice the TF32 rate (1.37x the tokens/s of tf32 on the night-1
+//   model). The router, Muon and attention stay as with tf32. Not for
+//   ternary models yet.
 //
 // Fused attention (fused_attention) never stores the Tn x Tn matrix of
 // attention weights. With TF32 or bf16 matmuls it multiplies on the tensor

@@ -21,6 +21,7 @@
 #include <vector>
 
 #include <cublas_v2.h>
+#include <cuda_bf16.h>
 #include <cuda_runtime.h>
 
 #include "attention.cuh"
@@ -173,8 +174,10 @@ __global__ void embedding_bwd(float* dwte, const float* dout, const int* tokens,
     atomicAdd(&dwte[size_t(tokens[n]) * C + c], dout[i]);
 }
 
-// rmsnorm_forward, one warp per row.
-__global__ void rmsnorm_fwd(float* out, float* rstd, const float* x, const float* w, int N, int C) {
+// rmsnorm_forward, one warp per row, into out and/or outh (bf16; either may
+// be null).
+__global__ void rmsnorm_fwd(float* out, __nv_bfloat16* outh, float* rstd, const float* x, const float* w, int N,
+                            int C) {
     const int row = blockIdx.x * kRowsPerBlock + threadIdx.x / kWarp, lane = threadIdx.x % kWarp;
     if (row >= N) return;
     const float* xn = x + size_t(row) * C;
@@ -183,8 +186,12 @@ __global__ void rmsnorm_fwd(float* out, float* rstd, const float* x, const float
     ss = warp_sum(ss);
     const float r = 1.0f / sqrtf(ss / float(C) + 1e-5f);
     if (lane == 0) rstd[row] = r;
-    float* o = out + size_t(row) * C;
-    for (int c = lane; c < C; c += kWarp) o[c] = xn[c] * r * w[c];
+    const size_t at = size_t(row) * C;
+    for (int c = lane; c < C; c += kWarp) {
+        const float y = xn[c] * r * w[c];
+        if (out) out[at + c] = y;
+        if (outh) outh[at + c] = __float2bfloat16(y);
+    }
 }
 
 // rmsnorm_backward, the dx part: dx_i += r g_i w_i - r³/C x_i Σ_j g_j w_j x_j.
@@ -275,24 +282,33 @@ __global__ void attn_softmax_bwd(float* dS, const float* att, int rows, int Tn, 
     for (int s = lane; s < Tn; s += kWarp) d[s] = s <= t ? p[s] * (d[s] - pd) * scale : 0.0f;
 }
 
-// swiglu_forward: inp[N, 2F] = [gate | up], out = silu(gate) * up.
-__global__ void swiglu_fwd(float* out, const float* inp, int N, int F) {
+// swiglu_forward: inp[N, 2F] = [gate | up], out = silu(gate) * up, in fp32
+// (out) or bf16 (outh); the other is null.
+__global__ void swiglu_fwd(float* out, __nv_bfloat16* outh, const float* inp, int N, int F) {
     const size_t i = size_t(blockIdx.x) * blockDim.x + threadIdx.x;
     if (i >= size_t(N) * F) return;
     const size_t n = i / F, j = i % F;
     const float g = inp[n * 2 * F + j], u = inp[n * 2 * F + F + j];
-    out[i] = g / (1.0f + expf(-g)) * u;
+    const float y = g / (1.0f + expf(-g)) * u;
+    if (out) out[i] = y;
+    else outh[i] = __float2bfloat16(y);
 }
 
-// swiglu_backward (accumulates into dinp).
-__global__ void swiglu_bwd(float* dinp, const float* dout, const float* inp, int N, int F) {
+// swiglu_backward, written (not added) into dinp, or into dinph in bf16.
+__global__ void swiglu_bwd(float* dinp, __nv_bfloat16* dinph, const float* dout, const float* inp, int N, int F) {
     const size_t i = size_t(blockIdx.x) * blockDim.x + threadIdx.x;
     if (i >= size_t(N) * F) return;
     const size_t n = i / F, j = i % F;
     const float g = inp[n * 2 * F + j], u = inp[n * 2 * F + F + j], d = dout[i];
     const float sg = 1.0f / (1.0f + expf(-g));
-    dinp[n * 2 * F + j] += d * u * sg * (1.0f + g * (1.0f - sg));
-    dinp[n * 2 * F + F + j] += d * g * sg;
+    const float dg = d * u * sg * (1.0f + g * (1.0f - sg)), du = d * g * sg;
+    if (dinp) {
+        dinp[n * 2 * F + j] = dg;
+        dinp[n * 2 * F + F + j] = du;
+    } else {
+        dinph[n * 2 * F + j] = __float2bfloat16(dg);
+        dinph[n * 2 * F + F + j] = __float2bfloat16(du);
+    }
 }
 
 __global__ void add_fwd(float* out, const float* a, const float* b, size_t n) {
@@ -332,16 +348,15 @@ __global__ void xent_fwd(float* probs, float* losses, const int* targets, int V)
     }
 }
 
-// cross_entropy_backward, in place: d = (p - onehot(target)) * dloss.
-__global__ void xent_bwd(float* d, const int* targets, int N, int V, float dloss) {
+// cross_entropy_backward: d = (p - onehot(target)) * dloss, from the
+// probabilities in d, in place, or into dh in bf16 when dh is not null.
+__global__ void xent_bwd(float* d, __nv_bfloat16* dh, const int* targets, int N, int V, float dloss) {
     const size_t i = size_t(blockIdx.x) * blockDim.x + threadIdx.x;
     if (i >= size_t(N) * V) return;
     const int n = int(i / V), v = int(i % V), t = targets[n];
-    if (t < 0) {
-        d[i] = 0.0f;
-        return;
-    }
-    d[i] = v == t ? d[i] * dloss - dloss : d[i] * dloss;
+    const float g = t < 0 ? 0.0f : v == t ? d[i] * dloss - dloss : d[i] * dloss;
+    if (dh) dh[i] = __float2bfloat16(g);
+    else d[i] = g;
 }
 
 // ternary_quantize, stage 2: gamma[y] = mean |w| + 1e-8 from the partials.
@@ -378,6 +393,12 @@ __global__ void act_quant(float* xq, const float* x, int N, int C) {
     }
     const float scale = amax / 127.0f, inv = 1.0f / scale;
     for (int c = lane; c < C; c += kWarp) q[c] = fminf(fmaxf(rintf(xn[c] * inv), -127.0f), 127.0f) * scale;
+}
+
+// fp32 to bf16 (round to nearest even), for the operands of bf16 products.
+__global__ void to_bf16(__nv_bfloat16* out, const float* in, size_t n) {
+    for (size_t i = size_t(blockIdx.x) * blockDim.x + threadIdx.x; i < n; i += size_t(gridDim.x) * blockDim.x)
+        out[i] = __float2bfloat16(in[i]);
 }
 
 // AdamW::update for one tensor, with the gradient scaled by gscale (clipping).
@@ -496,8 +517,9 @@ __global__ void moe_order(int* order, int* row_of, const int* sel, const int* ex
     }
 }
 
-// xg[r] = x[token of assignment order[r]]
-__global__ void moe_gather(float* xg, const float* x, const int* order, int NK, int C, int K) {
+// xg[r] = x[token of assignment order[r]], in fp32 or bf16.
+template <class T>
+__global__ void moe_gather(T* xg, const T* x, const int* order, int NK, int C, int K) {
     const size_t i = size_t(blockIdx.x) * blockDim.x + threadIdx.x;
     if (i >= size_t(NK) * C) return;
     const size_t r = i / C, c = i % C;
@@ -515,9 +537,10 @@ __global__ void moe_combine(float* out, const float* ey, const float* gate, cons
     out[i] = acc;
 }
 
-// One warp per assignment j: dey[row] = gate * dout[n], dgate[j] = <dout[n], ey[row]>.
-__global__ void moe_bwd_combine(float* dey, float* dgate, const float* dout, const float* ey, const float* gate,
-                                const int* row_of, int NK, int C, int K) {
+// One warp per assignment j: dey[row] = gate * dout[n] (or deyh, in bf16),
+// dgate[j] = <dout[n], ey[row]>.
+__global__ void moe_bwd_combine(float* dey, __nv_bfloat16* deyh, float* dgate, const float* dout, const float* ey,
+                                const float* gate, const int* row_of, int NK, int C, int K) {
     const int j = blockIdx.x * kRowsPerBlock + threadIdx.x / kWarp, lane = threadIdx.x % kWarp;
     if (j >= NK) return;
     const size_t n = size_t(j / K), row = size_t(row_of[j]);
@@ -525,7 +548,8 @@ __global__ void moe_bwd_combine(float* dey, float* dgate, const float* dout, con
     float dot = 0.0f;
     for (int c = lane; c < C; c += kWarp) {
         const float d = dout[n * C + c];
-        dey[row * C + c] = g * d;
+        if (dey) dey[row * C + c] = g * d;
+        else deyh[row * C + c] = __float2bfloat16(g * d);
         dot += d * ey[row * C + c];
     }
     dot = warp_sum(dot);
@@ -624,6 +648,15 @@ void fused_attention_backward(bool tc, const float* qkv, const float* out, const
     LAUNCH_CHECK();
 }
 
+// A product's input: fp32, or (with bf16 products) bf16 already.
+struct Operand {
+    const float* f = nullptr;
+    const __nv_bfloat16* h = nullptr;
+    Operand(const float* p) : f(p) {}
+    Operand(const __nv_bfloat16* p) : h(p) {}
+    Operand operator+(size_t o) const { return f ? Operand(f + o) : Operand(h + o); }
+};
+
 }  // namespace
 
 // ---------------------------------------------------------------------------
@@ -635,9 +668,16 @@ struct GpuTrainer::Impl {
     std::vector<ParamInfo> infos;
     size_t n_params = 0;
     cublasHandle_t blas = nullptr;
-    cublasComputeType_t compute = CUBLAS_COMPUTE_32F_FAST_TF32;  // how gemm multiplies (Matmul)
+    cublasComputeType_t compute = CUBLAS_COMPUTE_32F_FAST_TF32;  // how fp32 products multiply (Matmul)
+    // Matmul::bf16: the model's projections (linear_forward/backward) take
+    // bf16 operands: a bf16 copy of the weights (wbf, refreshed with the
+    // ternary copy) and inputs written in bf16 (LayerActs), or rounded at
+    // the product (op_x, op_dy); sums and results stay fp32, as does
+    // everything else.
+    bool bf16_ops = false;
 
     DevBuf<float> params, grads, qparams, m, v;
+    DevBuf<__nv_bfloat16> wbf, op_x, op_dy;
     long adam_step = 0;
     // v, AdamW's second moment, has room only for the tensors AdamW updates
     // (with Muon on, its matrices need none: about 1 GB at 250 M
@@ -729,15 +769,21 @@ struct GpuTrainer::Impl {
     bool fused_attn = false;
     bool tc_attn = false;  // the fused kernels on the tensor cores (attention_tc.cuh)
 
+    // Activations that are only ever products' inputs (ln1, sw, xg, esw,
+    // lnf_out, and in the backward pass dfc, dey, dlogits) are kept in bf16
+    // instead (the ...h buffers) with bf16 products; ln2 and atty in both,
+    // since the router and the attention backward read them in fp32.
     struct LayerActs {
         DevBuf<float> ln1, rstd1, qkv, att, lse, atty, resid1, ln2, rstd2, resid2, fc, sw;
         DevBuf<float> rlogits, gate, xg, efc, esw, ey;
+        DevBuf<__nv_bfloat16> ln1h, attyh, ln2h, swh, xgh, eswh;
         DevBuf<int> sel, order, row_of;
         std::vector<int> expert_start;  // host copy, [E + 1]
     };
     std::vector<LayerActs> acts;
     DevBuf<float> x0, lnf_out, rstdf, logits, losses, xq, out_tmp;
     DevBuf<float> dresid, dC, dqkv, datty, dfc, dsw, dey, dxg, drl, dS, dsum, dgate, dw_partial;
+    DevBuf<__nv_bfloat16> lnfh, dfch, deyh, dlogitsh;
     DevBuf<int> tokens, targets, counts, expert_start_d;
     int B_ = 0, T_ = 0, B_cur = 0, T_cur = 0, n_valid = 0;
     bool has_targets = false;
@@ -753,9 +799,13 @@ struct GpuTrainer::Impl {
               err == cudaSuccess ? "no devices" : cudaGetErrorString(err));
         for (const auto& p : infos) n_params = std::max(n_params, p.offset + p.size);
         CUBLAS_CHECK(cublasCreate(&blas));
-        compute = matmul == Matmul::fp32   ? CUBLAS_COMPUTE_32F
-                  : matmul == Matmul::bf16 ? CUBLAS_COMPUTE_32F_FAST_16BF
-                                           : CUBLAS_COMPUTE_32F_FAST_TF32;
+        // With bf16 products, the products left in fp32 (Muon's, cuBLAS
+        // attention's) use TF32.
+        compute = matmul == Matmul::fp32 ? CUBLAS_COMPUTE_32F : CUBLAS_COMPUTE_32F_FAST_TF32;
+        bf16_ops = matmul == Matmul::bf16;
+        CHECK(!bf16_ops || !cfg.ternary,
+              "--matmul bf16 does not take ternary models yet (their quantized weights and activations are not "
+              "exact in bf16); use --matmul tf32");
         if (fused_attn) {
             const int HS = cfg.head_size();
             CHECK(HS <= attn::kMaxHS, "fused attention takes heads of up to %d (this model: %d); use --no-fused-attn",
@@ -768,6 +818,7 @@ struct GpuTrainer::Impl {
         params.resize(n_params);
         grads.resize(n_params);
         if (cfg.ternary) qparams.resize(n_params);  // read only through W(), for ternary models
+        if (bf16_ops) wbf.resize(n_params);
         m.resize(n_params);
         grads.zero();
         m.zero();
@@ -863,14 +914,16 @@ struct GpuTrainer::Impl {
     // Row-major C[M, N] = op(A)[M, K] · op(B)[K, N] + beta * C. With ta, A is
     // stored as [K, M] (row stride lda); likewise B with tb. cuBLAS is
     // column-major, where a row-major matrix reads as its transpose, so this
-    // computes Cᵀ = op(B)ᵀ · op(A)ᵀ.
-    void gemm(bool ta, bool tb, int M, int N, int K, const float* A, int lda, const float* B, int ldb, float* C,
-              int ldc, float beta) {
+    // computes Cᵀ = op(B)ᵀ · op(A)ᵀ. A and B are fp32, or both bf16 (bf16
+    // products: fp32 sums, then C stays fp32 either way).
+    void gemm(bool ta, bool tb, int M, int N, int K, const void* A, int lda, const void* B, int ldb, float* C,
+              int ldc, float beta, bool bf16 = false) {
         if (M == 0 || N == 0) return;
         const float one = 1.0f;
+        const cudaDataType_t type = bf16 ? CUDA_R_16BF : CUDA_R_32F;
         CUBLAS_CHECK(cublasGemmEx(blas, tb ? CUBLAS_OP_T : CUBLAS_OP_N, ta ? CUBLAS_OP_T : CUBLAS_OP_N, N, M, K, &one,
-                                  B, CUDA_R_32F, ldb, A, CUDA_R_32F, lda, &beta, C, CUDA_R_32F, ldc, compute,
-                                  CUBLAS_GEMM_DEFAULT));
+                                  B, type, ldb, A, type, lda, &beta, C, CUDA_R_32F, ldc,
+                                  bf16 ? CUBLAS_COMPUTE_32F : compute, CUBLAS_GEMM_DEFAULT));
     }
 
     // The same, for `batch` independent products at fixed strides.
@@ -883,15 +936,45 @@ struct GpuTrainer::Impl {
                                                 C, CUDA_R_32F, ldc, sc, batch, compute, CUBLAS_GEMM_DEFAULT));
     }
 
-    // linear_forward: y[N, OC] = x[N, IC] · w[OC, IC]ᵀ
-    void linear_forward(float* y, const float* x, const float* w, int N, int IC, int OC) {
-        gemm(false, true, N, OC, IC, x, IC, w, IC, y, OC, 0.0f);
+    // With bf16 products: the bf16 copy of weights w (a pointer into params).
+    const __nv_bfloat16* WB(const float* w) const { return wbf.p + (w - params.p); }
+    // An activation kept in fp32 (f) or, with bf16 products, in bf16 (h).
+    Operand pick(const DevBuf<float>& f, const DevBuf<__nv_bfloat16>& h) const {
+        return bf16_ops ? Operand(h.p) : Operand(f.p);
+    }
+    // x as a bf16 product's input: as it is, or n floats rounded into the
+    // operand buffer op (grown on first use).
+    const __nv_bfloat16* as_bf16(Operand x, DevBuf<__nv_bfloat16>& op, size_t n) {
+        if (x.h) return x.h;
+        op.resize(n);
+        to_bf16<<<std::min(blocks_for(n), 4096), kBlock>>>(op.p, x.f, n);
+        LAUNCH_CHECK();
+        return op.p;
+    }
+
+    // linear_forward: y[N, OC] = x[N, IC] · w[OC, IC]ᵀ. bf16 products when
+    // bf16_ops, unless low = false (the router: its top-k choice should not
+    // flip on rounding).
+    void linear_forward(float* y, Operand x, const float* w, int N, int IC, int OC, bool low = true) {
+        if (bf16_ops && low) {
+            gemm(false, true, N, OC, IC, as_bf16(x, op_x, size_t(N) * IC), IC, WB(w), IC, y, OC, 0.0f, true);
+            return;
+        }
+        CHECK(x.f, "an fp32 product got a bf16 input");
+        gemm(false, true, N, OC, IC, x.f, IC, w, IC, y, OC, 0.0f);
     }
     // linear_backward: dx += dy · w (if dx), dw += dyᵀ · x
-    void linear_backward(float* dx, float* dw, const float* dy, const float* x, const float* w, int N, int IC,
-                         int OC) {
-        if (dx) gemm(false, false, N, IC, OC, dy, OC, w, IC, dx, IC, 1.0f);
-        gemm(true, false, OC, IC, N, dy, OC, x, IC, dw, IC, 1.0f);
+    void linear_backward(float* dx, float* dw, Operand dy, Operand x, const float* w, int N, int IC, int OC,
+                         bool low = true) {
+        if (bf16_ops && low) {
+            const auto* dyb = as_bf16(dy, op_dy, size_t(N) * OC);
+            if (dx) gemm(false, false, N, IC, OC, dyb, OC, WB(w), IC, dx, IC, 1.0f, true);
+            gemm(true, false, OC, IC, N, dyb, OC, as_bf16(x, op_x, size_t(N) * IC), IC, dw, IC, 1.0f, true);
+            return;
+        }
+        CHECK(x.f && dy.f, "an fp32 product got a bf16 input");
+        if (dx) gemm(false, false, N, IC, OC, dy.f, OC, w, IC, dx, IC, 1.0f);
+        gemm(true, false, OC, IC, N, dy.f, OC, x.f, IC, dw, IC, 1.0f);
     }
 
     void act_quantize(float* xq_, const float* x, int N, int C) {
@@ -902,26 +985,27 @@ struct GpuTrainer::Impl {
 
     // Model::proj_forward / proj_backward: BitLinear when q (ternary weights,
     // int8 activations).
-    void proj_forward(float* y, const float* x, size_t woff, int N, int IC, int OC, bool q) {
+    void proj_forward(float* y, Operand x, size_t woff, int N, int IC, int OC, bool q) {
         Region r(*this, "matmul fwd");
-        if (q) {
-            act_quantize(xq.p, x, N, IC);
-            x = xq.p;
+        if (q) {  // never with bf16 products
+            act_quantize(xq.p, x.f, N, IC);
+            x = Operand(xq.p);
         }
         linear_forward(y, x, W(woff, q), N, IC, OC);
     }
-    void proj_backward(float* dx, const float* dy, const float* x, size_t woff, int N, int IC, int OC, bool q) {
+    void proj_backward(float* dx, Operand dy, Operand x, size_t woff, int N, int IC, int OC, bool q) {
         Region r(*this, "matmul bwd");
         if (q) {
-            act_quantize(xq.p, x, N, IC);
-            x = xq.p;
+            act_quantize(xq.p, x.f, N, IC);
+            x = Operand(xq.p);
         }
         linear_backward(dx, G(woff), dy, x, W(woff, q), N, IC, OC);
     }
 
-    void rmsnorm_forward(float* out, float* rstd, const float* x, const float* w, int N, int C) {
+    // Into out, outh (bf16) or both; the other may be null.
+    void rmsnorm_forward(float* out, __nv_bfloat16* outh, float* rstd, const float* x, const float* w, int N, int C) {
         Region r(*this, "norms, rope, adds");
-        rmsnorm_fwd<<<blocks_for(N, kRowsPerBlock), kBlock>>>(out, rstd, x, w, N, C);
+        rmsnorm_fwd<<<blocks_for(N, kRowsPerBlock), kBlock>>>(out, outh, rstd, x, w, N, C);
         LAUNCH_CHECK();
     }
     void rmsnorm_backward(float* dx, float* dw, const float* dout, const float* x, const float* w,
@@ -948,6 +1032,13 @@ struct GpuTrainer::Impl {
     void add(float* out, const float* a, const float* b, size_t n) {
         Region r(*this, "norms, rope, adds");
         add_fwd<<<blocks_for(n), kBlock>>>(out, a, b, n);
+        LAUNCH_CHECK();
+    }
+
+    // A bf16 copy of an activation that is also needed in fp32.
+    void to_bf16_region(__nv_bfloat16* out, const float* in, size_t n) {
+        Region r(*this, "bf16 copies");
+        to_bf16<<<std::min(blocks_for(n), 4096), kBlock>>>(out, in, n);
         LAUNCH_CHECK();
     }
 
@@ -1017,28 +1108,40 @@ struct GpuTrainer::Impl {
         }
     }
 
-    void swiglu_forward(float* out, const float* inp, int N, int F) {
+    // Into out, or outh in bf16 (the other null).
+    void swiglu_forward(float* out, __nv_bfloat16* outh, const float* inp, int N, int F) {
         if (N == 0) return;
         Region r(*this, "swiglu");
-        swiglu_fwd<<<blocks_for(size_t(N) * F), kBlock>>>(out, inp, N, F);
+        swiglu_fwd<<<blocks_for(size_t(N) * F), kBlock>>>(out, outh, inp, N, F);
         LAUNCH_CHECK();
     }
-    void swiglu_backward(float* dinp, const float* dout, const float* inp, int N, int F) {
+    // Writes dinp (or dinph in bf16), rather than adding to it.
+    void swiglu_backward(float* dinp, __nv_bfloat16* dinph, const float* dout, const float* inp, int N, int F) {
         if (N == 0) return;
         Region r(*this, "swiglu");
-        swiglu_bwd<<<blocks_for(size_t(N) * F), kBlock>>>(dinp, dout, inp, N, F);
+        swiglu_bwd<<<blocks_for(size_t(N) * F), kBlock>>>(dinp, dinph, dout, inp, N, F);
         LAUNCH_CHECK();
     }
 
+    // The weights as the products use them, after each change: the ternary
+    // copy, and with bf16 products the bf16 copy.
     void quantize_weights() {
-        Region r(*this, "ternary weights");
-        if (n_seg > 0) {
-            partial_sums<<<dim3(kPartials, n_seg), kBlock>>>(seg_partial.p, params.p, seg_off.p, seg_len.p, true);
-            LAUNCH_CHECK();
-            ternary_gamma<<<n_seg, kWarp>>>(seg_gamma.p, seg_partial.p, seg_len.p, kPartials);
-            LAUNCH_CHECK();
-            ternary_apply<<<dim3(kPartials, n_seg), kBlock>>>(qparams.p, params.p, seg_off.p, seg_len.p,
-                                                             seg_gamma.p);
+        {
+            Region r(*this, "ternary weights");
+            if (n_seg > 0) {
+                partial_sums<<<dim3(kPartials, n_seg), kBlock>>>(seg_partial.p, params.p, seg_off.p, seg_len.p,
+                                                                 true);
+                LAUNCH_CHECK();
+                ternary_gamma<<<n_seg, kWarp>>>(seg_gamma.p, seg_partial.p, seg_len.p, kPartials);
+                LAUNCH_CHECK();
+                ternary_apply<<<dim3(kPartials, n_seg), kBlock>>>(qparams.p, params.p, seg_off.p, seg_len.p,
+                                                                 seg_gamma.p);
+                LAUNCH_CHECK();
+            }
+        }
+        if (bf16_ops) {
+            Region r(*this, "bf16 weights");
+            to_bf16<<<std::min(blocks_for(n_params), 4096), kBlock>>>(wbf.p, params.p, n_params);
             LAUNCH_CHECK();
         }
         weights_dirty = false;
@@ -1054,29 +1157,37 @@ struct GpuTrainer::Impl {
         const size_t Fe = cfg.ehidden(), NK = cfg.moe() ? N * K : 0;
         const size_t att = size_t(B) * cfg.n_heads * Tn * Tn, rows = size_t(B) * cfg.n_heads * Tn;
         acts.resize(cfg.n_layers);
+        // An activation that only feeds products: fp32, or bf16 with bf16 products.
+        auto act = [&](DevBuf<float>& f, DevBuf<__nv_bfloat16>& h, size_t n) {
+            if (bf16_ops) h.resize(n);
+            else f.resize(n);
+        };
         for (auto& a : acts) {
-            a.ln1.resize(N * C); a.rstd1.resize(N); a.qkv.resize(N * 3 * C);
+            act(a.ln1, a.ln1h, N * C); a.rstd1.resize(N); a.qkv.resize(N * 3 * C);
             if (fused_attn) a.lse.resize(rows); else a.att.resize(att);
             a.atty.resize(N * C);
+            if (bf16_ops) a.attyh.resize(N * C);
             a.resid1.resize(N * C); a.ln2.resize(N * C); a.rstd2.resize(N);
-            a.resid2.resize(N * C); a.fc.resize(N * 2 * F); a.sw.resize(N * F);
+            if (bf16_ops) a.ln2h.resize(N * C);
+            a.resid2.resize(N * C); a.fc.resize(N * 2 * F); act(a.sw, a.swh, N * F);
             if (cfg.moe()) {
                 a.rlogits.resize(N * E); a.sel.resize(N * K); a.gate.resize(N * K);
                 a.order.resize(NK); a.row_of.resize(NK);
-                a.xg.resize(NK * C); a.efc.resize(NK * 2 * Fe); a.esw.resize(NK * Fe);
+                act(a.xg, a.xgh, NK * C); a.efc.resize(NK * 2 * Fe); act(a.esw, a.eswh, NK * Fe);
                 a.ey.resize(NK * C);
             }
         }
-        x0.resize(N * C); lnf_out.resize(N * C); rstdf.resize(N);
+        x0.resize(N * C); act(lnf_out, lnfh, N * C); rstdf.resize(N);
         logits.resize(N * V); losses.resize(N);
         tokens.resize(N); targets.resize(N);
         xq.resize(std::max(N, NK) * std::max({C, F, Fe}));
         out_tmp.resize(N * C);
         dresid.resize(N * C); dC.resize(N * C); dqkv.resize(N * 3 * C); datty.resize(N * C);
-        dfc.resize(std::max(N * 2 * F, NK * 2 * Fe)); dsw.resize(std::max(N * F, NK * Fe));
+        act(dfc, dfch, std::max(N * 2 * F, NK * 2 * Fe)); dsw.resize(std::max(N * F, NK * Fe));
         if (fused_attn) dsum.resize(rows); else dS.resize(att);
         dw_partial.resize((N + 63) / 64 * C);
-        if (cfg.moe()) { dey.resize(NK * C); dxg.resize(NK * C); drl.resize(N * E); dgate.resize(NK); }
+        if (cfg.moe()) { act(dey, deyh, NK * C); dxg.resize(NK * C); drl.resize(N * E); dgate.resize(NK); }
+        if (bf16_ops) dlogitsh.resize(N * V);
         losses_h.resize(N);
     }
 
@@ -1085,9 +1196,9 @@ struct GpuTrainer::Impl {
         const auto& o = layer[l];
         const int C = cfg.d_model, F = cfg.always_hidden();
         if (F > 0) {
-            proj_forward(a.fc.p, a.ln2.p, o.wfc, N, C, 2 * F, cfg.ternary);
-            swiglu_forward(a.sw.p, a.fc.p, N, F);
-            proj_forward(out, a.sw.p, o.wproj, N, F, C, cfg.ternary);
+            proj_forward(a.fc.p, pick(a.ln2, a.ln2h), o.wfc, N, C, 2 * F, cfg.ternary);
+            swiglu_forward(a.sw.p, a.swh.p, a.fc.p, N, F);
+            proj_forward(out, pick(a.sw, a.swh), o.wproj, N, F, C, cfg.ternary);
         } else {
             CUDA_CHECK(cudaMemsetAsync(out, 0, size_t(N) * C * sizeof(float)));
         }
@@ -1100,10 +1211,9 @@ struct GpuTrainer::Impl {
         const int C = cfg.d_model, F = cfg.always_hidden();
         if (F > 0) {
             dsw.zero(size_t(N) * F);
-            proj_backward(dsw.p, dout, a.sw.p, o.wproj, N, F, C, cfg.ternary);
-            dfc.zero(size_t(N) * 2 * F);
-            swiglu_backward(dfc.p, dsw.p, a.fc.p, N, F);
-            proj_backward(dx, dfc.p, a.ln2.p, o.wfc, N, C, 2 * F, cfg.ternary);
+            proj_backward(dsw.p, dout, pick(a.sw, a.swh), o.wproj, N, F, C, cfg.ternary);
+            swiglu_backward(dfc.p, dfch.p, dsw.p, a.fc.p, N, F);
+            proj_backward(dx, pick(dfc, dfch), pick(a.ln2, a.ln2h), o.wfc, N, C, 2 * F, cfg.ternary);
         }
         if (cfg.moe()) moe_backward(l, dx, dout, N);
     }
@@ -1113,7 +1223,7 @@ struct GpuTrainer::Impl {
         const auto& o = layer[l];
         const int C = cfg.d_model, E = cfg.n_experts, K = cfg.top_k, Fe = cfg.ehidden(), NK = N * K;
         std::optional<Region> routing(std::in_place, *this, "moe routing");
-        linear_forward(a.rlogits.p, a.ln2.p, P(o.router), N, C, E);
+        linear_forward(a.rlogits.p, a.ln2.p, P(o.router), N, C, E, false);
         counts.zero(E);
         moe_route<<<blocks_for(N), kBlock>>>(a.sel.p, a.gate.p, counts.p, a.rlogits.p,
                                              router_bias.p + size_t(l) * E, N, E, K);
@@ -1127,17 +1237,22 @@ struct GpuTrainer::Impl {
         to_device(expert_start_d.p, a.expert_start.data(), E + 1);
         moe_order<<<E, 1024>>>(a.order.p, a.row_of.p, a.sel.p, expert_start_d.p, NK);
         LAUNCH_CHECK();
-        moe_gather<<<blocks_for(size_t(NK) * C), kBlock>>>(a.xg.p, a.ln2.p, a.order.p, NK, C, K);
+        if (bf16_ops)
+            moe_gather<<<blocks_for(size_t(NK) * C), kBlock>>>(a.xgh.p, a.ln2h.p, a.order.p, NK, C, K);
+        else
+            moe_gather<<<blocks_for(size_t(NK) * C), kBlock>>>(a.xg.p, a.ln2.p, a.order.p, NK, C, K);
         LAUNCH_CHECK();
         routing.reset();
         const size_t efc_per = size_t(2) * Fe * C, eproj_per = size_t(C) * Fe;
+        const Operand xg = pick(a.xg, a.xgh), esw = pick(a.esw, a.eswh);
         for (int e = 0; e < E; ++e) {
             const int r0 = a.expert_start[e], n = a.expert_start[e + 1] - r0;
             if (n == 0) continue;
-            proj_forward(a.efc.p + size_t(r0) * 2 * Fe, a.xg.p + size_t(r0) * C, o.efc + e * efc_per, n, C, 2 * Fe,
+            proj_forward(a.efc.p + size_t(r0) * 2 * Fe, xg + size_t(r0) * C, o.efc + e * efc_per, n, C, 2 * Fe,
                          cfg.ternary);
-            swiglu_forward(a.esw.p + size_t(r0) * Fe, a.efc.p + size_t(r0) * 2 * Fe, n, Fe);
-            proj_forward(a.ey.p + size_t(r0) * C, a.esw.p + size_t(r0) * Fe, o.eproj + e * eproj_per, n, Fe, C,
+            swiglu_forward(bf16_ops ? nullptr : a.esw.p + size_t(r0) * Fe,
+                           bf16_ops ? a.eswh.p + size_t(r0) * Fe : nullptr, a.efc.p + size_t(r0) * 2 * Fe, n, Fe);
+            proj_forward(a.ey.p + size_t(r0) * C, esw + size_t(r0) * Fe, o.eproj + e * eproj_per, n, Fe, C,
                          cfg.ternary);
         }
         Region combine(*this, "moe routing");
@@ -1151,22 +1266,22 @@ struct GpuTrainer::Impl {
         const int C = cfg.d_model, E = cfg.n_experts, K = cfg.top_k, Fe = cfg.ehidden(), NK = N * K;
         {
             Region r(*this, "moe routing");
-            moe_bwd_combine<<<blocks_for(NK, kRowsPerBlock), kBlock>>>(dey.p, dgate.p, dout, a.ey.p, a.gate.p,
-                                                                      a.row_of.p, NK, C, K);
+            moe_bwd_combine<<<blocks_for(NK, kRowsPerBlock), kBlock>>>(dey.p, deyh.p, dgate.p, dout, a.ey.p,
+                                                                      a.gate.p, a.row_of.p, NK, C, K);
             LAUNCH_CHECK();
         }
         dxg.zero(size_t(NK) * C);
         const size_t efc_per = size_t(2) * Fe * C, eproj_per = size_t(C) * Fe;
+        const Operand dy = pick(dey, deyh), xg = pick(a.xg, a.xgh), esw = pick(a.esw, a.eswh);
         for (int e = 0; e < E; ++e) {
             const int r0 = a.expert_start[e], n = a.expert_start[e + 1] - r0;
             if (n == 0) continue;
             dsw.zero(size_t(n) * Fe);
-            proj_backward(dsw.p, dey.p + size_t(r0) * C, a.esw.p + size_t(r0) * Fe, o.eproj + e * eproj_per, n, Fe, C,
+            proj_backward(dsw.p, dy + size_t(r0) * C, esw + size_t(r0) * Fe, o.eproj + e * eproj_per, n, Fe, C,
                           cfg.ternary);
-            dfc.zero(size_t(n) * 2 * Fe);
-            swiglu_backward(dfc.p, dsw.p, a.efc.p + size_t(r0) * 2 * Fe, n, Fe);
-            proj_backward(dxg.p + size_t(r0) * C, dfc.p, a.xg.p + size_t(r0) * C, o.efc + e * efc_per, n, C, 2 * Fe,
-                          cfg.ternary);
+            swiglu_backward(dfc.p, dfch.p, dsw.p, a.efc.p + size_t(r0) * 2 * Fe, n, Fe);
+            proj_backward(dxg.p + size_t(r0) * C, pick(dfc, dfch), xg + size_t(r0) * C, o.efc + e * efc_per, n, C,
+                          2 * Fe, cfg.ternary);
         }
         Region r(*this, "moe routing");
         moe_scatter<<<blocks_for(size_t(N) * C), kBlock>>>(dx, dxg.p, a.row_of.p, N, C, K);
@@ -1174,7 +1289,7 @@ struct GpuTrainer::Impl {
         drl.zero(size_t(N) * E);
         moe_router_grad<<<blocks_for(N), kBlock>>>(drl.p, a.gate.p, dgate.p, a.sel.p, N, E, K);
         LAUNCH_CHECK();
-        linear_backward(dx, G(o.router), drl.p, a.ln2.p, P(o.router), N, C, E);
+        linear_backward(dx, G(o.router), drl.p, a.ln2.p, P(o.router), N, C, E, false);
     }
 
     double forward(const int* tokens_h, const int* targets_h, int B, int Tn, bool training) {
@@ -1194,21 +1309,22 @@ struct GpuTrainer::Impl {
         for (int l = 0; l < cfg.n_layers; ++l) {
             auto& a = acts[l];
             const auto& o = layer[l];
-            rmsnorm_forward(a.ln1.p, a.rstd1.p, x, P(o.ln1), N, C);
-            proj_forward(a.qkv.p, a.ln1.p, o.wqkv, N, C, 3 * C, attn_ternary());
+            rmsnorm_forward(a.ln1.p, a.ln1h.p, a.rstd1.p, x, P(o.ln1), N, C);
+            proj_forward(a.qkv.p, pick(a.ln1, a.ln1h), o.wqkv, N, C, 3 * C, attn_ternary());
             if (cfg.rope_layer(l)) rope_apply(a.qkv.p, B, Tn, false);
             attention_forward(a, B, Tn);
-            proj_forward(out_tmp.p, a.atty.p, o.wo, N, C, C, attn_ternary());
+            if (bf16_ops) to_bf16_region(a.attyh.p, a.atty.p, size_t(N) * C);
+            proj_forward(out_tmp.p, pick(a.atty, a.attyh), o.wo, N, C, C, attn_ternary());
             add(a.resid1.p, x, out_tmp.p, size_t(N) * C);
-            rmsnorm_forward(a.ln2.p, a.rstd2.p, a.resid1.p, P(o.ln2), N, C);
+            rmsnorm_forward(a.ln2.p, a.ln2h.p, a.rstd2.p, a.resid1.p, P(o.ln2), N, C);
             ffn_forward(l, out_tmp.p, N, training);
             add(a.resid2.p, a.resid1.p, out_tmp.p, size_t(N) * C);
             x = a.resid2.p;
         }
-        rmsnorm_forward(lnf_out.p, rstdf.p, x, P(lnf), N, C);
+        rmsnorm_forward(lnf_out.p, lnfh.p, rstdf.p, x, P(lnf), N, C);
         {
             Region r(*this, "output layer and loss");
-            linear_forward(logits.p, lnf_out.p, P(wte), N, C, V);  // tied head
+            linear_forward(logits.p, pick(lnf_out, lnfh), P(wte), N, C, V);  // tied head
             xent_fwd<<<N, kBlock>>>(logits.p, losses.p, targets.p, V);
             LAUNCH_CHECK();
         }
@@ -1225,14 +1341,14 @@ struct GpuTrainer::Impl {
         CHECK(has_targets, "backward() needs a forward() first");
         const int B = B_cur, Tn = T_cur, N = B * Tn, C = cfg.d_model, V = cfg.vocab;
         if (n_valid == 0) return;
-        const float* dlogits = logits.p;
         const float* xL = acts.back().resid2.p;
         dC.zero(size_t(N) * C);
         {
             Region r(*this, "output layer and loss");
-            xent_bwd<<<blocks_for(size_t(N) * V), kBlock>>>(logits.p, targets.p, N, V, float(loss_scale / n_valid));
+            xent_bwd<<<blocks_for(size_t(N) * V), kBlock>>>(logits.p, dlogitsh.p, targets.p, N, V,
+                                                            float(loss_scale / n_valid));
             LAUNCH_CHECK();
-            linear_backward(dC.p, G(wte), dlogits, lnf_out.p, P(wte), N, C, V);
+            linear_backward(dC.p, G(wte), pick(logits, dlogitsh), pick(lnf_out, lnfh), P(wte), N, C, V);
         }
         dresid.zero(size_t(N) * C);
         rmsnorm_backward(dresid.p, G(lnf), dC.p, xL, P(lnf), rstdf.p, N, C);
@@ -1244,12 +1360,12 @@ struct GpuTrainer::Impl {
             ffn_backward(l, dC.p, dresid.p, N);
             rmsnorm_backward(dresid.p, G(o.ln2), dC.p, a.resid1.p, P(o.ln2), a.rstd2.p, N, C);
             datty.zero(size_t(N) * C);
-            proj_backward(datty.p, dresid.p, a.atty.p, o.wo, N, C, C, attn_ternary());
+            proj_backward(datty.p, dresid.p, pick(a.atty, a.attyh), o.wo, N, C, C, attn_ternary());
             dqkv.zero(size_t(N) * 3 * C);
             attention_backward(dqkv.p, datty.p, a, B, Tn);
             if (cfg.rope_layer(l)) rope_apply(dqkv.p, B, Tn, true);
             dC.zero(size_t(N) * C);
-            proj_backward(dC.p, dqkv.p, a.ln1.p, o.wqkv, N, C, 3 * C, attn_ternary());
+            proj_backward(dC.p, dqkv.p, pick(a.ln1, a.ln1h), o.wqkv, N, C, 3 * C, attn_ternary());
             rmsnorm_backward(dresid.p, G(o.ln1), dC.p, x_in, P(o.ln1), a.rstd1.p, N, C);
         }
         embedding_bwd<<<blocks_for(size_t(N) * C), kBlock>>>(G(wte), dresid.p, tokens.p, N, C);

@@ -169,15 +169,18 @@ both against the CPU engine:
   4 x 32 (cuBLAS: 15,000) and 17,800 at 8 x 16, which only fits with them.
   With `--matmul fp32` they run the exact fp32 kernels
   (`src/attention.cuh`). Heads larger than 128 use the cuBLAS attention;
-- `--matmul bf16`, off by default: matrix products on the tensor cores at
-  twice the TF32 rate, with coarser rounding of each input; only worth
-  having if the probe shows it faster: `GPU="--gpu --matmul bf16"
-  scripts/probe.sh`.
+- `--matmul bf16`, off by default: the model's matrix products take
+  inputs stored in bf16 (8 significant bits against TF32's 11), which the
+  tensor cores multiply at twice the TF32 rate. Weights, gradients and the
+  optimizer stay fp32 (the products use a bf16 copy of the weights), and
+  so do the router, Muon and attention. On the night-1 model at 8 x 16:
+  24,200 tokens/s against 17,600, with 7.0 GB of GPU memory against 6.7.
+  Not for ternary models yet. `GPU="--gpu --matmul bf16" scripts/probe.sh`
+  measures it for each size.
 
-Three `test_gpu` checks have failed since the first run on the laptop's
+Two `test_gpu` checks have failed since the first run on the laptop's
 RTX 4070 (2026-10-14), so `test_gpu` ends without `all passed` and
 `setup_wsl.sh` without `All set` until they are fixed:
-- `dense bf16`: gradients 9.9e-2 from the CPU's, against 5e-2 allowed;
 - `heads of 64` (70 tokens, fused fp32): 4.1e-4 against 1e-4. The cuBLAS
   attention misses that bound too there (1.8e-4); at 24, 128, 256 and 512
   tokens both are within it and equal (6.0e-5 fused, 6.9e-5 cuBLAS at
@@ -185,12 +188,15 @@ RTX 4070 (2026-10-14), so `test_gpu` ends without `all passed` and
 - `head of 128` (fused fp32): 1.3e-4, and 1.9e-4 at 128 tokens, about
   three times the cuBLAS attention's error (5e-5 to 6e-5) at every length
   tried. No night size uses head 128 (all have head 64).
-All three miss on a norm weight's gradient, the tensor most sensitive to
-rounding, and none is what the nights run (TF32 with the tensor-core
+Both miss on a norm weight's gradient, the tensor most sensitive to
+rounding, and neither is what the nights run (TF32 with the tensor-core
 kernels). Those kernels pass their own checks: alone, within 2e-4 to 1e-3
 of an exact reference (TF32 keeps 11 significant bits), and in a TF32
 model as close to the CPU as the cuBLAS attention is (gradients 7.0e-2
-against cuBLAS's 6.1e-2, both worst on a norm weight).
+against cuBLAS's 6.1e-2, both worst on a norm weight). A third, `dense
+bf16`, failed until its bounds were set from what bf16 inputs measure
+(gradients 1.3e-1, a norm weight's; the MoE runs' worst is the
+router's, 4.4e-1 against TF32's 1.0e-1 on the same model).
 
 Where a training step spends its GPU time (if it runs out of memory, use
 `--batch 4 --accum 32`):

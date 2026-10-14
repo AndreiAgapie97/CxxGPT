@@ -42,7 +42,9 @@ Reasoning is the first capability we go after.
   prep-qa` turns GSM8K-style JSON Lines into the same format.
 - `src/gpu.cu` (interface `src/gpu.h`): the CUDA training backend, the
   same model op for op, fp32 with cuBLAS (TF32 by default; `--matmul
-  bf16`), and fused attention kernels, the default (`--no-fused-attn`
+  bf16` stores the products' inputs in bf16, with fp32 master weights:
+  1.37x the tokens/s, not for ternary models yet), and fused attention
+  kernels, the default (`--no-fused-attn`
   for cuBLAS products): on the tensor cores with TF32/bf16
   (`src/attention_tc.cuh`, tested on the GPU only; 1.18x the cuBLAS
   attention's tokens/s on the night-1 model, at 8 x 16, which only fits
@@ -51,10 +53,10 @@ Reasoning is the first capability we go after.
   `--profile` times each part of a step. `tests/test_gpu.cpp` compares it
   with the CPU engine. Build with `make gpu`, giving `cxxgpt-gpu` (`train
   --gpu`) and `test_gpu`. On the laptop's RTX 4070, everything passes
-  except three checks, none of them on what the nights run, all on a norm
-  weight's gradient: `dense bf16`, and the fp32 fused kernels at `heads
-  of 64` (70 tokens, where cuBLAS also misses the bound) and `head of 128`
-  (about 3x cuBLAS's error); docs/LAPTOP.md "GPU options".
+  except two checks, neither on what the nights run, both on a norm
+  weight's gradient: the fp32 fused kernels at `heads of 64` (70 tokens,
+  where cuBLAS also misses the bound) and `head of 128` (about 3x
+  cuBLAS's error); docs/LAPTOP.md "GPU options".
 - `docs/research.md`: the research log from the merged `gpt/research`
   branch (stable cross-entropy, token-weighted accumulation, optimizer
   grids, digit curricula), with raw results under `docs/results/`.

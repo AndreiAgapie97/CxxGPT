@@ -651,10 +651,12 @@ and settings (4 sequences of 512 per micro-batch, 32 micro-batches),
 
 What this says:
 - `--matmul bf16` only asks cuBLAS to round fp32 inputs internally
-  (`CUBLAS_COMPUTE_32F_FAST_16BF`); the data stays fp32 in memory. At this
-  micro-batch the products are limited by moving data, not by arithmetic,
-  so it gains nothing. Storing weights and activations in bf16 is the real
-  version: the bf16 rung of the ladder above.
+  (`CUBLAS_COMPUTE_32F_FAST_16BF`); the data stays fp32 in memory, and it
+  gains nothing. (Measured later: the products are not limited by moving
+  data. TF32 runs them at 13-21 TFLOPS, near this GPU's TF32 ceiling, and
+  `FAST_16BF` simply never gets the bf16 rate; inputs stored in bf16 do.)
+  Storing weights and activations in bf16 is the real version: the bf16
+  rung of the ladder above.
 - Our fused attention is slow (plain fp32 loops, no tensor cores) but uses
   less memory.
 - Bigger micro-batches pay: with the same attention, 8 sequences instead of
@@ -691,7 +693,24 @@ What this says:
    now under 10% of the step and the matrix products are 50%: the next
    gains are in items 2, 3 and 5.
 2. **bf16 storage** for weights and activations (the ladder's bf16 rung,
-   after the norm-gradient question in the review).
+   after the norm-gradient question in the review). **Done** as
+   `--matmul bf16` (2026-10-14), for the matrix products' inputs: a bf16
+   copy of the weights, refreshed after each step (7 ms), and activations
+   written in bf16 by the kernels that make them; weights, gradients,
+   optimizer state, the router, Muon and attention stay fp32. cuBLAS on
+   the night-1 shapes, one 65,536-token step's worth of products:
+
+   | inputs | time |
+   |---|---|
+   | fp32, TF32 (default) | 2.47 s |
+   | fp32, `FAST_16BF` (the old `--matmul bf16`) | 2.43 s |
+   | bf16, fp32 sums | 1.22 s |
+
+   In training (night-1 model, 8 x 16): 24,200 tokens/s against 17,600
+   (1.37x), the step 2.7 s against 3.7 s, GPU memory 7.0 GB against 6.7.
+   Converting at each product instead of writing bf16 at the source gave
+   only 20,800 and 7.4 GB. Not for ternary models yet (their quantized
+   values are not exact in bf16; int8 tensor cores are the way there).
 3. **Muon in bf16** (10% of the step).
 4. **Exams on the GPU.** Each one runs on the CPU while the GPU waits: about
    5 minutes for 250 problems, about 15 minutes per night with the final

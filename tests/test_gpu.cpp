@@ -179,7 +179,8 @@ void masked_accumulation() {
   }
 }
 
-// The GPU alone learns a repeating sequence.
+// The GPU alone learns a repeating sequence, with a ternary MoE model
+// (full precision with bf16 products, which do not take ternary models).
 void learns_pattern(bool muon, Matmul matmul = Matmul::tf32, bool fused = false) {
     Config cfg;
     cfg.vocab = 64;
@@ -189,7 +190,7 @@ void learns_pattern(bool muon, Matmul matmul = Matmul::tf32, bool fused = false)
     cfg.n_heads = 2;
     cfg.n_experts = 4;
     cfg.top_k = 2;
-    cfg.ternary = true;
+    cfg.ternary = matmul != Matmul::bf16;
     Model<float> host(cfg);
     host.init(7);
     GpuTrainer gpu(cfg, host.infos, matmul, fused);
@@ -346,9 +347,12 @@ int main() {
     dense.n_heads = 4;
     compare("dense", dense, 1e-5, 1e-4, 1e-4);
     compare("dense, cuBLAS attention", dense, 1e-5, 1e-4, 1e-4, {.fused = false});
-    // bf16 keeps 8 significant bits of each input: about 4e-3 apart per
-    // product, so a looser check that nothing else differs.
-    compare("dense bf16", dense, 1e-2, 5e-2, 5e-2, {.matmul = Matmul::bf16});
+    // bf16 products keep 8 significant bits of each input, about 4e-3 apart,
+    // so a looser check that nothing else differs. The bounds here and for
+    // the MoE runs below are twice what the RTX 4070 measured; the worst
+    // gradients are a norm weight's and the router's, which sum many
+    // nearly cancelling terms (TF32, 3 bits finer, is about 4x closer).
+    compare("dense bf16", dense, 3e-4, 3e-1, 5e-2, {.matmul = Matmul::bf16});
 
     // Fused attention over several tiles of rows (70 tokens), and at its
     // largest head size, which needs more than 48 KB of shared memory.
@@ -386,6 +390,13 @@ int main() {
     moe1.top_k = 1;
     moe1.n_shared = 0;
     compare("moe top-1", moe1, 1e-5, 1e-4, 1e-4, {.clip = 0.5});
+    // The experts' products in bf16 (each a slice of the rows), against the
+    // same model in TF32. Measured: TF32 loss 1.2e-4, gradients 1.0e-1,
+    // weights 7.9e-3; bf16 5.9e-4, 4.4e-1 (the router), 3.7e-2; with Muon
+    // 2.3e-5, 2.3e-1, 4.1e-3.
+    compare("moe tf32", moe, 3e-4, 2e-1, 2e-2, {.matmul = Matmul::tf32});
+    compare("moe bf16", moe, 1.2e-3, 9e-1, 8e-2, {.matmul = Matmul::bf16});
+    compare("moe muon bf16", moe, 5e-5, 5e-1, 1e-2, {.muon = true, .matmul = Matmul::bf16});
 
     Config ours = moe;
     ours.ternary = true;
