@@ -212,7 +212,8 @@ struct TokenData {
         std::fwrite(&n, 8, 1, f);
         std::fwrite(tokens.data(), 2, n, f);
         if (has_mask) std::fwrite(mask.data(), 1, n, f);
-        CHECK(std::fclose(f) == 0, "error writing %s", path.c_str());
+        const bool failed = std::ferror(f) != 0;
+        CHECK(std::fclose(f) == 0 && !failed, "error writing %s", path.c_str());
     }
 
     struct Header {

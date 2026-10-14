@@ -57,6 +57,10 @@ status=0
 grep -q 'one-logit softmax has zero task gradient' "$TEST_DIR/top1.log"
 
 "$CXXGPT_TRAINING_CLI" generate "$TEST_DIR"
+status=0
+"$CXXGPT_TRAINING_CLI" bad-token-save > "$TEST_DIR/token-save.log" 2>&1 || status=$?
+[[ "$status" == 1 ]]
+grep -q 'error writing /dev/full' "$TEST_DIR/token-save.log"
 printf 'a\001b' > "$TEST_DIR/bos.txt"
 "$CXXGPT" text2tok --in "$TEST_DIR/bos.txt" --out "$TEST_DIR/bos.tok" --threads 2 > "$TEST_DIR/bos.log"
 printf '%s\n' '{"question":"one\u0001two","answer":"work\u0001\n#### 2\u0001"}' > "$TEST_DIR/bos.jsonl"

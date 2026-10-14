@@ -6,6 +6,12 @@
 #include "../src/tokenizer.h"
 
 int main(int argc, char** argv) {
+    if (argc == 2 && std::string(argv[1]) == "bad-token-save") {
+        TokenData data; data.vocab = 256; data.tokens.assign(10000,1); data.mask.assign(10000,1);
+        data.save("/dev/full");
+        return 2;
+    }
+
     if (argc == 4 && std::string(argv[1]) == "clean-bos") {
         const auto text=TokenData::load(argv[2]), qa=TokenData::load(argv[3]);
         EXPECT(text.tokens==std::vector<uint16_t>({97,98}), "raw text BOS remained");
