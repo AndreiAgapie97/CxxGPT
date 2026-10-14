@@ -76,6 +76,19 @@ printf 'CLI: benchmark emits alternating raw trials and rejects zero repeats\n'
 
 "$CXXGPT" train "${COMMON[@]}" --steps 0 --init "$TEST_DIR/model.ckpt" --out "$TEST_DIR/fresh.ckpt" > "$TEST_DIR/init.log"
 ./test_training_cli fresh "$TEST_DIR/model.ckpt" "$TEST_DIR/fresh.ckpt"
+"$CXXGPT" train "${COMMON[@]}" --steps 0 --seed 2 --init "$TEST_DIR/model.ckpt" --out "$TEST_DIR/night2.ckpt" > "$TEST_DIR/night2.log"
+./test_training_cli fresh "$TEST_DIR/model.ckpt" "$TEST_DIR/night2.ckpt" 2
+./test_training_cli different-order "$TEST_DIR/fresh.ckpt" "$TEST_DIR/night2.ckpt"
+# Capture night.sh arguments without reading real data or touching night1 files.
+printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$@" > "$MOCK_ARGS"\n' > "$TEST_DIR/night-mock"
+chmod +x "$TEST_DIR/night-mock"
+for night in 1 2; do
+    run="review${night}-${BASHPID}"
+    MOCK_ARGS="$TEST_DIR/night.args" RUN="$run" TOKS=100 MIX=unused INIT="$TEST_DIR/model.ckpt" \
+        CX="$TEST_DIR/night-mock" bash scripts/night.sh > "$TEST_DIR/night-script.log"
+    [[ $(awk '$0=="--seed" {getline; print}' "$TEST_DIR/night.args") == "$night" ]]
+    rm "runs/$run.log"
+done
 "$CXXGPT" train "${COMMON[@]}" --steps 0 --ternary --init "$TEST_DIR/model.ckpt" --out "$TEST_DIR/fresh-ternary.ckpt" > "$TEST_DIR/init-ternary.log"
 ./test_training_cli fresh-ternary "$TEST_DIR/model.ckpt" "$TEST_DIR/fresh-ternary.ckpt"
 "$CXXGPT" train "${COMMON[@]}" --steps 0 --ternary --fp-attn --init "$TEST_DIR/model.ckpt" --out "$TEST_DIR/fresh-hybrid.ckpt" > "$TEST_DIR/init-hybrid.log"

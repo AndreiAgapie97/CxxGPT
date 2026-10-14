@@ -594,7 +594,7 @@ int cmd_train(Args& a) {
             "train:  --batch 16 --accum 1 --steps 2000 --lr 1e-3 --min-lr-frac 0.1\n"
             "        --warmup 100 --wd 0.1 --clip 1.0 --bias-rate 1e-3 --seed 1\n"
             "        --muon (Muon instead of AdamW for the matrices in the blocks)\n"
-            "start:  --init FILE (FILE's weights and model; new optimizer, schedule and data order;\n"
+            "start:  --init FILE (FILE's weights and model; new optimizer and schedule; data order from --seed;\n"
             "        with --ternary, the weights turn ternary from here on)\n"
             "output: --out model.ckpt --resume --log FILE.csv --log-every 10\n"
             "        --eval-every 200 --eval-batches 20 --save-every 500\n"
