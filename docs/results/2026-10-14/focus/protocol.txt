@@ -1,0 +1,1 @@
+steps=200 threads=2 lr=0.0005 warmup=0 clip=1 wd=0.1 optimizer=AdamW probe_seed=20261014 per_cell=100

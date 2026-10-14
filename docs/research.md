@@ -375,10 +375,78 @@ array counts nor the packed weight counts measure peak process memory.
 * Small synthetic tasks are useful for detecting bugs and measuring forgetting;
   they cannot establish real reasoning ability or reinforcement learning.
 
+## Reasoning diagnosis and continued validation: 2026-10-13/14
+
+The native `reasoning_audit` scores gold whole-question completions by byte
+role. A separate double analytic fixture checks role boundaries, token counts,
+stable extreme loss, aggregation and agreement with the engine. Dense seed 1
+has 98.3% delimiter accuracy (loss 0.034), 65.3% intermediate-digit accuracy
+(loss 1.075), and 40.0% final-digit accuracy (loss 2.428), despite receiving
+correct intermediate steps. Overall gold token accuracy is 79.1%; exact answers
+remain 1/60. Non-digit step tokens include semantic operators and words.
+These diagnostics locate errors but do not prove a causal explanation.
+
+A fixed 200-update experiment compares full completion labels with final-digit
+labels alone, retaining identical context streams and matched sampler state.
+It uses dense and ternary MoE checkpoints, three seeds, fresh AdamW state,
+learning rate 0.0005, batch two, sequence 128 and two threads. The new probe
+has 600 unique questions, excluding all train, validation and original test
+question strings. It was not used for checkpoint selection. After this analysis
+it becomes a development probe; future tuning needs an independent holdout.
+
+| Variant | Initial exact answers /600 (seeds 1/2/3) | Full labels | Final digits only | Median gold final-digit loss, full / final |
+| --- | --- | --- | --- | ---: |
+| Dense | 12 / 14 / 10 | 9 / 10 / 10 | 12 / 8 / 7 | 2.394 / 1.801 |
+| Ternary MoE | 10 / 8 / 7 | 11 / 8 / 10 | 4 / 7 / 12 | 2.587 / 1.938 |
+
+Final-only loss decreases in all six runs and full-completion validation loss
+worsens in all six. Exact answers lose to the full-label control in four of
+six comparisons. The default objective is retained. Lower teacher-forced
+loss on selected digits does not establish better generated reasoning; a
+mixed or weighted objective, intermediate-step correctness, and model capacity
+remain appropriate follow-ups. This is an exploratory small-model experiment,
+not an architecture ranking or an environmental reinforcement-learning result.
+
+All four original 2,000-step baselines were reproduced with three seeds and
+new token-weighted validation. **All twelve checkpoint files are byte-identical**
+to their earlier runs. Dense seed 1's same-window validation changes from
+legacy batch mean 0.557236 to token mean 0.553520. The training trajectory is
+unchanged for these accumulation-one, nonempty batches. Compilation overlapped
+reproduction, so its throughput logs are not performance evidence.
+
+Benchmark review exposed a missing learned router bias in the fp32 clone.
+`make_fp32_decode_baseline` now copies effective weights and routing state;
+a forced-bias decode test matches an explicit reference and differs from a
+zero-bias negative control. Claude's `2555c12` inference-reference check was
+merged with alternating order, warmups and CSV logs as `97c6c40`. The CSV adds
+`ternary_model_agreement`. Weight counts now include routing bias on both
+paths. **Prior trained-MoE timing and fp32-agreement comparisons are confounded
+by omitted baseline routing state.** Their raw measurements remain preserved.
+A quiet 128-token, two-thread rerun gives observed ratios 1.33x dense and 1.74x
+MoE; both packed paths match the quantized training-model reference's argmax
+on 100% of positions. These limited VM timings do not isolate ternary arithmetic.
+
+Claude's warm-start and divergence updates through `ee1b279` were merged as
+`5dc033a`, preserving masked-token weighting. Failed attempts do not advance
+optimizer/schedule steps and discard routing loads without bias changes.
+Non-finite loss is checked before stepping; ten consecutive failures stop.
+Checkpoint writes validate finite stored state and moment-array sizes before
+opening the temporary file; weight-only reads check skipped optimizer extent.
+CLI tests verify warm-start reset, resume precedence, truncated state, and
+byte-identical preservation of an existing checkpoint after failed writes
+and a diverging run. Finite state does not guarantee a usable model: very large
+finite weights can still overflow activations.
+
+Latest runbook, downloader checks, output-folder creation and optional chain
+planning through `1d660db` were integrated as `b55d899`. No unresolved conflicts remain.
+Compiler, native/CLI, sanitizer and CUDA compile results, hashes, probe records,
+per-seed outcomes and reproduction evidence are retained in
+[results/2026-10-14](results/2026-10-14). GPU runtime validation remains pending.
+
 ## Publishing and continuation status
 
 The local research branch preserves all earlier work and ordinary Claude
-merges through `09adc67`. There are no unresolved merge conflicts. GitHub
+merges through `1d660db`. There are no unresolved merge conflicts. GitHub
 reads and fetches work, but Git HTTPS still denies push with HTTP 403 and
 the GitHub app's tree-write check returns `Resource not accessible by
 integration` (403). No remote `gpt/research` branch or research PR exists.
@@ -388,6 +456,7 @@ and remaining draft until NVIDIA runtime validation is recorded.
 The local bundle and binary patch in `/workspace` are refreshed after the
 final documentation commit. The existing hourly follow-up remains enabled;
 its context tracks completed token weighting, CPU-quota-aware benchmarks,
-pending GPU loss/accumulation/Muon validation, reasoning quality, and access
+pending GPU loss/accumulation/Muon validation, mixed supervision and intermediate
+step correctness, and access
 checks. It must inspect the preserved artifacts before recreating missing
 remote work and must never force-push or alter Claude's branches.

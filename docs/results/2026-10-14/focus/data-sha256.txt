@@ -1,0 +1,6 @@
+57d45c8ad42f9dc9a511ce4869563414b6e761768819a11e7a3cd018e84ddb9a  runs/reasoning-2000-20261013/reason.test.txt
+17441f27f00f2f6b15f65d5785ee12f98c5b9bba5f343ddd76b4077e1780a7b1  runs/reasoning-2000-20261013/reason.train.tok
+80d13280db5dad7558043f3b29a75bef2983f046d1223a78ea173fda9e79ca14  runs/reasoning-2000-20261013/reason.val.tok
+cba9d74fa75769b9cd1e65d4a1a8ddd0d88848684ea5092fcb65dde4eb067cad  runs/reasoning-focus-20261013/targets/probe.txt
+03b3b4d1149b62e72a87192217c32cd985b12efb6ba665f56f3a4a7301ae4717  runs/reasoning-focus-20261013/targets/train-final.tok
+7daa067d9706c42cf7b265a15ab3e08b880e2d8180f8af7555b3ebd14c649acf  runs/reasoning-focus-20261013/targets/val-final.tok

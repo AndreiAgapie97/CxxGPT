@@ -1,0 +1,11 @@
+checkpoint,metric,tokens,mean_loss,correct,total
+dense-seed2,all_completion,1644,0.719610845,1347,1644
+dense-seed2,step_digit,518,1.136381356,377,518
+dense-seed2,step_other,516,0.252199814,480,516
+dense-seed2,delimiter,360,0.078621085,355,360
+dense-seed2,answer_digit,190,2.291760465,75,190
+dense-seed2,answer_other,60,0.008691724,60,60
+dense-seed2,teacher_coverage,0,0,60,60
+dense-seed2,exact_answer,0,0,1,60
+dense-seed2,sampled_val_token_mean,694,0.465840478,0,0
+dense-seed2,sampled_val_legacy_batch_mean,694,0.465121792,0,0

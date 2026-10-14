@@ -1,0 +1,12 @@
+e03fcb554aefc1a462e17b4173620c6604b03c0f06740369681ad6326cba9aba  runs/reasoning-focus-20261013/dense-seed1-all.ckpt
+4efe5cd9597e0b9b16195a74ff611bc35a5a52b0b56271c75320bb24d8408a7a  runs/reasoning-focus-20261013/dense-seed1-final.ckpt
+9076162b4293011118877f7f263c51efd600dfa210767dd2c2fc4e765a2a8a02  runs/reasoning-focus-20261013/dense-seed2-all.ckpt
+689ee72b0a95b855f14f8e6bf9ce9de3a6ed050bd43ccf64972ba94bb0126d7c  runs/reasoning-focus-20261013/dense-seed2-final.ckpt
+80a9597b5fbdbc1a1ef74a63ff90651c6f8ce7fd7bd30e83b71347e114dd5d85  runs/reasoning-focus-20261013/dense-seed3-all.ckpt
+06a62980f381e370a6519e11c6d2be2109b6f704cb6b58fa227c2924c8214e6f  runs/reasoning-focus-20261013/dense-seed3-final.ckpt
+43faa35c274b0d52a4510665a758b82ac6389cadb7440ee21508496f1aac249a  runs/reasoning-focus-20261013/moe-ternary-seed1-all.ckpt
+61f42490297ec97f3db31f4473bd45c8d1c29d91220a25a5ecfe71536082982b  runs/reasoning-focus-20261013/moe-ternary-seed1-final.ckpt
+b58ba144989c465861a9283fd51cd21efd4ba35d7a323133193ebef3a3d84edf  runs/reasoning-focus-20261013/moe-ternary-seed2-all.ckpt
+ed2f3216becc32da55533d8ab1315523c9a547f3553521772c8fbb32dd9343f5  runs/reasoning-focus-20261013/moe-ternary-seed2-final.ckpt
+0d43cf50104e50d99005a4331300b1ad97e3f1bfbc24a0da7a834195cfe069b1  runs/reasoning-focus-20261013/moe-ternary-seed3-all.ckpt
+ba68fefa5aaca8c47d6269cbdc263b71da9b7f3bc640f2acbbf4c5d0be6dcb0d  runs/reasoning-focus-20261013/moe-ternary-seed3-final.ckpt

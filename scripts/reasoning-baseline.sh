@@ -13,6 +13,7 @@ mkdir "$RUN_DIR"
 make -B "CXX=${CXX:-g++}" EXTRA=-Werror cxxgpt > "$RUN_DIR/build.log" 2>&1
 git rev-parse HEAD > "$RUN_DIR/source-commit.txt"
 git status --short > "$RUN_DIR/source-status.txt"
+git diff HEAD --binary > "$RUN_DIR/source.patch"
 sha256sum src/*.h src/cxxgpt.cpp > "$RUN_DIR/source-sha256.txt"
 sha256sum cxxgpt > "$RUN_DIR/binary-sha256.txt"
 "${CXX:-g++}" --version > "$RUN_DIR/compiler.txt"

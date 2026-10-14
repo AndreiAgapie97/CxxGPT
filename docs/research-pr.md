@@ -14,12 +14,19 @@ configurations, and the real single-window CLI path. Unequal masked microbatches
 now optimize one global token mean; validation uses the same weighting. Empty
 groups skip optimizer updates. Combined-batch, finite-difference, clipped
 optimizer and CLI checkpoint comparisons cover all four architecture variants.
+Warm-start, divergence and checkpoint-protection regressions preserve saved
+state on failures. Native diagnostics separate intermediate digits, delimiters
+and final digits.
 
 Native C++ experiments compare dense, ternary, MoE and ternary MoE with recorded
 seeds and matched active FFN width. They demonstrate bounded replay retention
 and reward-based bandit learning. Reasoning runs at 200 and 2,000 steps improve
 token loss but achieve only 0–3.3% exact answers. Raw results and limitations are
-recorded in `docs/research.md` and `docs/results/2026-10-13`.
+recorded in `docs/research.md` and `docs/results/2026-10-13`. All twelve
+2,000-step checkpoints reproduce byte-identically with token-weighted validation.
+A new disjoint 600-question experiment finds that final-digit-only training
+lowers teacher-forced digit loss but gives no consistent exact-answer gain.
+The full default objective is retained; new records are in `docs/results/2026-10-14`.
 
 Claude's CUDA backend, streaming pipeline, laptop/overnight setup, Muon
 optimizer, evaluation/loading updates, and compact GPU optimizer state are
@@ -33,10 +40,11 @@ Validation:
   CLI and experiment smoke runs.
 - Scalar and AVX2 engine checks; reproducible native experiments and checkpoint
   storage audit. Decode benchmarks record warmups, alternating raw trials,
-  CPU quotas and
-  weight storage. The quota-aware trained cases show about 1.6x observed
+  CPU quotas and weight storage. Corrected trained cases show 1.33x dense and 1.74x MoE observed
   end-to-end speedup; embedding-heavy controls reduce whole-weight savings
-  to 1.07–1.12x. These are limited VM measurements.
+  to 1.07–1.12x. The fp32 clone now preserves learned router bias, with a
+  regression test and a separate quantized-model reference check. Earlier
+  trained-MoE timings are marked confounded. These are limited VM measurements.
 - CUDA host/device compile checks for `sm_89` using Clang and CUDA 12.4 headers.
   The stable-loss, masked-accumulation and optimizer-state paths have CPU/GPU
   regression fixtures; **GPU runtime assertions remain pending `make gpu-test` on NVIDIA hardware. Keep this PR

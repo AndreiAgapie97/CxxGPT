@@ -1,0 +1,3 @@
+runs/reasoning-weighted-20261013/reason.train.tok: 2000 problems, 80102 tokens (1 test duplicates skipped)
+runs/reasoning-weighted-20261013/reason.val.tok: 500 problems, 20009 tokens (1 test duplicates skipped)
+runs/reasoning-weighted-20261013/reason.test.txt: 60 problems (2 tasks x difficulty 1..3 x 10)
