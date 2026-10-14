@@ -19,6 +19,7 @@
 //   eq     linear equation a*x+b=c, solved in two steps
 //   cmp    which of two numbers is larger, digit by digit
 #pragma once
+#include <charconv>
 
 #include <algorithm>
 #include <cstdio>
@@ -369,11 +370,8 @@ inline std::vector<Problem> load_problems(const std::string& path) {
     CHECK(f, "cannot open %s", path.c_str());
     std::vector<Problem> ps;
     std::string line;
-    for (int ch; (ch = std::fgetc(f)) != EOF;) {
-        if (ch != '\n') {
-            line += char(ch);
-            continue;
-        }
+    auto parse_line = [&] {
+        if (!line.empty() && line.back() == '\r') line.pop_back();  // CRLF record terminator
         std::vector<std::string> fields;
         size_t pos = 0;
         for (size_t tab; (tab = line.find('\t', pos)) != std::string::npos; pos = tab + 1)
@@ -382,13 +380,21 @@ inline std::vector<Problem> load_problems(const std::string& path) {
         CHECK(fields.size() == 5, "bad line in %s: %s", path.c_str(), line.c_str());
         Problem p;
         p.task = unescape_field(fields[0]);
-        p.difficulty = std::atoi(fields[1].c_str());
+        const auto parsed = std::from_chars(fields[1].data(), fields[1].data() + fields[1].size(), p.difficulty);
+        CHECK(parsed.ec == std::errc{} && parsed.ptr == fields[1].data() + fields[1].size() && p.difficulty > 0,
+              "bad difficulty in %s: %s", path.c_str(), fields[1].c_str());
         p.question = unescape_field(fields[2]);
         p.steps = unescape_field(fields[3]);
         p.answer = unescape_field(fields[4]);
         ps.push_back(std::move(p));
         line.clear();
+    };
+    for (int ch; (ch = std::fgetc(f)) != EOF;) {
+        if (ch == '\n') parse_line();
+        else line += char(ch);
     }
+    CHECK(!std::ferror(f), "error reading %s", path.c_str());
+    if (!line.empty()) parse_line();  // a final record need not end with a newline
     std::fclose(f);
     return ps;
 }

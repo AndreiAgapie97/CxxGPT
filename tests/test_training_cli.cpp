@@ -133,6 +133,13 @@ int main(int argc, char** argv) {
         EXPECT(opt.step == 0 && opt.m.empty() && opt.v.empty(), "skipped attempt advanced optimizer");
         return g_failures ? 1 : 0;
     }
+    if (argc == 3 && std::string(argv[1]) == "problems") {
+        const auto ps = load_problems(argv[2]);
+        EXPECT(ps.size() == 2 && ps[0].question == "q" && ps[0].answer == "14" &&
+               ps[1].question == "tail" && ps[1].answer == "1080" && ps[1].difficulty == 2,
+               "CRLF or unterminated problem record was lost/corrupted");
+        return g_failures ? 1 : 0;
+    }
     if (argc == 3 && std::string(argv[1]) == "recover-save") {
         Model<float> m(peek_checkpoint_config(argv[2])); AdamW opt; Rng rng(0);
         load_checkpoint(argv[2], m, &opt, &rng);

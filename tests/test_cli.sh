@@ -31,6 +31,17 @@ done
 printf 'CLI: single-window train/validation and twelve invalid configurations passed\n'
 
 ./test_training_cli generate "$TEST_DIR"
+printf 'qa\t1\tq\twork\t14\r\nqa\t2\ttail\twork\t1080' > "$TEST_DIR/line-endings.txt"
+./test_training_cli problems "$TEST_DIR/line-endings.txt"
+"$CXXGPT" eval-reasoning --ckpt "$TEST_DIR/audit.ckpt" --test "$TEST_DIR/line-endings.txt" --max-new 1 --threads 2 > "$TEST_DIR/line-endings.log"
+grep -q '^overall .* / 2)' "$TEST_DIR/line-endings.log"
+for difficulty in '' 1junk 999999999999999999999999 -1; do
+    printf 'qa\t%s\tq\twork\t14' "$difficulty" > "$TEST_DIR/bad-difficulty.txt"
+    status=0
+    "$CXXGPT" eval-reasoning --ckpt "$TEST_DIR/audit.ckpt" --test "$TEST_DIR/bad-difficulty.txt" --threads 2 \
+        > "$TEST_DIR/bad-difficulty.log" 2>&1 || status=$?
+    [[ "$status" == 1 ]] && grep -q 'bad difficulty' "$TEST_DIR/bad-difficulty.log"
+done
 "$CXXGPT" eval-reasoning --ckpt "$TEST_DIR/audit.ckpt" --test "$TEST_DIR/audit.txt" --max-new 1 --threads 2 > "$TEST_DIR/cap.log"
 grep -q 'gold completions exceeding --max-new 1: 1 / 1' "$TEST_DIR/cap.log"
 "$CXXGPT" eval-reasoning --ckpt "$TEST_DIR/audit.ckpt" --test "$TEST_DIR/audit.txt" --threads 2 > "$TEST_DIR/cap-default.log"
