@@ -102,6 +102,10 @@ static void run_case(const char* label, const std::vector<int8_t>& src,
         check(m < 1e-3f, buf);
     }
 
+    std::vector<int8_t> xq(K);
+    const float x_scale = quantize_int8(X.data(), K, xq.data());
+    std::vector<float> int8_reference(M);
+    gemv_bitplane_int8_scalar(xq.data(), x_scale, Wb, int8_reference.data(), 0, M);
     for (const auto& k : all_kernels()) {
         std::vector<float> y(size_t(M), NAN);
         k.fn(X.data(), Wb, y.data());
@@ -115,6 +119,12 @@ static void run_case(const char* label, const std::vector<int8_t>& src,
         char buf[160];
         snprintf(buf, sizeof buf, "%s / %s (maxdiff %.2e, tol %.2e)", label, k.name, m, tol);
         check(m <= tol, buf);
+        if (k.qrows) {
+            bool exact = true;
+            for (int r = 0; r < M; ++r) exact &= std::isfinite(y[r]) && y[r] == int8_reference[r];
+            snprintf(buf, sizeof buf, "%s / %s equals integer scalar reference", label, k.name);
+            check(exact, buf);
+        }
     }
 }
 
