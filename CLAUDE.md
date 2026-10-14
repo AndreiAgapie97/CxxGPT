@@ -48,6 +48,8 @@ Reasoning is the first capability we go after.
   validated on the GSM8K test set; `INIT=` starts from an earlier night's
   weights); `scripts/report.sh` sums up a night's log. `docs/LAPTOP.md`
   is the runbook.
+- `train --init FILE --ternary` turns a full-precision model ternary for
+  the rest of its training (same weights, used differently).
 - Overnight safety: a step with a non-finite gradient is skipped, ten in a
   row stop the run without overwriting the last checkpoint, and
   checkpoints are written to a temporary file and renamed.
