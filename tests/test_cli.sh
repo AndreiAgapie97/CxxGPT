@@ -29,6 +29,9 @@ for option in dim heads experts shared ffn ehidden topk batch accum log-every ev
     fi
 done
 printf 'CLI: single-window train/validation and twelve invalid configurations passed\n'
+status=0
+"$CXXGPT" train "${COMMON[@]}" --experts 4 --topk 1 > "$TEST_DIR/top1.log" 2>&1 || status=$?
+[[ "$status" == 1 ]] && grep -q 'one-logit softmax has zero task gradient' "$TEST_DIR/top1.log"
 
 ./test_training_cli generate "$TEST_DIR"
 printf 'qa\t1\tq\twork\t14\r\nqa\t2\ttail\twork\t1080' > "$TEST_DIR/line-endings.txt"

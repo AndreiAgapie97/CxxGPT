@@ -649,6 +649,8 @@ int cmd_train(Args& a) {
           "model vocab %d < validation vocab %u", cfg.vocab, val_data.vocab);
     CHECK(reason_path.empty() || cfg.vocab >= tok.vocab_size(),
           "model vocab %d < reasoning tokenizer vocab %d", cfg.vocab, tok.vocab_size());
+    CHECK(!cfg.moe() || cfg.top_k > 1,
+          "--topk 1 cannot train this router: a one-logit softmax has zero task gradient; use --topk 2 or more");
     CHECK(log_every > 0 && eval_batches > 0, "log interval and evaluation batch count must be positive");
     AccumulationBatch group(B, Tn, accum);
 
