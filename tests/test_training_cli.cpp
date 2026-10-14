@@ -12,6 +12,7 @@ int main(int argc, char** argv) {
     }
 
     if (argc == 3 && std::string(argv[1]) == "repeat-backward") {
+        ThreadPool tp(1); g_pool = &tp;
         Config cfg; cfg.vocab = 3; cfg.seq_len = 2; cfg.d_model = 4; cfg.n_heads = 1; cfg.n_layers = 1;
         Model<float> m(cfg); m.init(7);
         const int token = 1, target = std::stoi(argv[2]);
