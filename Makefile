@@ -59,7 +59,11 @@ gpu: cxxgpt-gpu test_gpu
 gpu-test: test_gpu
 	./test_gpu
 
-.PHONY: all test bench asan tsan clean gpu gpu-test
+.PHONY: all test bench asan tsan clean gpu gpu-test optimizer-protocol-test
+
+# Optional research orchestration; training/evaluation themselves are native.
+optimizer-protocol-test:
+	python3 tests/test_optimizer_selection.py
 
 test_training_cli: tests/test_training_cli.cpp $(HEADERS) $(TEST_HEADERS)
 	$(CXX) $(CXXFLAGS) $< -o $@
