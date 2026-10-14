@@ -75,7 +75,41 @@ arithmetic. Then a curriculum A/B with notes kept versus dropped.
 
 **Cost.** Small. **Expected effect:** the largest per hour of work.
 
-### 2. Learning from its own checked solutions
+### 2. Finer experts: more of them, each smaller
+
+**Idea.**
+- Night 1 uses 8 experts per layer (hidden size 1024), and each token picks 2.
+  Split each expert in half instead: 16 experts of hidden size 512, each token
+  picks 4.
+- Total weights stay the same (267 M), and so does the work per token
+  (4 × 512 = 2 × 1024), so GPU memory stays the same.
+- A token now chooses from 1,820 combinations instead of 28, so experts can
+  specialize more narrowly and be combined more flexibly. Recent large MoE
+  models went this way (DeepSeek-V3: 256 small experts plus one always-on
+  expert; Qwen3 MoE: 128 experts, 8 picked). At our size it is untested.
+- More experts *of the same size* does not fit: 16 full-size experts add about
+  226 M weights, about 2.7-3.6 GB of training memory on top of 5.6 GB.
+
+**Where.** No code: `--experts 16 --topk 4` already halves the expert size,
+because the expert hidden size defaults to the FFN size divided by top-k
+(`src/config.h`, `ehidden()`). `--shared 1` adds an always-on expert.
+
+**Watch out for.**
+- Speed: smaller matrices, twice as many per step. Measure with the probe
+  first.
+- Balance: more experts are harder to keep evenly busy (night 1's load is
+  around 2-2.5, against an ideal 1.0). A stronger `--bias-rate` may be needed.
+
+**First experiment.**
+- Probe speed and memory at 8×2, 16×4 and 32×8 (about 10 minutes).
+- Curriculum, 3 seeds each: 8×2, 16×4, and 16×4 with `--shared 1`.
+
+**When.** Decide before night 2: weights cannot carry over to a different
+expert layout, so switching later means starting from scratch.
+
+**Cost.** Small (GPU hours only).
+
+### 3. Learning from its own checked solutions
 
 **Idea.**
 - The model attempts each training problem several times. Math answers can be
@@ -105,7 +139,7 @@ Use 3 seeds each.
 
 **Cost.** Medium. This is the direction already agreed with the owner.
 
-### 3. Place-value position information for digits
+### 4. Place-value position information for digits
 
 **Idea.**
 - Tell the model each digit's place (ones, tens, hundreds...) through an extra
@@ -125,7 +159,7 @@ mostly the training distribution.
 
 **Cost.** Medium. This is architectural work of our own.
 
-### 4. Ternary that pays off during training
+### 5. Ternary that pays off during training
 
 **Idea.**
 - The ternary forward pass is exactly an int8 × ternary product. On this GPU,
@@ -140,15 +174,15 @@ the current fp32 path.
 **Cost.** Large. **Effect:** speed for the ternary nights, and later for
 ternary from the start, if the seed repeats show ternary costs little.
 
-### 5. Facts outside the weights (retrieval)
+### 6. Facts outside the weights (retrieval)
 
 **Idea.** Let the model look facts up in a text index instead of memorizing
 them, so its few parameters go to reasoning.
 
-**Cost.** Large. **When:** after 1-3, once the model is good enough to use
+**Cost.** Large. **When:** after 1-4, once the model is good enough to use
 what it retrieves.
 
-### 6. A hard-wired arithmetic unit inside the network (long shot)
+### 7. A hard-wired arithmetic unit inside the network (long shot)
 
 **Idea.**
 - A special layer that does exact arithmetic on numbers the model points at,
@@ -156,8 +190,35 @@ what it retrieves.
 - Earlier attempts ("neural arithmetic logic units", 2018) were fragile to
   train.
 
-**When:** only if 1 and 3 leave arithmetic as the bottleneck. A real
+**When:** only if 1 and 4 leave arithmetic as the bottleneck. A real
 breakthrough if it works.
+
+## Growing past 8 GB: the optimizer's memory in the CPU's RAM
+
+**Why not split the computing work between CPU and GPU instead?**
+- The CPU is about 20× slower at this work: roughly 1 TFLOP/s at its best,
+  against the GPU's sustained 10-11.
+- The two halves would have to combine their results after every step,
+  about 1 GB each way.
+- CPU and GPU share one cooling system, and the GPU already throttles at
+  87 °C. Loading the CPU could cost more GPU speed than the CPU adds.
+
+**What to pool instead: memory.**
+- For each weight, the optimizer keeps extra numbers of its own, and it
+  touches them once per step, at the very end.
+- They could live in the laptop's 32 GB of RAM. The CPU would do that final
+  update (AVX-512, as in our CPU engine), and the GPU would keep all the heavy
+  work. This is the idea of DeepSpeed's ZeRO-Offload.
+- **Gain:** roughly 1-2 GB of GPU memory, for a bigger model, more experts or
+  longer text.
+- **Cost:** sending about 1 GB each way per step, maybe 0.2-0.3 s of a ~4.7 s
+  step, partly hideable behind the next step's work.
+
+**Test.** The result must match the all-GPU update exactly (same numbers,
+tested like every other GPU change).
+
+**When.** Only once we know we want a model bigger than 8 GB allows. Bets 2
+and 5 are cheaper ways to get more from the same memory.
 
 ## Speed, in parallel
 

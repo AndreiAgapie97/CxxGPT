@@ -54,8 +54,9 @@ Reasoning is the first capability we go after.
   branch (stable cross-entropy, token-weighted accumulation, optimizer
   grids, digit curricula), with raw results under `docs/results/`.
 - `docs/research-plan.md`: what to try next, in order (a calculator in the
-  engine, learning from checked solutions, place-value digit embeddings,
-  int8 tensor cores for ternary), and the seed-repeat funnel an idea passes
+  engine, finer experts, learning from checked solutions, place-value digit
+  embeddings, int8 tensor cores for ternary), the optimizer's memory in CPU
+  RAM for growing past 8 GB, and the seed-repeat funnel an idea passes
   before it gets a laptop night.
 - `src/cxxgpt.cpp`: the CLI (train, sample, eval, data prep, benchmarks).
 - `scripts/get_data.py`: downloads public datasets (GSM8K, TinyStories,
