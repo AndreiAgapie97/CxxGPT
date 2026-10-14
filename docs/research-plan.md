@@ -50,6 +50,8 @@ benchmaxxing by selection, with nothing dishonest intended.
    records each time it was used.
 3. Every tool that helps the model (the calculator, later retrieval) is
    reported as two scores, with and without the tool.
+4. Every score states its effort level (see "Effort levels" below): 32 tries
+   and one try are not the same test.
 
 **The dev set.**
 - About 500 problems taken out of GSM8K train with a fixed seed, kept in a
@@ -384,6 +386,48 @@ what it retrieves.
 
 **When:** only if 1 and 4 leave arithmetic as the bottleneck. A real
 breakthrough if it works.
+
+## Effort levels: more thinking for harder questions
+
+Extra thinking time is cheap for us; extra parameters do not fit in 8 GB. Four
+ways to turn more time into better answers, each with its own effort knob:
+
+1. **Many tries and a vote.**
+   - Sample the same problem N times (temperature above 0) and take the most
+     common final answer. Wrong answers tend to scatter; right ones agree.
+   - Knob: N, for example `--effort low/medium/high` = 1/8/32 tries.
+   - No training. `src/generate.h` already samples with a temperature, in
+     batches.
+   - It only helps once the right answer is often the most common one. At
+     night 1's 0.8% it cannot. Add it when scores reach a few percent.
+2. **Many tries and a judge.**
+   - A second small model reads a solution and scores how likely it is right;
+     keep its favorite of N.
+   - TinyGSM (Microsoft, 2023) did this with models around 1 B parameters
+     and got a large jump on GSM8K.
+   - The problem-writing program (bet 1) supplies the judge's training data:
+     its solutions come with known right answers, and the model's own wrong
+     attempts supply the rest.
+3. **Check and retry.**
+   - With the checker tool (bet 1), the model tests a step and tries again on
+     "no".
+   - Knob: the number of retries allowed. Comes with the tool path.
+4. **Thinking loops inside the model** (research bet).
+   - A block of layers runs several times in a row with the same weights;
+     harder problems get more loops. Memory stays the same, only time grows.
+   - Train with a random number of loops, so the model works at any count
+     afterwards. Knob: the loop count.
+   - The "recurrent depth" approach (Huginn, 2025) showed reasoning improving
+     as loops are added. Untested at our size.
+   - Work: the CPU engine, the GPU and the inference engine, each tested
+     against the others as usual.
+
+**Order.**
+- 1 when scores allow.
+- 3 with the tool path.
+- 2 together with the problem-writing program.
+- 4 as a research bet. It is the most promising for "smart on a laptop",
+  since it adds thinking without adding memory.
 
 ## Growing past 8 GB: the optimizer's memory in the CPU's RAM
 
