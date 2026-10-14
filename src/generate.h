@@ -50,7 +50,9 @@ std::vector<std::vector<int>> generate(Model<T>& model, const std::vector<std::v
     CHECK(max_new > 0, "nothing to generate: max_new is %d", max_new);
     CHECK(L < model.cfg.seq_len, "a prompt of %d tokens fills the model's context of %d", L, model.cfg.seq_len);
     // Positions fed: the prompt, then each picked token but the last.
-    const int total = std::min(model.cfg.seq_len, L - 1 + max_new);
+    // Clamp before addition: even an INT_MAX CLI budget cannot overflow.
+    const int room = model.cfg.seq_len - L + 1;
+    const int total = L - 1 + std::min(max_new, room);
     std::vector<int> start(B);
     for (int b = 0; b < B; ++b) start[b] = L - int(prompts[b].size());
     model.decode_begin(B, start);

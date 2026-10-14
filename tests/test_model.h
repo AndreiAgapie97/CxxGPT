@@ -492,6 +492,8 @@ inline void test_generate_length() {
     const auto capped = generate(m, prompts, 100, never);  // L = 5: room for 16 - 5 + 1
     EXPECT(capped[0].size() == 12 && capped[1].size() == 12, "context-capped generation gave %zu and %zu tokens",
            capped[0].size(), capped[1].size());
+    const auto huge = generate(m, prompts, std::numeric_limits<int>::max(), never);
+    EXPECT(huge == capped, "largest int budget overflowed instead of preserving context-capped tokens");
     const auto stopped = generate(m, prompts, 7, [](const std::vector<int>& g) { return g.size() == 2; });
     EXPECT(stopped[0].size() == 2 && stopped[1].size() == 2, "done did not stop the sequences");
 }

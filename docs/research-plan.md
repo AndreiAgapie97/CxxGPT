@@ -429,7 +429,172 @@ ways to turn more time into better answers, each with its own effort knob:
 - 4 as a research bet. It is the most promising for "smart on a laptop",
   since it adds thinking without adding memory.
 
-## Growing past 8 GB: the optimizer's memory in the CPU's RAM
+## Our own ideas
+
+Ideas that use what this project has and most do not:
+- our own engine, so any change to the model is ours to make;
+- ternary MoE;
+- a program that writes problems with exact answers (bet 1);
+- cheap inference;
+- math, where every step can be checked, not only the answer.
+
+Each goes through the funnel (flag, tests, 3 seeds on the curriculum) before a
+night. In order of cost:
+
+| Idea | Cost | Novelty | Expected impact |
+|---|---|---|---|
+| A. Numbers backwards inside the model | small | medium | high for arithmetic |
+| B. Planted mistakes and corrections | small, with the generator | medium | high for reasoning |
+| C. Reviving dead experts by cloning | small | medium | fixes night 1's neglected experts |
+| D. A generator at the edge of ability | medium | medium | faster learning |
+| E. Exact step grading | medium | high in combination | high at higher effort |
+| F. Thinking loops that route anew | large | high | possibly the big one |
+| G. Experts that compute exactly | large | high | unknown: the moonshot |
+
+### A. Numbers backwards inside the model
+
+- People add from the right (carries move left). The model writes left to
+  right, so it must produce the first digit of a sum before it has worked out
+  the carries.
+- Small transformers learn arithmetic far better when answers are written
+  least-significant digit first (Lee et al., 2023, "Teaching Arithmetic to
+  Small Transformers").
+- **Ours:** the tokenizer reverses every digit run on the way in and back on
+  the way out. Users see normal numbers; inside, the model always works in
+  the easy direction. Our tokenizer never merges digits, so a number is a run
+  of digit tokens and reversing it is exact.
+- **Test:** the curriculum with and without reversal, 3 seeds each. Then
+  combined with place-value embeddings (bet 4), since both are about digits.
+- **Watch out for:** numbers in prose ("in 1999") reverse too. That is
+  harmless as long as it is consistent, but check that years and the like
+  still read back correctly.
+
+### B. Planted mistakes and corrections
+
+- The problem generator writes some solutions with a wrong step followed by a
+  correction: "16 x 7 = 108. Wait: 16 x 7 = 112."
+- Ye, Xu, Li and Allen-Zhu (2024, "Physics of Language Models, part 2.2")
+  found that training on mistakes plus corrections makes models reason better
+  than training on perfect solutions only: the model learns to notice errors.
+- Our generator makes these exact and unlimited. It is also the behavior that
+  "check and retry" needs at higher effort levels.
+- **Test:** the curriculum with 0%, 10% and 30% of solutions carrying a
+  planted mistake. Mask the wrong step out of the loss, so the model learns to
+  correct a mistake but not to make it.
+
+### C. Reviving dead experts by cloning busy ones
+
+- When an expert has been starved for a long time (its bias pinned near steps
+  × rate, as in layers 4 and 5 of night 1), copy the busiest expert of that
+  layer into it, add a little noise, reset both biases and both experts'
+  optimizer state, and let them split the work.
+- The neglected expert starts from something useful instead of its random
+  initial weights. Related: sparse upcycling (Komatsuzaki et al., 2022) builds
+  MoE experts from copies of a dense layer, but not as a repair during
+  training.
+- **Test:** the 50-minute runs of the night-1 model from "Expert balance",
+  with and without cloning. Read the biases afterwards.
+
+### D. A generator at the edge of ability
+
+- The generator has knobs: number of steps, size of numbers, distractor
+  sentences.
+- During training, measure accuracy per knob setting and generate more
+  problems where the model is right about half the time.
+- Known in reinforcement learning as learning-progress curricula; rare in
+  language-model training, and natural with our generator.
+- **Test:** the same compute with a fixed mix against the adaptive mix, judged
+  on fixed held-out levels.
+
+### E. Exact step grading
+
+- Lightman et al. (2023, "Let's Verify Step by Step") found that a judge
+  trained on which step went wrong beats one trained only on final answers.
+  Their step labels came from paid human annotators (PRM800K).
+- Our generator knows the correct value of every step, so it gives exact step
+  labels for free, for the problems it generates.
+- Use them for the step-level judge from "Effort levels". At high effort the
+  model can then try several next steps and keep the ones the judge trusts,
+  like a chess engine searching moves.
+- **Test:** best-of-N with an answer-only judge against a step judge, at
+  equal N.
+
+### F. Thinking loops that route anew
+
+- Thinking loops ("Effort levels", 4) combined with MoE: on each pass through
+  the shared layers, a token is routed again and can use different experts,
+  like a small program running a different instruction each step.
+- Add a per-token stop decision: easy tokens loop once, hard ones many times.
+  Memory stays fixed; effective capacity grows with effort.
+- Related: Mixture-of-Recursions (Bae et al., 2025) learns a depth per token.
+  Routing to different experts on each loop, in a ternary model, we have not
+  seen.
+- **Work:** large. The CPU engine, the GPU and the inference engine, each
+  tested against the others.
+
+### G. Experts that compute exactly
+
+- Add to each MoE layer an expert that is not neural but C++ code. Inside an
+  arithmetic expression it computes the correct next digit from the tokens
+  already written and returns that digit's embedding. The router learns when
+  to trust it, through the ordinary gate gradient.
+- The difference from the calculator: no special notation. The tool lives
+  inside the network, and the model blends it in wherever it helps.
+- It reads only tokens before the current position, so it cannot see the
+  answer it is trained to predict.
+- The open question is reading numbers that are not written as `a op b =`.
+  Start with the calculator's notation, then widen.
+- We know of no exact code experts inside an MoE router.
+
+## Growing past 8 GB: a ladder to 1-2 B parameters
+
+**Where night 1's 5.6 GB goes.** About 3.4 GB is fixed: weights, gradients and
+optimizer state, all fp32. About 2.2 GB is activations (intermediate results
+kept for the backward pass).
+
+**The ladder, cheapest first.**
+
+| Step | What it does | Frees on the GPU |
+|---|---|---|
+| 1. Recompute (activation checkpointing) | drop activations and recompute them in the backward pass | most of the 2.2 GB, for ~30% more compute |
+| 2. bf16 storage | keep the GPU's working weights and gradients in 16 bits | half of those |
+| 3. 8-bit optimizer state | store Adam/Muon state in 8 bits (Dettmers et al., 2021) | about ¾ of that state |
+| 4. Optimizer in RAM | fp32 master weights and optimizer state in the laptop's RAM; the CPU does the update (below) | all of it |
+| 5. Stream layers | all weights in RAM; each layer goes to the GPU just before it is needed | the GPU holds 1-2 layers at a time |
+
+- Step 2 is review item E1. It first needs the norm-gradient question behind
+  the failing `dense bf16` GPU check (review C2).
+- With steps 4 and 5, the limit moves from the GPU's 8 GB to WSL's RAM.
+  - `.wslconfig` gives WSL 16 GB today. Night 1 uses about 12 GB of it, mostly
+    for the token files and the host copy of the model.
+  - Raised to about 24 GB, that leaves maybe 18 GB for the master weights and
+    optimizer state.
+  - At 12-16 bytes per parameter (fp32 master and state) that is about
+    1.1-1.5 B parameters. With 8-bit state (about 8 bytes), about 2 B.
+
+**Why it suits our MoE.**
+- The work per token depends on the active parameters, and memory on the
+  total. Grow the total to 1-2 B (more and bigger experts) while each token
+  still uses about 100 M, and the GPU does about the same work per step as in
+  night 1.
+- The new cost is moving weights in and gradients out each step: roughly
+  10-12 GB at 2 B parameters. That is maybe 0.5-1 s per step on a laptop PCIe
+  link, against about 4.7 s today. It is partly hidden behind compute.
+- More total parameters at the same compute per token lower the loss in
+  published MoE scaling studies, with diminishing returns.
+
+**Limits.**
+- Data: a 2 B model fills slowly at 0.37 B tokens per night. It is better than
+  267 M, not 7× better.
+- Engineering: each step takes days to weeks, and each is tested against the
+  CPU engine. Streaming is the largest.
+- Running it afterwards is easy: 2 B ternary parameters are about 0.5 GB.
+
+**When.** Steps 1 and 2 pay off anyway (memory and speed). Steps 3-5 only once
+we know we want a model bigger than 8 GB allows. Bets 2 and 5 are cheaper ways
+to get more from the same memory.
+
+### Step 4 in detail: the optimizer's memory in the CPU's RAM
 
 **Why not split the computing work between CPU and GPU instead?**
 - The CPU is about 20× slower at this work: roughly 1 TFLOP/s at its best,
@@ -452,9 +617,6 @@ ways to turn more time into better answers, each with its own effort knob:
 
 **Test.** The result must match the all-GPU update exactly (same numbers,
 tested like every other GPU change).
-
-**When.** Only once we know we want a model bigger than 8 GB allows. Bets 2
-and 5 are cheaper ways to get more from the same memory.
 
 ## Speed, in parallel
 
