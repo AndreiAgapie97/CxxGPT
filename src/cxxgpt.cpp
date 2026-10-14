@@ -30,6 +30,7 @@
 #endif
 #include "infer.h"
 #include "json.h"
+#include "loss_mask.h"
 #include "model.h"
 #include "reasoning.h"
 #include "wordgen.h"
@@ -151,10 +152,12 @@ int cmd_text2tok(Args& a) {
     // right after a separator, or else at Tokenizer::next_safe_split.
     constexpr size_t kBlock = 8 << 20;
     constexpr size_t npos = std::string::npos;
-    auto encode_block = [&](std::string_view blk, const Tokenizer& t, std::vector<uint16_t>& o, long& docs) {
+    auto encode_block = [&](std::string_view blk, const Tokenizer& t, std::vector<uint16_t>& o,
+                            std::vector<uint8_t>& mask, long& docs) {
         o.clear();
+        mask.clear();
         if (sep.empty()) {
-            for (int id : t.encode(blk)) o.push_back(uint16_t(id));
+            encode_loss_marked(blk, t, o, mask);
             return;
         }
         for (size_t p = 0; p <= blk.size();) {
@@ -163,7 +166,8 @@ int cmd_text2tok(Args& a) {
             const std::string doc = trim(std::string(blk.substr(p, q - p)));
             if (!doc.empty()) {
                 o.push_back(uint16_t(kBos));
-                for (int id : t.encode(doc)) o.push_back(uint16_t(id));
+                mask.push_back(1);
+                encode_loss_marked(doc, t, o, mask);
                 ++docs;
             }
             p = q + sep.size();
@@ -177,6 +181,7 @@ int cmd_text2tok(Args& a) {
     double last_report = t0;
     std::vector<std::vector<uint16_t>> outs(threads);
     std::vector<long> block_docs(threads);
+    std::vector<std::vector<uint8_t>> masks(threads);
     while (true) {
         while (!eof && (buf.size() < kBlock * threads || starved)) {
             const size_t old = buf.size();
@@ -208,6 +213,8 @@ int cmd_text2tok(Args& a) {
                 end = all.find(sep, target);
                 end = end != npos ? end + sep.size() : eof ? all.size() : npos;
             }
+            if (end != npos) end = loss_marker_safe_split(all, end, pos);
+            CHECK(!eof || end != npos, "unclosed no-loss marker");
             if (end == npos) break;
             blocks.push_back(all.substr(pos, end - pos));
             pos = end;
@@ -220,11 +227,11 @@ int cmd_text2tok(Args& a) {
         std::vector<std::thread> pool;
         for (size_t i = 0; i < blocks.size(); ++i) {
             block_docs[i] = 0;
-            pool.emplace_back([&, i] { encode_block(blocks[i], toks[i], outs[i], block_docs[i]); });
+            pool.emplace_back([&, i] { encode_block(blocks[i], toks[i], outs[i], masks[i], block_docs[i]); });
         }
         for (auto& th : pool) th.join();
         for (size_t i = 0; i < blocks.size(); ++i) {
-            w.write(outs[i]);
+            w.write(outs[i], masks[i]);
             docs += block_docs[i];
         }
         bytes += pos;
@@ -250,9 +257,9 @@ int cmd_text2tok(Args& a) {
 
 // BOS and the prompt (not trained on), then the completion (trained on).
 void append_problem(TokenData& d, const Problem& p, const Tokenizer& tok) {
-    const std::vector<int> prompt = prompt_tokens(p, tok), completion = tok.encode(p.completion());
+    const std::vector<int> prompt = prompt_tokens(p, tok);
     for (int t : prompt) d.tokens.push_back(uint16_t(t)), d.mask.push_back(0);
-    for (int t : completion) d.tokens.push_back(uint16_t(t)), d.mask.push_back(1);
+    encode_loss_marked(p.completion(), tok, d.tokens, d.mask);
 }
 
 // "a.tok,b.tok*3": the files concatenated, b three times (to weight a small
@@ -287,10 +294,13 @@ int cmd_gen_reasoning(Args& a) {
     Formats formats;
     formats.chain_plan = a.flag("chain-plan");      // chain solutions look variables up first
     formats.expr_rewrite = a.flag("expr-rewrite");  // expr solutions write what is left after each step
-    Rng rng(uint64_t(a.integer("seed", 1)));
+    const uint64_t seed = uint64_t(a.integer("seed", 1));
+    Rng rng(seed), mistake_rng(seed ^ 0xd1b54a32d192ed03ULL);
+    const double mistakes = a.real("mistakes", 0);
     const std::string bpe = a.str("bpe");
     a.done();
     const Tokenizer tok = load_tokenizer(bpe);
+    CHECK(mistakes >= 0 && mistakes <= 1, "--mistakes must be in [0,1]");
     CHECK(min_d >= 1 && min_d <= max_d && max_d <= 5 && test_max_d >= min_d && test_max_d <= 5,
           "reasoning difficulties must be ordered within [1,5]");
     CHECK(per_cell > 0 && n_train >= 0 && n_val >= 0, "reasoning split counts must be nonnegative; test-per-cell positive");
@@ -313,7 +323,9 @@ int cmd_gen_reasoning(Args& a) {
         }
     save_problems(out + ".test.txt", test);
 
-    auto make_tokens = [&](long n, const std::string& path) {
+    auto make_tokens = [&](long n, const std::string& path, bool training) {
+        FILE* text = training && mistakes > 0 ? create_file(out + ".train.text", "wb") : nullptr;
+        CHECK(!training || mistakes == 0 || text, "cannot write reasoning training text");
         TokenData d;
         d.vocab = uint32_t(tok.vocab_size());
         long skipped = 0;
@@ -321,22 +333,28 @@ int cmd_gen_reasoning(Args& a) {
         for (long i = 0; i < n;) {
             CHECK(++tries <= 1000000, "question domain exhausted while preparing training/validation");
             const std::string& t = tasks[rng.below(tasks.size())];
-            const Problem p =
+            Problem p =
                 make_problem(t, min_d + int(rng.below(uint64_t(max_d - min_d + 1))), rng, formats);
             if (held_out.count(p.question)) {
                 ++skipped;
                 continue;
             }
+            if (training && mistakes > 0 && mistake_rng.uniform() < mistakes) plant_mistake(p, mistake_rng);
+            if (text) {
+                const std::string doc = p.prompt() + p.completion() + "<|endoftext|>\n";
+                CHECK(std::fwrite(doc.data(), 1, doc.size(), text) == doc.size(), "error writing reasoning text");
+            }
             append_problem(d, p, tok);
             ++i;
             tries = 0;
         }
+        if (text) CHECK(std::fclose(text) == 0, "error closing reasoning text");
         d.save(path);
         std::printf("%s: %ld problems, %zu tokens (%ld test duplicates skipped)\n", path.c_str(), n,
                     d.tokens.size(), skipped);
     };
-    make_tokens(n_train, out + ".train.tok");
-    make_tokens(n_val, out + ".val.tok");
+    make_tokens(n_train, out + ".train.tok", true);
+    make_tokens(n_val, out + ".val.tok", false);
     std::printf("%s.test.txt: %zu problems (%zu tasks x difficulty %d..%d x %d)\n", out.c_str(),
                 test.size(), tasks.size(), min_d, test_max_d, per_cell);
     return 0;

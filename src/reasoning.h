@@ -26,6 +26,7 @@
 #include <cstdlib>
 #include <functional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "common.h"
@@ -324,6 +325,76 @@ inline Problem make_problem(const std::string& task, int difficulty, Rng& rng, c
     if (task == "cmp") return cmp(rng, difficulty);
     CHECK(false, "unknown task '%s'", task.c_str());
     return {};
+}
+
+// Plant one false numerical statement immediately before its correction.
+// The independent RNG used by the CLI keeps the underlying problems unchanged.
+inline void plant_mistake(Problem& p, Rng& rng) {
+    struct Step { size_t begin, end, value; int64_t correct; };
+    std::vector<Step> candidates;
+    const size_t arrow = p.steps.find(" => ");
+    size_t begin = arrow == std::string::npos ? 0 : arrow + 4;
+    for (size_t i = begin; i < p.steps.size(); ++i) {
+        if (p.steps.compare(i, 2, "; ") == 0 || p.steps.compare(i, 2, ", ") == 0) begin = i + 2;
+        if (p.steps.compare(i, 4, " => ") == 0) begin = i + 4;
+        if (p.steps[i] != '=') continue;
+        size_t end = i + 1;
+        while (end < p.steps.size() && p.steps[end] >= '0' && p.steps[end] <= '9') ++end;
+        if (end == i + 1 || (end < p.steps.size() && p.steps[end] != ';' && p.steps[end] != ',' &&
+                            p.steps[end] != ':')) continue;
+        // A literal assignment (a=4) is a definition rather than a calculation.
+        const std::string lhs = p.steps.substr(begin, i - begin);
+        if (lhs.find_first_of("+-*/=<>") == std::string::npos &&
+            lhs.find_first_not_of("0123456789") != std::string::npos) continue;
+        int64_t correct = 0;
+        const auto parsed = std::from_chars(p.steps.data() + i + 1, p.steps.data() + end, correct);
+        CHECK(parsed.ec == std::errc{}, "bad generated numerical step");
+        candidates.push_back({begin, end, i + 1, correct});
+    }
+    if (candidates.empty()) {
+        // Comparisons with different digit lengths have no equality to corrupt.
+        const int64_t correct = std::stoll(p.answer);
+        p.steps = p.question + "=" + std::to_string(correct) + "; " + p.steps;
+        candidates.push_back({0, p.question.size() + 1 + p.answer.size(), p.question.size() + 1, correct});
+    }
+    const Step step = candidates[rng.below(candidates.size())];
+    int64_t wrong = step.correct;
+    switch (rng.below(3)) {
+    case 0: {  // one incorrect digit, with the other digits unchanged
+        std::string digits = std::to_string(step.correct);
+        const size_t i = size_t(rng.below(digits.size()));
+        digits[i] = char('0' + (digits[i] - '0' + 1 + rng.below(9)) % 10);
+        wrong = std::stoll(digits);
+        break;
+    }
+    case 1:  // a missed carry/borrow (or one unit for a single-digit result)
+        wrong = step.correct >= 10 ? step.correct - 10 : step.correct + 1;
+        break;
+    default: {  // use the wrong operator on the final two numeric operands
+        size_t end = step.value - 1, start = end;
+        while (start > step.begin && std::string_view("0123456789+-*/").find(p.steps[start - 1]) !=
+               std::string_view::npos) --start;
+        const std::string lhs = p.steps.substr(start, end - start);
+        const size_t op = lhs.find_last_of("+-*/");
+        if (op != std::string::npos) {
+            const size_t prev = lhs.find_last_of("+-*/", op ? op - 1 : 0);
+            const size_t left = prev != std::string::npos && prev < op ? prev + 1 : 0;
+            int64_t a = 0, b = 0;
+            const auto pa = std::from_chars(lhs.data() + left, lhs.data() + op, a);
+            const auto pb = std::from_chars(lhs.data() + op + 1, lhs.data() + lhs.size(), b);
+            if (pa.ec == std::errc{} && pb.ec == std::errc{} && pa.ptr == lhs.data() + op &&
+                pb.ptr == lhs.data() + lhs.size()) wrong = lhs[op] == '+' ? a * b : a + b;
+        }
+        if (wrong == step.correct) wrong = step.correct + 1;
+        break;
+    }
+    }
+    CHECK(wrong != step.correct, "planted value must be wrong");
+    static const char* corrections[] = {"Wait: ", "Correction: ", "Let me check: ", "That was wrong: "};
+    const std::string right = p.steps.substr(step.begin, step.end - step.begin);
+    const std::string false_step = p.steps.substr(step.begin, step.value - step.begin) + std::to_string(wrong);
+    p.steps.replace(step.begin, step.end - step.begin,
+                    "[[no-loss]]" + false_step + "[[/no-loss]]. " + corrections[rng.below(4)] + right);
 }
 
 // Problem sets on disk: one per line, tab-separated

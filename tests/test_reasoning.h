@@ -7,6 +7,8 @@
 #include <map>
 
 #include "../src/reasoning.h"
+#include "../src/loss_mask.h"
+#include "../src/train.h"
 #include "test_util.h"
 
 namespace reasoning_check {
@@ -31,7 +33,11 @@ struct Parser {
     }
     long product() {
         long v = atom();
-        while (i < s.size() && s[i] == '*') ++i, v *= atom();
+        while (i < s.size() && (s[i] == '*' || s[i] == '/')) {
+            const char op = s[i++];
+            const long rhs = atom();
+            v = op == '*' ? v * rhs : v / rhs;
+        }
         return v;
     }
     long sum() {
@@ -194,6 +200,77 @@ inline bool multiplication_steps_correct(const Problem& p) {
     return multipliers.size()==1 || statements.back()==partials+"="+std::to_string(a*b);
 }
 
+inline void test_planted_mistakes() {
+    Rng problems(551), errors(19), repeat_errors(19);
+    int checked = 0;
+    for (const auto& task : reasoning_tasks())
+        for (int difficulty = 1; difficulty <= 5; ++difficulty)
+            for (int i = 0; i < 70; ++i) {
+                const Problem plain = make_problem(task, difficulty, problems, {true, true});
+                Problem planted = plain, repeat = plain;
+                plant_mistake(planted, errors);
+                plant_mistake(repeat, repeat_errors);
+                EXPECT(planted.steps == repeat.steps, "mistakes are not repeatable");
+                EXPECT(planted.question == plain.question && planted.answer == reasoning_check::solve(plain) &&
+                       extract_answer(planted.completion()) == plain.answer, "mistake changed the true answer");
+                const size_t begin = planted.steps.find(kNoLossBegin), close = planted.steps.find(kNoLossEnd);
+                EXPECT(begin != std::string::npos && close != std::string::npos &&
+                       planted.steps.find(kNoLossBegin, begin + 1) == std::string::npos,
+                       "solution does not have exactly one wrong span");
+                if (begin == std::string::npos || close == std::string::npos) continue;
+                const std::string wrong = planted.steps.substr(begin + kNoLossBegin.size(),
+                                                               close - begin - kNoLossBegin.size());
+                const size_t eq = wrong.rfind('=');
+                const size_t prefix_eq = eq ? wrong.rfind('=', eq - 1) : std::string::npos;
+                const std::string lhs = wrong.substr(prefix_eq == std::string::npos ? 0 : prefix_eq + 1,
+                                                     eq - (prefix_eq == std::string::npos ? 0 : prefix_eq + 1));
+                const int64_t expected = lhs.rfind("max(", 0) == 0 ? std::stoll(plain.answer) : reasoning_check::eval(lhs);
+                EXPECT(std::stoll(wrong.substr(eq + 1)) != expected, "planted value is actually right");
+                const size_t correction = planted.steps.find(": ", close) + 2;
+                const std::string right = wrong.substr(0, eq + 1) + std::to_string(expected);
+                EXPECT(planted.steps.compare(correction, right.size(), right) == 0,
+                       "correction line is numerically wrong: %s", planted.steps.c_str());
+                std::string recovered = planted.steps;
+                recovered.erase(begin, correction - begin);
+                EXPECT(recovered == plain.steps || (task == "cmp" && recovered ==
+                       plain.question + "=" + plain.answer + "; " + plain.steps), "other solution steps changed");
+                Tokenizer tok;
+                std::vector<uint16_t> ids;
+                std::vector<uint8_t> mask;
+                encode_loss_marked(planted.completion(), tok, ids, mask);
+                std::string hidden;
+                for (size_t j = 0; j < ids.size(); ++j) if (!mask[j]) hidden += tok.token_bytes(ids[j]);
+                EXPECT(hidden == wrong, "masked token bytes differ from precisely the wrong step");
+                ++checked;
+            }
+    // Deliberately put annotations inside a word that BPE can merge. Every
+    // mask-zero token must decode to the wrong span, including its edges.
+    Tokenizer bpe;
+    bpe.train("prefixmistakesuffix prefixmistakesuffix Wait correction Wait correction", 290);
+    const std::string text = "prefix[[no-loss]]mistake[[/no-loss]]suffix. Wait: correction";
+    TokenData data; data.vocab = uint32_t(bpe.vocab_size());
+    encode_loss_marked(text, bpe, data.tokens, data.mask);
+    std::string all, wrong;
+    for (size_t i = 0; i < data.tokens.size(); ++i) {
+        all += bpe.token_bytes(data.tokens[i]);
+        if (!data.mask[i]) wrong += bpe.token_bytes(data.tokens[i]);
+    }
+    EXPECT(all == "prefixmistakesuffix. Wait: correction" && wrong == "mistake", "BPE mask boundary crossed");
+    // The training target is one token ahead of its input, so the mask must
+    // exclude a wrong token when it is the target, including the first one.
+    const int T = int(data.tokens.size()) - 1;
+    std::vector<int> inputs(T), targets(T);
+    Rng sampling(4);
+    data.sample_batch(sampling, 1, T, 0, data.tokens.size(), inputs.data(), targets.data());
+    for (int i = 0; i < T; ++i)
+        EXPECT(targets[i] == (data.mask[i + 1] ? int(data.tokens[i + 1]) : -1), "wrong shifted-target mask");
+    EXPECT(loss_marker_safe_split(text, 12) == text.find(kNoLossEnd) + kNoLossEnd.size(),
+           "stream cut split a marked span");
+    EXPECT(loss_marker_safe_split("[[no-loss]]partial", 13) == std::string::npos,
+           "unfinished streaming span was accepted");
+    std::printf("  %d wrong steps and corrections independently checked; exact byte/BPE/target masks checked\n", checked);
+}
+
 inline void test_reasoning() {
     Rng mul_rng(69);
     for (int d=1; d<=5; ++d) for (int i=0; i<100; ++i) {
@@ -254,4 +331,5 @@ inline void test_reasoning() {
     }
     std::printf("  %d problems verified by an independent solver\n", checked);
     test_formats();
+    test_planted_mistakes();
 }

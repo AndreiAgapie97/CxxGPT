@@ -291,6 +291,16 @@ Ternary MoE, otherwise the same runs:
   usually drops as models get wider, and a diverged run costs a night.
 - **Weight decay makes no measurable difference.**
 
+`gen-reasoning --mistakes 0.1` gives about 10% of training solutions one
+masked wrong step followed by a correct step; validation and test stay clean.
+The default 0 preserves previous output byte for byte. Nonzero runs also
+write `OUT.train.text` for inspection. `[[no-loss]]...[[/no-loss]]` marks the
+wrong statement: both the generator and `text2tok` remove these annotations
+and set its token loss mask to zero, while keeping the statement as context.
+Use the generator's `.train.tok` to retain its question mask. The [experiment
+plan](docs/research-plan.md#b-planted-mistakes-and-corrections) documents the
+marker and paired 0%, 10%, 30% laptop commands.
+
 ### Chain: look the variables up first
 
 `gen-reasoning --chain-plan` writes chain solutions in two passes: first

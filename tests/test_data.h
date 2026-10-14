@@ -75,6 +75,25 @@ inline void test_token_writer() {
     std::remove(path.c_str());
     EXPECT(d.vocab == 1000 && d.mask.empty() && d.tokens == all, "token file read back wrongly (%zu tokens)",
            d.tokens.size());
+    // A plain write before or after a masked write must insert mask ones.
+    // Empty pieces and explicitly empty masks also use the old plain semantics.
+    {
+        TokenWriter w(path, 256);
+        w.write({10, 11});
+        w.write({12, 13}, {0, 1});
+        w.write({});
+        w.write({14, 15});
+        w.write({16}, {});
+        w.write({17}, {0});
+        w.write({18}, {1});
+        w.close();
+        w.close();
+    }
+    const TokenData mixed = TokenData::load(path);
+    std::remove(path.c_str());
+    EXPECT(mixed.tokens == std::vector<uint16_t>({10, 11, 12, 13, 14, 15, 16, 17, 18}) &&
+           mixed.mask == std::vector<uint8_t>({1, 1, 0, 1, 1, 1, 1, 0, 1}),
+           "mixing masked and plain writer calls lost mask alignment");
 }
 
 // Files mixed with repeats: tokens in order, masks kept, files without a
