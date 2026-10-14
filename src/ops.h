@@ -47,9 +47,11 @@ inline T dot(const T* a, const T* b, int n) {
 // exponent bits. Within 2 ulp of std::exp; clamps instead of overflowing
 // (e^-87.3 is the smallest normal float). double keeps std::exp, so the
 // gradient checks are unaffected.
-inline float fast_exp(float x) {
-    if (std::isnan(x)) return x;  // propagate failure without an undefined float-to-int cast
-    x = std::min(std::max(x, -87.33654f), 88.37626f);
+inline float fast_exp(float in) {
+    // std::max(lo, NaN) returns lo, so the float-to-int conversion below is
+    // always defined; NaN is passed through at the end. No early return: a
+    // branch here stops GCC from vectorizing the loops that call this.
+    const float x = std::min(std::max(-87.33654f, in), 88.37626f);
     const float k = (x * 1.44269504088896341f + 12582912.0f) - 12582912.0f;
     float r = x - k * 0.693359375f;
     r = r - k * -2.12194440e-4f;
@@ -60,7 +62,8 @@ inline float fast_exp(float x) {
     p = p * r + 1.6666665459e-1f;
     p = p * r + 5.0000001201e-1f;
     p = p * r * r + r + 1.0f;
-    return std::bit_cast<float>(std::bit_cast<int32_t>(p) + (static_cast<int32_t>(k) << 23));
+    const float result = std::bit_cast<float>(std::bit_cast<int32_t>(p) + (static_cast<int32_t>(k) << 23));
+    return in == in ? result : in;  // in != in only for NaN
 }
 inline double fast_exp(double x) { return std::exp(x); }
 
