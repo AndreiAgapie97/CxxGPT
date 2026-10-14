@@ -52,10 +52,11 @@ problems:
 ./cxxgpt train --data data/reason.train.tok --val data/reason.val.tok \
     --experts 8 --topk 2 --ternary --steps 2500 --lr 1.5e-3 --out runs/model.ckpt
 ./cxxgpt eval-reasoning --ckpt runs/model.ckpt --test data/reason.test.txt
-./cxxgpt sample --ckpt runs/model.ckpt --prompt $'Q: 47+85\nA: '
+./cxxgpt sample --ckpt runs/model.ckpt --temp 0 --answer --prompt $'Q: 47+85\nA: '
 ```
 
-`cxxgpt train --help` lists every option. Useful ones: `--muon` (the Muon
+`cxxgpt <command> --help` lists a command's options and their defaults;
+`cxxgpt train --help` also explains each. Useful ones: `--muon` (the Muon
 optimizer), `--gpu` (with `cxxgpt-gpu`), `--time-limit MINUTES` (stop and
 save in time), `--resume`, `--reason-test FILE --reason-every N` (accuracy
 during training).
