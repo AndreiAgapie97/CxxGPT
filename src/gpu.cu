@@ -622,7 +622,7 @@ struct GpuTrainer::Impl {
         CUBLAS_CHECK(cublasSetMathMode(blas, tf32 ? CUBLAS_TF32_TENSOR_OP_MATH : CUBLAS_DEFAULT_MATH));
         params.resize(n_params);
         grads.resize(n_params);
-        qparams.resize(n_params);
+        if (cfg.ternary) qparams.resize(n_params);  // read only through W(), for ternary models
         m.resize(n_params);
         grads.zero();
         m.zero();

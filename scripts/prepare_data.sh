@@ -3,8 +3,9 @@
 # trains our tokenizer on a sample of them, and encodes everything.
 #   scripts/prepare_data.sh
 # Settings (environment): VOCAB=16384 (tokenizer size), FINEWEB_FILES=1
-# (about 2 GB of web text each), BPE_SAMPLE_MB=300 (text the tokenizer
-# learns from), DATA=data (where everything goes).
+# (about 2 GB of web text each), BPE_SAMPLE_MB=200 (text the tokenizer
+# learns from: 60% web text, 20% stories, 20% worked math), DATA=data
+# (where everything goes).
 # Each step is skipped when its output exists, so it is safe to rerun after
 # an interruption. Takes an hour or more, mostly downloading.
 set -euo pipefail
@@ -12,7 +13,7 @@ cd "$(dirname "$0")/.."
 DATA=${DATA:-data}
 VOCAB=${VOCAB:-16384}
 FINEWEB_FILES=${FINEWEB_FILES:-1}
-BPE_SAMPLE_MB=${BPE_SAMPLE_MB:-300}
+BPE_SAMPLE_MB=${BPE_SAMPLE_MB:-200}
 PY=${PY:-.venv/bin/python}
 CX=${CX:-./cxxgpt}
 [ -x "$CX" ] || { echo "build it first: make"; exit 1; }
@@ -36,7 +37,9 @@ for line in sys.stdin:
     print(j["question"]); print(j["answer"])' < "$DATA/openmath2/train_1M.jsonl" 2> /dev/null || true; } |
       head -c "$((mb * 1024 * 2 / 10))K"
   } | grep -v -x '<|endoftext|>' > "$DATA/bpe-sample.txt"
-  "$CX" bpe-train --in "$DATA/bpe-sample.txt" --vocab "$VOCAB" --out "$tok.part"
+  # --max-bytes: all of the sample (bpe-train would otherwise keep only its
+  # first 200 MB, cutting the math at the end of a larger one).
+  "$CX" bpe-train --in "$DATA/bpe-sample.txt" --vocab "$VOCAB" --max-bytes "$((mb * 1024 * 1024))" --out "$tok.part"
   mv "$tok.part" "$tok"
   rm "$DATA/bpe-sample.txt"
 else

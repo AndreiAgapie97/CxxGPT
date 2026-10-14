@@ -364,9 +364,36 @@ inline void test_decode_baseline_routing_state() {
     EXPECT(missing_bias_difference > 1e-6, "routing-state fixture cannot detect missing biases");
 }
 
+// generate gives exactly max_new tokens, or as many as the context allows
+// (seq_len - L + 1 for prompts of up to L tokens), and stops each sequence
+// where done says.
+inline void test_generate_length() {
+    Config cfg;
+    cfg.vocab = 64;
+    cfg.seq_len = 16;
+    cfg.d_model = 16;
+    cfg.n_layers = 1;
+    cfg.n_heads = 2;
+    Model<float> m(cfg);
+    m.init(11);
+    const std::vector<std::vector<int>> prompts = {{1, 2, 3}, {1, 4, 5, 6, 7}};
+    auto never = [](const std::vector<int>&) { return false; };
+    for (int max_new : {1, 7}) {
+        const auto out = generate(m, prompts, max_new, never);
+        EXPECT(out[0].size() == size_t(max_new) && out[1].size() == size_t(max_new),
+               "asked for %d tokens, got %zu and %zu", max_new, out[0].size(), out[1].size());
+    }
+    const auto capped = generate(m, prompts, 100, never);  // L = 5: room for 16 - 5 + 1
+    EXPECT(capped[0].size() == 12 && capped[1].size() == 12, "context-capped generation gave %zu and %zu tokens",
+           capped[0].size(), capped[1].size());
+    const auto stopped = generate(m, prompts, 7, [](const std::vector<int>& g) { return g.size() == 2; });
+    EXPECT(stopped[0].size() == 2 && stopped[1].size() == 2, "done did not stop the sequences");
+}
+
 inline void test_model() {
     test_decode_baseline_routing_state();
     test_bitlinear_ste();
+    test_generate_length();
     test_eval_reasoning();
     test_ternary_engine();
     test_decode_matches_forward();

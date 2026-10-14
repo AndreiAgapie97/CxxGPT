@@ -88,7 +88,10 @@ int cmd_bpe_train(Args& a) {
     CHECK(!in.empty() && !out.empty(), "usage: cxxgpt bpe-train --in text.txt --vocab N --out tok.bpe");
     CHECK(vocab >= 256 && vocab <= 65536, "--vocab must be in [256, 65536] (tokens are stored as uint16)");
     std::string text = read_file(in);
-    if (long(text.size()) > max_bytes) text.resize(size_t(max_bytes));
+    if (long(text.size()) > max_bytes) {
+        std::printf("learning from the first %ld of %zu bytes (--max-bytes)\n", max_bytes, text.size());
+        text.resize(size_t(max_bytes));
+    }
     const double t0 = now_seconds();
     Tokenizer tok;
     tok.train(text, vocab, true);
@@ -257,8 +260,9 @@ int cmd_gen_reasoning(Args& a) {
     const std::vector<std::string> tasks = split(a.str("tasks", "chain,add,mul,expr,eq,cmp"), ',');
     const bool chain_plan = a.flag("chain-plan");  // chain solutions look variables up first
     Rng rng(uint64_t(a.integer("seed", 1)));
-    const Tokenizer tok = load_tokenizer(a.str("bpe"));
+    const std::string bpe = a.str("bpe");
     a.done();
+    const Tokenizer tok = load_tokenizer(bpe);
     for (const auto& t : tasks) make_problem(t, 1, rng);  // rejects unknown names
 
     // Test set first: every (task, difficulty) cell, including one level
@@ -331,8 +335,9 @@ int cmd_prep_qa(Args& a) {
     const std::string q_key = a.str("question-key", "question"), a_key = a.str("answer-key", "answer");
     const std::string final_key = a.str("final-key");
     const bool keep_calc = a.flag("keep-calc");
-    const Tokenizer tok = load_tokenizer(a.str("bpe"));
+    const std::string bpe = a.str("bpe");
     a.done();
+    const Tokenizer tok = load_tokenizer(bpe);
     CHECK(!in.empty() && !out.empty(), "usage: cxxgpt prep-qa --in FILE.jsonl --out PREFIX [--bpe tok.bpe]");
     std::ifstream f(in);
     CHECK(f, "cannot open %s", in.c_str());
@@ -442,8 +447,9 @@ int cmd_eval_reasoning(Args& a) {
     const std::string ckpt = a.str("ckpt", "model.ckpt"), test_path = a.str("test", "data/reason.test.txt");
     const int batch = int(a.integer("batch", 64)), limit = int(a.integer("limit", 0));
     const bool show = a.flag("show-failures");
-    const Tokenizer tok = load_tokenizer(a.str("bpe"));
+    const std::string bpe = a.str("bpe");
     a.done();
+    const Tokenizer tok = load_tokenizer(bpe);
     Model<float> model(peek_checkpoint_config(ckpt));
     load_checkpoint(ckpt, model, nullptr, nullptr);
     std::vector<Problem> test = load_problems(test_path);
@@ -569,7 +575,8 @@ int cmd_train(Args& a) {
             "train:  --batch 16 --accum 1 --steps 2000 --lr 1e-3 --min-lr-frac 0.1\n"
             "        --warmup 100 --wd 0.1 --clip 1.0 --bias-rate 1e-3 --seed 1\n"
             "        --muon (Muon instead of AdamW for the matrices in the blocks)\n"
-            "start:  --init FILE (FILE's weights and model; new optimizer, schedule and data order)\n"
+            "start:  --init FILE (FILE's weights and model; new optimizer, schedule and data order;\n"
+            "        with --ternary, the weights turn ternary from here on)\n"
             "output: --out model.ckpt --resume --log FILE.csv --log-every 10\n"
             "        --eval-every 200 --eval-batches 20 --save-every 500\n"
             "        --time-limit MINUTES --threads N --profile\n"
@@ -591,10 +598,15 @@ int cmd_train(Args& a) {
     const bool resume = a.flag("resume") && std::filesystem::exists(out);
 
     Config cfg = config_from_args(a, int(data.vocab));
-    if (resume)
+    if (resume) {
         cfg = peek_checkpoint_config(out);
-    else if (!init.empty())
+    } else if (!init.empty()) {
+        // The model comes from the checkpoint, but --ternary can turn its
+        // weights ternary from here on: the same weights, used differently.
+        const bool to_ternary = cfg.ternary;
         cfg = peek_checkpoint_config(init);
+        cfg.ternary = cfg.ternary || to_ternary;
+    }
     const int B = int(a.integer("batch", 16)), accum = int(a.integer("accum", 1));
     const int Tn = std::min(cfg.seq_len, int(a.integer("seq", cfg.seq_len)));
     const long steps = a.integer("steps", 2000), warmup = a.integer("warmup", 100);
@@ -798,9 +810,10 @@ int cmd_train(Args& a) {
 int cmd_sample(Args& a) {
     ThreadPool tp(threads_arg(a));
     g_pool = &tp;
-    const std::string ckpt = a.str("ckpt", "model.ckpt"), prompt = a.str("prompt", "\n"), bpe = a.str("bpe");
+    const std::string ckpt = a.str("ckpt", "model.ckpt"), prompt = a.str("prompt"), bpe = a.str("bpe");
     const int n = int(a.integer("n", 500));
     const double temp = a.real("temp", 0.8);
+    const bool answer = a.flag("answer");  // stop after the "#### answer" line, as eval-reasoning does
     Rng rng(uint64_t(a.integer("seed", 1)));
     a.done();
     Model<float> model(peek_checkpoint_config(ckpt));
@@ -809,15 +822,28 @@ int cmd_sample(Args& a) {
     if (!bpe.empty()) tok.load(bpe);
     CHECK(model.cfg.vocab >= tok.vocab_size(), "the model's vocab %d is smaller than the tokenizer's %d",
           model.cfg.vocab, tok.vocab_size());
-    const std::vector<int> ids = tok.encode(prompt);
+    // Every training document starts with BOS, so the prompt does too: an
+    // empty prompt starts a new document.
+    std::vector<int> ids = tok.encode(prompt);
+    ids.insert(ids.begin(), kBos);
+    CHECK(n > 0, "--n must be at least 1");
+    CHECK(int(ids.size()) < model.cfg.seq_len, "the prompt is %zu tokens with the BOS in front; the model's context "
+          "holds %d", ids.size(), model.cfg.seq_len);
     std::fwrite(prompt.data(), 1, prompt.size(), stdout);
-    const int room = model.cfg.seq_len - int(ids.size());
-    CHECK(room > 0, "prompt longer than the model's seq_len");
-    const auto out = generate(model, {ids}, std::min(n, room), [](const std::vector<int>&) { return false; },
-                              temp, &rng);
-    std::vector<int> gen;
-    for (int t : out[0]) gen.push_back(t < tok.vocab_size() ? t : '?');  // padding ids decode as '?'
-    const std::string text = tok.decode(gen);
+    // Padding ids (model vocab beyond the tokenizer's) decode as '?'.
+    auto text_of = [&](const std::vector<int>& g) {
+        std::vector<int> ok;
+        for (int t : g) ok.push_back(t < tok.vocab_size() ? t : '?');
+        return tok.decode(ok);
+    };
+    // A BOS would start the next document: this one is over.
+    const auto out = generate(
+        model, {ids}, n,
+        [&](const std::vector<int>& g) { return g.back() == kBos || (answer && completion_done(text_of(g))); },
+        temp, &rng);
+    std::vector<int> gen = out[0];
+    if (!gen.empty() && gen.back() == kBos) gen.pop_back();
+    const std::string text = text_of(gen);
     std::fwrite(text.data(), 1, text.size(), stdout);
     std::printf("\n");
     return 0;
@@ -830,13 +856,15 @@ int cmd_bench_infer(Args& a) {
     ThreadPool tp(threads_arg(a));
     g_pool = &tp;
     const std::string ckpt = a.str("ckpt");
-    if (a.flag("help")) {
+    if (a.help()) {
         std::printf("cxxgpt bench-infer [--ckpt FILE | model options]\n"
                     "    --tokens 128 --reps 7 --warmup 2 --threads N --log FILE.csv\n"
                     "Alternates fp32/packed run order on the same forced token stream.\n");
         return 0;
     }
-    const int tokens = int(a.integer("tokens", 128)), reps = int(a.integer("reps", 7));
+    int tokens = int(a.integer("tokens", 128));
+    const bool tokens_given = a.has("tokens");
+    const int reps = int(a.integer("reps", 7));
     const int warmup = int(a.integer("warmup", 2));
     const std::string log_path = a.str("log");
     Config cfg = config_from_args(a, 256);
@@ -849,6 +877,7 @@ int cmd_bench_infer(Args& a) {
     if (ckpt.empty()) model.init(1);
     else load_checkpoint(ckpt, model, nullptr, nullptr);
     print_config(cfg, model);
+    if (!tokens_given) tokens = std::min(tokens, cfg.seq_len);  // a shorter context: all of it
     CHECK(tokens > 0 && tokens <= cfg.seq_len, "--tokens must be in [1, seq_len]");
     CHECK(reps > 0 && warmup >= 0, "--reps must be positive and --warmup nonnegative");
 
@@ -939,16 +968,29 @@ int cmd_bench_infer(Args& a) {
 }  // namespace
 
 int main(int argc, char** argv) {
+    struct Command {
+        const char* name;
+        int (*run)(Args&);
+        const char* what;
+    };
+    static const Command commands[] = {
+        {"bpe-train", cmd_bpe_train, "learns a BPE tokenizer from a text file"},
+        {"text2tok", cmd_text2tok, "encodes text into a token file"},
+        {"train", cmd_train, "trains a model, or resumes training"},
+        {"sample", cmd_sample, "generates text from a prompt"},
+        {"gen-reasoning", cmd_gen_reasoning, "writes the synthetic reasoning curriculum"},
+        {"prep-qa", cmd_prep_qa, "turns question/answer JSON Lines into problems and token files"},
+        {"eval-reasoning", cmd_eval_reasoning, "exact-answer accuracy on a problems file"},
+        {"bench-infer", cmd_bench_infer, "times the ternary inference engine against fp32 decoding"},
+    };
     const std::string cmd = argc > 1 ? argv[1] : "";
     Args a(argc, argv, 2);
-    if (cmd == "bpe-train") return cmd_bpe_train(a);
-    if (cmd == "text2tok") return cmd_text2tok(a);
-    if (cmd == "train") return cmd_train(a);
-    if (cmd == "sample") return cmd_sample(a);
-    if (cmd == "gen-reasoning") return cmd_gen_reasoning(a);
-    if (cmd == "eval-reasoning") return cmd_eval_reasoning(a);
-    if (cmd == "prep-qa") return cmd_prep_qa(a);
-    if (cmd == "bench-infer") return cmd_bench_infer(a);
-    std::printf("usage: cxxgpt <bpe-train|text2tok|train|sample|gen-reasoning|prep-qa|eval-reasoning|bench-infer> [--options]\n");
-    return cmd.empty() || cmd == "help" ? 0 : 1;
+    for (const Command& c : commands)
+        if (cmd == c.name) {
+            if (a.help()) std::printf("cxxgpt %s: %s\n", c.name, c.what);
+            return c.run(a);
+        }
+    std::printf("usage: cxxgpt <command> [--options]; cxxgpt <command> --help lists its options\n");
+    for (const Command& c : commands) std::printf("  %-15s %s\n", c.name, c.what);
+    return cmd.empty() || cmd == "help" || cmd == "--help" ? 0 : 1;
 }

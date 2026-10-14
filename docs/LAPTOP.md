@@ -109,7 +109,13 @@ validation loss every 500 steps, exact answers every 2000. Its settings
 Run the same command again to resume after an interruption. The log is
 `runs/night1.log`; in the morning, `scripts/report.sh night1` sums it up on
 one screen (validation loss and exact answers over the night, speed, how
-it ended, and one answer the model got wrong).
+it ended, and one answer the model got wrong). To ask the model a question
+yourself (`--temp 0`: its most likely answer; `--answer`: stop after the
+`#### answer` line):
+```sh
+./cxxgpt sample --ckpt runs/night1.ckpt --bpe data/tok.bpe --temp 0 --answer \
+  --prompt $'Q: A pen costs $3. How much do 7 pens cost?\nA: '
+```
 
 ### Following nights
 

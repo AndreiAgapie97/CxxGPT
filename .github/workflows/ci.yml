@@ -101,6 +101,8 @@ jobs:
       - run: shellcheck scripts/*.sh
       - run: python3 -m py_compile scripts/get_data.py
       - run: make cxxgpt
+      - name: every command answers --help
+        run: for c in bpe-train text2tok train sample gen-reasoning prep-qa eval-reasoning bench-infer; do ./cxxgpt $c --help > /dev/null; done
       - name: probe.sh on the CPU build
         run: |
           CX=./cxxgpt GPU= SEQ=32 BATCH=4 ACCUM=1 VOCAB=256 \

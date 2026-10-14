@@ -58,10 +58,11 @@ problems:
 ./cxxgpt train --data data/reason.train.tok --val data/reason.val.tok \
     --experts 8 --topk 2 --ternary --steps 2500 --lr 1.5e-3 --out runs/model.ckpt
 ./cxxgpt eval-reasoning --ckpt runs/model.ckpt --test data/reason.test.txt
-./cxxgpt sample --ckpt runs/model.ckpt --prompt $'Q: 47+85\nA: '
+./cxxgpt sample --ckpt runs/model.ckpt --temp 0 --answer --prompt $'Q: 47+85\nA: '
 ```
 
-`cxxgpt train --help` lists every option. Useful ones: `--muon` (the Muon
+`cxxgpt <command> --help` lists a command's options and their defaults;
+`cxxgpt train --help` also explains each. Useful ones: `--muon` (the Muon
 optimizer), `--gpu` (with `cxxgpt-gpu`), `--time-limit MINUTES` (stop and
 save in time), `--resume`, `--reason-test FILE --reason-every N` (accuracy
 during training).
@@ -157,8 +158,8 @@ between related synthetic problems.
 - **MoE helps:** at the same compute per token, its validation loss is
   13% lower than dense.
 - **With AdamW, ternary costs dense little** (0.1136 → 0.1152) but costs
-  MoE much more (0.0986 → 0.1116), which erases most of MoE's gain. Muon
-  recovers it (below).
+  MoE much more (0.0986 → 0.1116), which erases most of MoE's gain. With
+  Muon, the better-trained models show a similar cost for both (below).
 - **Nobody generalizes to longer problems (d = 4).** Small transformers
   are known to struggle with this on arithmetic; it is on the list.
 - **Chain** (multi-hop variable lookup) is the hardest task. Most
@@ -168,30 +169,60 @@ between related synthetic problems.
 
 ### Muon
 
-The same runs with Muon for the matrices inside the blocks (attention and
-FFN projections, each expert on its own); embeddings, norms and routers
-stay on AdamW. Same learning rate and steps.
+The same four variants with Muon for the matrices inside the blocks
+(attention and FFN projections, each expert on its own); embeddings,
+norms and routers stay on AdamW. Same learning rate and steps.
 
-| variant | optimizer | val loss | accuracy | d = 1–3 | d = 4 |
-|---|---|---:|---:|---:|---:|
-| dense | AdamW | 0.1136 | 59.4% | 78.5% | 2.1% |
-| dense | Muon | **0.0894** | **64.9%** | **84.9%** | 5.0% |
-| MoE, ternary | AdamW | 0.1116 | 55.2% | 72.4% | 3.8% |
-| MoE, ternary | Muon | 0.0974 | 61.1% | 79.9% | 5.0% |
+| variant | val loss, AdamW | val loss, Muon | accuracy, AdamW | accuracy, Muon | d = 4, Muon |
+|---|---:|---:|---:|---:|---:|
+| dense | 0.1136 | 0.0894 | 59.4% | 64.9% | 5.0% |
+| dense, ternary | 0.1152 | 0.0988 | 57.0% | 62.7% | 9.2% |
+| MoE | 0.0986 | **0.0863** | 62.0% | **65.9%** | 9.2% |
+| MoE, ternary | 0.1116 | 0.0974 | 55.2% | 61.1% | 5.0% |
 
-- **Muon lowers the validation loss** by 21% on dense and 13% on ternary
-  MoE.
+- **Muon helps every variant:** validation loss 12–21% lower, accuracy
+  4–6 points higher. The best run so far is the full-precision MoE with
+  Muon.
+- **Ternary weights cost 10–13% of validation loss** once training is
+  good (with Muon: dense 0.0894 → 0.0988, MoE 0.0863 → 0.0974). With
+  AdamW, dense seemed to pay almost nothing; the weaker training hid it.
+  BitNet-style work reports that the gap shrinks as models grow, and
+  that training in full precision first and switching to ternary for the
+  last part (`train --init FILE --ternary`) beats ternary from the
+  start; both are still to be tested here. A ternary MoE with Muon does
+  match a full-precision MoE with AdamW (0.0974 vs 0.0986).
+- **MoE's gain shrinks with Muon:** 13% lower validation loss than dense
+  with AdamW, 3.5% with Muon (1.4% when both are ternary). These MoE
+  models have three times the parameters for the same compute per token;
+  on 10 M tokens of curriculum, the better optimizer lets dense catch up
+  most of the way. Whether MoE pays off with far more data per run is a
+  question for the GPU nights.
 - **Its cost** is the Newton–Schulz iterations on every matrix, which
   grow with the number of parameters, not of tokens: here (4096 tokens
   per step) 10% of the step time on dense and 15% on ternary MoE, whose
   experts all go through it every step. For the laptop's d768 ternary MoE
   at 65536 tokens per step it comes to about 13% of the arithmetic;
   `scripts/probe.sh` measures the speed with Muon on.
-- **With Muon, the ternary MoE matches the full-precision MoE trained
-  with AdamW** (0.0974 vs 0.0986): 1.58-bit weights, at no loss.
 - On ternary MoE, Muon starts slower (validation 0.50 vs 0.43 at step
   500) and is ahead from step 1000 on (0.154 vs 0.208).
 - `scripts/night.sh` uses Muon by default.
+
+### Learning rate and weight decay
+
+Ternary MoE with AdamW, otherwise the same runs:
+
+| setting | val loss | accuracy | d = 1–3 | d = 4 |
+|---|---:|---:|---:|---:|
+| lr 1.5e-3, weight decay 0.1 (as above) | 0.1116 | 55.2% | 72.4% | 3.8% |
+| lr 3e-3 | **0.1063** | **60.0%** | **78.6%** | 4.2% |
+| weight decay 0 | 0.1120 | 53.9% | 70.8% | 2.9% |
+
+- **A higher learning rate helps here** (5% lower validation loss), so
+  part of Muon's lead over AdamW on ternary MoE may come from a learning
+  rate that suits Muon better. `scripts/night.sh` keeps 1.5e-3 for now:
+  the best learning rate usually drops as models get wider, and a
+  diverged run costs a night.
+- **Weight decay makes no measurable difference.**
 
 ### Inference kernels
 
@@ -247,6 +278,8 @@ flips between near-equal candidates.
 
 - Train on the laptop GPU: language first, then worked math solutions,
   checked on the GSM8K test set ([docs/LAPTOP.md](docs/LAPTOP.md)).
+- Ternary's cost: whether it shrinks with model size, and whether
+  switching to ternary only for the last part of training avoids it.
 - Length generalization on the curriculum.
 - Faster GPU training: fused attention, bf16.
 - Benchmark the inference engine against bitnet.cpp at equal model size.

@@ -14,3 +14,4 @@ runs/
 test_training_cli
 reasoning_audit
 reasoning_targets
+__pycache__/
