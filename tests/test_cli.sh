@@ -206,6 +206,34 @@ for command in bad-target bad-target-backward; do
     grep -q 'target .* out of range' "$TEST_DIR/target-range.log"
   done
 done
+# gen-word uses the existing problem reader and text2tok unchanged.
+for split in train test; do
+    prefix="$TEST_DIR/word-$split"
+    "$CXXGPT" gen-word --out "$prefix" --seed 73 --count 28 --split "$split" > "$prefix.log"
+    "$CXXGPT" gen-word --out "$prefix-repeat" --seed 73 --count 28 --split "$split" > /dev/null
+    cmp "$prefix.txt" "$prefix-repeat.txt"
+    cmp "$prefix.text" "$prefix-repeat.text"
+    "$CXXGPT" text2tok --in "$prefix.text" --out "$prefix.tok" --doc-sep '<|endoftext|>' --threads 2 > /dev/null
+    "$CXXGPT_TRAINING_CLI" word "$prefix"
+    "$CXXGPT" eval-reasoning --ckpt "$TEST_DIR/audit.ckpt" --test "$prefix.txt" --max-new 1 --threads 2 > "$prefix-eval.log"
+    grep -q '^overall .* / 28)' "$prefix-eval.log"
+done
+"$CXXGPT" gen-word --out "$TEST_DIR/plain-word" --count 4 --min-steps 8 --max-steps 8 \
+    --notes off --distractors off > /dev/null
+require_absent -q '<<' "$TEST_DIR/plain-word.text"
+awk -F '\t' 'NF != 5 || $2 != 8 {exit 1} END {if (NR != 4) exit 1}' "$TEST_DIR/plain-word.txt"
+"$CXXGPT" gen-word --out "$TEST_DIR/empty-word" --count 0 > /dev/null
+[[ ! -s "$TEST_DIR/empty-word.txt" && ! -s "$TEST_DIR/empty-word.text" ]]
+for pair in 'min-steps 1' 'max-steps 9' 'min-steps 9' 'max-steps 2147483649' 'count -1' 'seed -1' \
+            'split dev' 'notes maybe' 'distractors maybe'; do
+    read -r option value <<< "$pair"
+    status=0
+    "$CXXGPT" gen-word --out "$TEST_DIR/invalid-word" "--$option" "$value" > "$TEST_DIR/invalid-word.log" 2>&1 || status=$?
+    [[ "$status" == 1 && ! -e "$TEST_DIR/invalid-word.txt" ]]
+    grep -q 'check failed' "$TEST_DIR/invalid-word.log"
+done
+printf 'CLI: word generation, repeatability, text2tok, eval-reasoning and invalid options passed\n'
+
 printf 'qa\t1\tq\twork\t14\r\nqa\t2\ttail\twork\t1080' > "$TEST_DIR/line-endings.txt"
 "$CXXGPT_TRAINING_CLI" problems "$TEST_DIR/line-endings.txt"
 "$CXXGPT" eval-reasoning --ckpt "$TEST_DIR/audit.ckpt" --test "$TEST_DIR/line-endings.txt" --max-new 1 --threads 2 > "$TEST_DIR/line-endings.log"

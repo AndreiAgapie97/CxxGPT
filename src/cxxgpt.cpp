@@ -32,6 +32,7 @@
 #include "json.h"
 #include "model.h"
 #include "reasoning.h"
+#include "wordgen.h"
 #include "profile.h"
 #include "tokenizer.h"
 #include "train.h"
@@ -327,6 +328,37 @@ int cmd_gen_reasoning(Args& a) {
     make_tokens(n_val, out + ".val.tok");
     std::printf("%s.test.txt: %zu problems (%zu tasks x difficulty %d..%d x %d)\n", out.c_str(),
                 test.size(), tasks.size(), min_d, test_max_d, per_cell);
+    return 0;
+}
+
+// Two views of the same generated problems: the existing five-field file
+// for evaluation, and Q/A documents for text2tok --doc-sep '<|endoftext|>'.
+int cmd_gen_word(Args& a) {
+    const std::string out = a.str("out", "data/word");
+    const long count = a.integer("count", 1000), seed = a.integer("seed", 1);
+    const long min_steps = a.integer("min-steps", 2), max_steps = a.integer("max-steps", 8);
+    const std::string split = a.str("split", "train");
+    const std::string distractors = a.str("distractors", "on"), notes = a.str("notes", "on");
+    a.done();
+    CHECK(!out.empty(), "--out must be a nonempty prefix");
+    CHECK(count >= 0 && seed >= 0, "--count and --seed must be nonnegative");
+    CHECK(min_steps >= 2 && min_steps <= max_steps && max_steps <= 8,
+          "steps must satisfy 2 <= min-steps <= max-steps <= 8");
+    CHECK(split == "train" || split == "test", "--split must be train or test");
+    CHECK(distractors == "on" || distractors == "off", "--distractors must be on or off");
+    CHECK(notes == "on" || notes == "off", "--notes must be on or off");
+    const WordOptions options{int(min_steps), int(max_steps), distractors == "on", notes == "on", split == "test"};
+    const auto problems = make_word_problems(uint64_t(seed), count, options);
+    save_problems(out + ".txt", problems);
+    const std::string text_path = out + ".text";
+    FILE* text = create_file(text_path, "w");
+    CHECK(text, "cannot write %s", text_path.c_str());
+    for (const auto& p : problems)
+        CHECK(std::fprintf(text, "%s%s<|endoftext|>\n", p.prompt().c_str(), p.completion().c_str()) >= 0,
+              "error writing %s", text_path.c_str());
+    CHECK(std::fclose(text) == 0, "error writing %s", text_path.c_str());
+    std::printf("%s.txt and %s.text: %zu %s word problems, %ld..%ld steps\n", out.c_str(), out.c_str(),
+                problems.size(), split.c_str(), min_steps, max_steps);
     return 0;
 }
 
@@ -1077,6 +1109,7 @@ int main(int argc, char** argv) {
         {"train", cmd_train, "trains a model, or resumes training"},
         {"sample", cmd_sample, "generates text from a prompt"},
         {"gen-reasoning", cmd_gen_reasoning, "writes the synthetic reasoning curriculum"},
+        {"gen-word", cmd_gen_word, "writes exact word problems with held-out sentence patterns"},
         {"prep-qa", cmd_prep_qa, "turns question/answer JSON Lines into problems and token files"},
         {"eval-reasoning", cmd_eval_reasoning, "exact-answer accuracy on a problems file"},
         {"bench-infer", cmd_bench_infer, "times the ternary inference engine against fp32 decoding"},
