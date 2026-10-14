@@ -494,7 +494,69 @@ inline void test_generate_length() {
     EXPECT(stopped[0].size() == 2 && stopped[1].size() == 2, "done did not stop the sequences");
 }
 
+
+// A zero-attention one-layer model permits an independent FFN calculation:
+// selection is argtopk(r+b), but the two mixture weights are softmax(r_sel).
+inline void test_router_selection_and_gates() {
+    Config cfg; cfg.vocab = 11; cfg.seq_len = 4; cfg.d_model = 8; cfg.n_heads = 2;
+    cfg.n_layers = 1; cfg.n_experts = 4; cfg.top_k = 2; cfg.expert_hidden = 6;
+    Model<double> m(cfg); m.init(7);
+    for (const auto& p : m.infos) if (p.name.ends_with(".wqkv") || p.name.ends_with(".wo"))
+        std::fill_n(m.params.begin() + p.offset, p.size, 0.0);
+    auto w = [&](const char* name) { return m.params.data() + m.find(name)->offset; };
+    const int C = cfg.d_model, F = cfg.expert_hidden, token = 1;
+    std::vector<double> x(w("wte") + token*C, w("wte") + (token+1)*C), h(C), r(4);
+    auto norm = [&](const std::vector<double>& in, const double* weight) {
+        double ss = 0; for (double v : in) ss += v*v;
+        std::vector<double> out(C);
+        for (int i = 0; i < C; ++i) out[i] = in[i] / std::sqrt(ss/C + 1e-5) * weight[i];
+        return out;
+    };
+    h = norm(x, w("l0.ln2"));
+    for (int e = 0; e < 4; ++e) for (int j = 0; j < C; ++j) r[e] += h[j] * w("l0.router")[e*C+j];
+    for (const auto& bias : std::vector<std::vector<double>>{{8,-8,-7,7}, {7,-8,-7,8}}) {
+        m.router_bias[0] = bias;
+        m.expert_load[0].assign(4, 0);
+        std::vector<int> order{0,1,2,3};
+        std::stable_sort(order.begin(), order.end(), [&](int a, int b) { return r[a]+bias[a] > r[b]+bias[b]; });
+        auto reference = [&](bool biased_gate) {
+            double g[2], sum = 0;
+            for (int k = 0; k < 2; ++k) sum += g[k] = std::exp(r[order[k]] + (biased_gate ? bias[order[k]] : 0));
+            std::vector<double> residual = x;
+            for (int k = 0; k < 2; ++k) {
+                const int e = order[k]; std::vector<double> sw(F);
+                for (int f = 0; f < F; ++f) {
+                    double gate = 0, up = 0;
+                    for (int j = 0; j < C; ++j) {
+                        gate += h[j] * w("l0.efc")[(e*2*F+f)*C+j];
+                        up += h[j] * w("l0.efc")[(e*2*F+F+f)*C+j];
+                    }
+                    sw[f] = gate/(1+std::exp(-gate))*up;
+                }
+                for (int i = 0; i < C; ++i) for (int f = 0; f < F; ++f)
+                    residual[i] += g[k]/sum * sw[f] * w("l0.eproj")[(e*C+i)*F+f];
+            }
+            const auto final = norm(residual, w("lnf"));
+            std::vector<double> logits(cfg.vocab, 0);
+            for (int v = 0; v < cfg.vocab; ++v) for (int j = 0; j < C; ++j)
+                logits[v] += final[j]*w("wte")[v*C+j];
+            return logits;
+        };
+        const auto expected = reference(false), wrong = reference(true);
+        m.forward(&token, nullptr, 1, 1, true);
+        for (int e = 0; e < 4; ++e)
+            EXPECT(m.expert_load[0][e] == (e==order[0] || e==order[1] ? 1 : 0), "selection is not argtopk(r+b)");
+        double negative_difference = 0;
+        for (int v = 0; v < cfg.vocab; ++v) {
+            EXPECT(std::abs(m.output_row(0)[v]-expected[v]) < 1e-12, "gate is not softmax of raw selected logits");
+            negative_difference = std::max(negative_difference, std::abs(wrong[v]-expected[v]));
+        }
+        EXPECT(negative_difference > 1e-6, "distinct-bias fixture cannot detect biased gates");
+    }
+}
+
 inline void test_model() {
+    test_router_selection_and_gates();
     test_decode_baseline_routing_state();
     test_bitlinear_ste();
     test_generate_length();
