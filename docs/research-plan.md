@@ -70,12 +70,66 @@ benchmaxxing by selection, with nothing dishonest intended.
   from scratch. If we keep night 1's weights, use a separate word-problem set
   as dev instead (for example SVAMP or ASDiv; still to check).
 
+## Expert balance: neglected experts in night 1
+
+**What we saw.** Night 1's load (busiest expert's share, worst layer; 1.0 is
+even, 4.0 the worst possible at 8 experts, top-2) fell from 3.98 to 1.83 by
+step 600, then rose to 2.5-3.2 from step 900 on.
+
+**What the router biases showed at step 2000.** The biases are the last 384
+bytes of the checkpoint (`src/train.h`, `save_checkpoint`), so they can be read
+without loading the model. Each step moves a bias by ±0.001, toward an even
+load, so after 2000 steps no bias can pass ±2.0.
+- Layers 0 and 6-11 are healthy: small biases of both signs, spread under 0.8.
+  The nudging works there.
+- Layers 1-5 each have one or two **neglected experts**, with a large bonus:
+  +1.3 to +1.7, and +2.000 for layer 4 expert 2 and layer 5 expert 6. Those two
+  were below an even share on every step since the start.
+- About 7 of the 96 experts are mostly idle.
+
+**Likely cause (not yet measured).**
+- An expert that rarely gets tokens barely learns, so when it is picked it
+  does badly, and the router avoids it more.
+- Our bias is added to raw router scores (`src/model.h`, `moe_forward`), which
+  have no ceiling, so the gap can grow faster than the bias closes it.
+- DeepSeek-V3, whose method and default speed (0.001) we use, adds the bias to
+  scores squeezed into 0-1 (a sigmoid), where a large enough bias always wins.
+
+**What to try.**
+1. Faster nudging, no code: `--bias-rate 0.003` and `0.01`. Watch that the
+   healthy layers do not start flip-flopping.
+2. Bounded scores: select experts by sigmoid score plus bias, keeping the gate
+   weights from the unbiased scores. This needs a change in the CPU engine, the
+   GPU and the inference engine, tested against each other as usual.
+3. Per-layer load in the log, so this shows during a night instead of only in
+   the checkpoint.
+
+**How to test.**
+- The curriculum is not a good test here: its small models balanced fine
+  (load about 1.1). The trap appears at night 1's size.
+- Instead, use short runs of the night-1 model on the GPU: night 1's `train`
+  command as `night.sh` builds it, but with `--time-limit 50` (about 600
+  steps), one run per setting.
+- Keep `--steps 5700` rather than a shorter `HOURS`: `night.sh` derives the
+  step count from `HOURS`, and the learning rate should follow the same
+  schedule as a night.
+- Compare the load lines, and read the biases at the end. Good balance means
+  no expert's bias moves at full speed in one direction (|bias| close to steps
+  × rate).
+- That is about 50 minutes per setting.
+
+**Before night 2.** If night 2 continues from night 1's weights, it inherits
+the neglected experts. A faster nudge may revive them, and the short runs
+show whether. If night 2 starts fresh (finer experts, bet 2), take the
+balancing fix along: more experts means more of them to keep alive.
+
 ## The bets, in the order to try them
 
 Prerequisites, before night 2:
 - the review fixes in group A (each night must get a new data order) and B1
   (the GSM8K score must accept "1,080");
-- the dev set above.
+- the dev set above;
+- an expert-balance setting that keeps every expert in use (above).
 
 Without them, comparisons between nights are not trustworthy.
 
@@ -143,8 +197,9 @@ because the expert hidden size defaults to the FFN size divided by top-k
 **Watch out for.**
 - Speed: smaller matrices, twice as many per step. Measure with the probe
   first.
-- Balance: more experts are harder to keep evenly busy (night 1's load is
-  around 2-2.5, against an ideal 1.0). A stronger `--bias-rate` may be needed.
+- Balance: more experts are harder to keep evenly busy. Night 1 already has
+  neglected experts (see "Expert balance" above), so fix that first or
+  alongside.
 
 **First experiment.**
 - Probe speed and memory at 8×2, 16×4 and 32×8 (about 10 minutes).
