@@ -101,13 +101,13 @@ for variant in dense moe-ternary; do
         for arm in initial control expanded; do
             prefix="$RUN_DIR/$variant-seed$seed-$arm"
             if [[ ! -f "$prefix.trace.csv" ]]; then
-                ./reasoning_traces --ckpt "$prefix.ckpt" --log "$prefix.log" --problems "$RUN_DIR/data/probe.txt" --threads "$THREADS" \
+                ./reasoning_traces --ckpt "$prefix.ckpt" --problems "$RUN_DIR/data/probe.txt" --threads "$THREADS" \
                     --transcripts "$prefix.transcripts.tsv.tmp" > "$prefix.trace.csv.tmp"
                 mv "$prefix.transcripts.tsv.tmp" "$prefix.transcripts.tsv"
                 mv "$prefix.trace.csv.tmp" "$prefix.trace.csv"
             fi
             if [[ ! -f "$prefix.audit.csv" ]]; then
-                ./reasoning_audit --ckpt "$prefix.ckpt" --log "$prefix.log" --problems "$RUN_DIR/data/probe.txt" --threads "$THREADS" \
+                ./reasoning_audit --ckpt "$prefix.ckpt" --problems "$RUN_DIR/data/probe.txt" --threads "$THREADS" \
                     > "$prefix.audit.csv.tmp"
                 mv "$prefix.audit.csv.tmp" "$prefix.audit.csv"
             fi
