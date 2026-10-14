@@ -32,7 +32,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Configure
-        run: cmake -S . -B build -G "Visual Studio 17 2022" -T ClangCL -A x64
+        run: |
+          $installation = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -format json | ConvertFrom-Json
+          if (-not $installation) { throw "No Visual Studio C++ toolchain found" }
+          $version = [version]$installation.installationVersion
+          $generator = "Visual Studio $($version.Major) $($installation.catalog.productLineVersion)"
+          cmake -S . -B build -G $generator -T ClangCL -A x64
       - name: Build CPU engine and tests
         run: cmake --build build --config Release --parallel
       - name: Test
