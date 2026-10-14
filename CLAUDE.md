@@ -54,10 +54,14 @@ Reasoning is the first capability we go after.
   branch (stable cross-entropy, token-weighted accumulation, optimizer
   grids, digit curricula), with raw results under `docs/results/`.
 - `docs/research-plan.md`: what to try next, in order (a calculator in the
-  engine, finer experts, learning from checked solutions, place-value digit
-  embeddings, int8 tensor cores for ternary), the optimizer's memory in CPU
+  engine, then more tools through the same hook, taught by a program that
+  writes word problems; finer experts, learning from checked solutions,
+  place-value digit embeddings, int8 tensor cores for ternary), effort
+  levels (more tries, a judge, thinking loops), the optimizer's memory in CPU
   RAM for growing past 8 GB, and the seed-repeat funnel an idea passes
-  before it gets a laptop night.
+  before it gets a laptop night. Decisions are made on a dev set held out
+  of GSM8K train (and out of MetaMath and OpenMath2), never on the GSM8K
+  test set, which gives headline numbers only.
 - `src/cxxgpt.cpp`: the CLI (train, sample, eval, data prep, benchmarks).
 - `scripts/get_data.py`: downloads public datasets (GSM8K, TinyStories,
   FineWeb-Edu, OpenMathInstruct-2, MetaMathQA) into `data/`, as text with

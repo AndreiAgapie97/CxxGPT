@@ -7,6 +7,13 @@ CXXGPT_AUDIT=${CXXGPT_AUDIT:-./reasoning_audit}
 CXXGPT_TARGETS=${CXXGPT_TARGETS:-./reasoning_targets}
 CXXGPT_TRACES=${CXXGPT_TRACES:-./reasoning_traces}
 CXXGPT_CURRICULUM=${CXXGPT_CURRICULUM:-./reasoning_curriculum}
+# A negated command is exempt from set -e. Require grep's specific no-match
+# status instead, so a match or a read error fails the surrounding test.
+require_absent() {
+    local result=0
+    grep "$@" || result=$?
+    [[ "$result" == 1 ]]
+}
 cd "$(dirname "$0")/.."
 TEST_DIR=$(mktemp -d)
 trap 'rm -rf -- "$TEST_DIR"' EXIT
@@ -34,17 +41,20 @@ for threads in 0 -1; do
     status=0
     "$CXXGPT" text2tok --in "$TEST_DIR/text.txt" --out "$TEST_DIR/thread-bad.tok" --threads "$threads" \
         > "$TEST_DIR/thread-bad.log" 2>&1 || status=$?
-    [[ "$status" == 1 ]] && grep -q 'threads must be positive' "$TEST_DIR/thread-bad.log"
+    [[ "$status" == 1 ]]
+    grep -q 'threads must be positive' "$TEST_DIR/thread-bad.log"
 done
 for options in '--dim 4294967304' '--steps 9999999999999999999999999' '--lr nan' '--lr inf' '--lr 1e999' '--lr 0.1junk'; do
     status=0
     # Fixed cases; all must fail in parsing before construction/allocation.
     "$CXXGPT" train "${COMMON[@]}" $options > "$TEST_DIR/strict-args.log" 2>&1 || status=$?
-    [[ "$status" == 1 ]] && grep -q 'check failed' "$TEST_DIR/strict-args.log"
+    [[ "$status" == 1 ]]
+    grep -q 'check failed' "$TEST_DIR/strict-args.log"
 done
 status=0
 "$CXXGPT" train "${COMMON[@]}" --experts 4 --topk 1 > "$TEST_DIR/top1.log" 2>&1 || status=$?
-[[ "$status" == 1 ]] && grep -q 'one-logit softmax has zero task gradient' "$TEST_DIR/top1.log"
+[[ "$status" == 1 ]]
+grep -q 'one-logit softmax has zero task gradient' "$TEST_DIR/top1.log"
 
 "$CXXGPT_TRAINING_CLI" generate "$TEST_DIR"
 python3 - "$TEST_DIR/long.txt" <<'PYLONG'
@@ -54,55 +64,66 @@ PYLONG
 for command in text2tok bpe-train; do
     status=0
     "$CXXGPT" "$command" --in "$TEST_DIR/long.txt" --out "$TEST_DIR/chunk-out" > "$TEST_DIR/chunk.log" 2>&1 || status=$?
-    [[ "$status" == 1 ]] && grep -q 'tokenizer chunk exceeds' "$TEST_DIR/chunk.log"
+    [[ "$status" == 1 ]]
+    grep -q 'tokenizer chunk exceeds' "$TEST_DIR/chunk.log"
 done
 status=0
 "$CXXGPT_TRAINING_CLI" bad-tokenizer-vocab > "$TEST_DIR/core-vocab.log" 2>&1 || status=$?
-[[ "$status" == 1 ]] && grep -q 'uint16 token ids' "$TEST_DIR/core-vocab.log"
+[[ "$status" == 1 ]]
+grep -q 'uint16 token ids' "$TEST_DIR/core-vocab.log"
 printf 'cxxgpt-bpe 1\n65281\n' > "$TEST_DIR/oversized.bpe"
 status=0
 "$CXXGPT" text2tok --in "$TEST_DIR/text.txt" --out "$TEST_DIR/oversized.tok" --bpe "$TEST_DIR/oversized.bpe" \
     > "$TEST_DIR/oversized.log" 2>&1 || status=$?
-[[ "$status" == 1 ]] && grep -q 'too many merges' "$TEST_DIR/oversized.log"
+[[ "$status" == 1 ]]
+grep -q 'too many merges' "$TEST_DIR/oversized.log"
 status=0
 "$CXXGPT" bpe-train --in "$TEST_DIR/text.txt" --out "$TEST_DIR/too-large.bpe" --vocab 65537 \
     > "$TEST_DIR/too-large.log" 2>&1 || status=$?
-[[ "$status" == 1 ]] && grep -q 'uint16' "$TEST_DIR/too-large.log"
+[[ "$status" == 1 ]]
+grep -q 'uint16' "$TEST_DIR/too-large.log"
 for options in '--min-diff 4 --max-diff 2' '--max-diff 10' '--test-max-diff 17' '--test-per-cell 0'; do
     status=0
     "$CXXGPT" gen-reasoning --out "$TEST_DIR/invalid-reason" $options --train 0 --val 0 \
         > "$TEST_DIR/invalid-reason.log" 2>&1 || status=$?
-    [[ "$status" == 1 ]] && grep -q 'check failed' "$TEST_DIR/invalid-reason.log"
+    [[ "$status" == 1 ]]
+    grep -q 'check failed' "$TEST_DIR/invalid-reason.log"
 done
 status=0
 "$CXXGPT" gen-reasoning --out "$TEST_DIR/exhausted" --tasks mul --min-diff 1 --max-diff 1 \
     --test-max-diff 1 --test-per-cell 721 --train 0 --val 0 > "$TEST_DIR/exhausted.log" 2>&1 || status=$?
-[[ "$status" == 1 ]] && grep -q 'question domain exhausted' "$TEST_DIR/exhausted.log"
+[[ "$status" == 1 ]]
+grep -q 'question domain exhausted' "$TEST_DIR/exhausted.log"
 for batch in 0 -1; do
     status=0
     "$CXXGPT" eval-reasoning --ckpt "$TEST_DIR/audit.ckpt" --test "$TEST_DIR/audit.txt" --batch "$batch" \
         --threads 2 > "$TEST_DIR/eval-batch.log" 2>&1 || status=$?
-    [[ "$status" == 1 ]] && grep -q 'evaluation batch and max_new must be positive' "$TEST_DIR/eval-batch.log"
+    [[ "$status" == 1 ]]
+    grep -q 'evaluation batch and max_new must be positive' "$TEST_DIR/eval-batch.log"
 done
 for count in '' 1junk 99999999999999999999999 0 -1; do
     status=0
     "$CXXGPT" train "${COMMON[@]}" --data "$TEST_DIR/data.tok*$count" > "$TEST_DIR/repeat-count.log" 2>&1 || status=$?
-    [[ "$status" == 1 ]] && grep -q 'bad repeat count' "$TEST_DIR/repeat-count.log"
+    [[ "$status" == 1 ]]
+    grep -q 'bad repeat count' "$TEST_DIR/repeat-count.log"
 done
 status=0
 "$CXXGPT" eval-reasoning --ckpt "$TEST_DIR/audit.ckpt" --test "$TEST_DIR/audit.txt" --as-engine \
     --threads 2 > "$TEST_DIR/engine-config.log" 2>&1 || status=$?
-[[ "$status" == 1 ]] && grep -q 'requires a ternary model' "$TEST_DIR/engine-config.log"
+[[ "$status" == 1 ]]
+grep -q 'requires a ternary model' "$TEST_DIR/engine-config.log"
 for target in 1 -1; do
     status=0
     "$CXXGPT_TRAINING_CLI" repeat-backward "$target" > "$TEST_DIR/repeat-backward.log" 2>&1 || status=$?
-    [[ "$status" == 1 ]] && grep -q 'needs a new forward' "$TEST_DIR/repeat-backward.log"
+    [[ "$status" == 1 ]]
+    grep -q 'needs a new forward' "$TEST_DIR/repeat-backward.log"
 done
 for command in bad-target bad-target-backward; do
   for target in -2 3; do
     status=0
     "$CXXGPT_TRAINING_CLI" "$command" "$target" > "$TEST_DIR/target-range.log" 2>&1 || status=$?
-    [[ "$status" == 1 ]] && grep -q 'target .* out of range' "$TEST_DIR/target-range.log"
+    [[ "$status" == 1 ]]
+    grep -q 'target .* out of range' "$TEST_DIR/target-range.log"
   done
 done
 printf 'qa\t1\tq\twork\t14\r\nqa\t2\ttail\twork\t1080' > "$TEST_DIR/line-endings.txt"
@@ -114,7 +135,8 @@ for difficulty in '' 1junk 999999999999999999999999 -1; do
     status=0
     "$CXXGPT" eval-reasoning --ckpt "$TEST_DIR/audit.ckpt" --test "$TEST_DIR/bad-difficulty.txt" --threads 2 \
         > "$TEST_DIR/bad-difficulty.log" 2>&1 || status=$?
-    [[ "$status" == 1 ]] && grep -q 'bad difficulty' "$TEST_DIR/bad-difficulty.log"
+    [[ "$status" == 1 ]]
+    grep -q 'bad difficulty' "$TEST_DIR/bad-difficulty.log"
 done
 "$CXXGPT" eval-reasoning --ckpt "$TEST_DIR/audit.ckpt" --test "$TEST_DIR/audit.txt" --max-new 1 --threads 2 > "$TEST_DIR/cap.log"
 grep -q 'gold completions exceeding --max-new 1: 1 / 1' "$TEST_DIR/cap.log"
@@ -125,7 +147,8 @@ grep -q 'gold completions exceeding --max-new 200: 0 / 1' "$TEST_DIR/cap-default
 grep -q 'gold completions exceeding --max-new 1: 1 / 1' "$TEST_DIR/train-cap.log"
 status=0
 "$CXXGPT" eval-reasoning --ckpt "$TEST_DIR/audit.ckpt" --test "$TEST_DIR/audit.txt" --max-new 0 > "$TEST_DIR/bad-cap.log" 2>&1 || status=$?
-[[ "$status" == 1 ]] && grep -q 'max-new must be positive' "$TEST_DIR/bad-cap.log"
+[[ "$status" == 1 ]]
+grep -q 'max-new must be positive' "$TEST_DIR/bad-cap.log"
 # Vocab compatibility must fail before constructing/training the model.
 for kind in val reason; do
     EXTRA=(--data "$TEST_DIR/masked.tok")
@@ -137,8 +160,9 @@ for kind in val reason; do
     status=0
     "$CXXGPT" train "${COMMON[@]}" "${EXTRA[@]}" --out "$TEST_DIR/vocab-$kind.ckpt" \
         > "$TEST_DIR/vocab-$kind.log" 2>&1 || status=$?
-    [[ "$status" == 1 ]] && grep -q "$message" "$TEST_DIR/vocab-$kind.log"
-    ! grep -q '^step ' "$TEST_DIR/vocab-$kind.log"
+    [[ "$status" == 1 ]]
+    grep -q "$message" "$TEST_DIR/vocab-$kind.log"
+    require_absent -q '^step ' "$TEST_DIR/vocab-$kind.log"
     [[ ! -e "$TEST_DIR/vocab-$kind.ckpt" ]]
 done
 # A2/C10: the final save precedes reasoning; SIGINT saves without another eval.
@@ -158,7 +182,7 @@ if [[ ! -f "$TEST_DIR/signal.ckpt" ]]; then kill -TERM "$trainer"; wait "$traine
 kill -INT "$trainer"
 wait "$trainer"
 grep -q 'saved .* (interrupted)' "$TEST_DIR/signal.log"
-! grep -q '^reasoning eval' "$TEST_DIR/signal.log"
+require_absent -q '^reasoning eval' "$TEST_DIR/signal.log"
 # Loading/resuming the interrupted checkpoint proves it is complete and usable.
 "$CXXGPT" train "${COMMON[@]}" --out "$TEST_DIR/signal.ckpt" --steps 0 --resume > "$TEST_DIR/signal-resume.log"
 printf 'CLI: save-before-reasoning and actual SIGINT save/resume passed\n'
@@ -172,7 +196,7 @@ grep -q 'saved .* at step 1' "$TEST_DIR/timed.log"
 [[ $(grep -c 'update skipped' "$TEST_DIR/bad-timed.log") == 1 ]]
 grep -q 'time limit reached' "$TEST_DIR/bad-timed.log"
 grep -q 'saved .* at step 0' "$TEST_DIR/bad-timed.log"
-! grep -q 'diverged\|lower --lr' "$TEST_DIR/bad-timed.log"
+require_absent -q 'diverged\|lower --lr' "$TEST_DIR/bad-timed.log"
 "$CXXGPT_TRAINING_CLI" unchanged-zero-step "$TEST_DIR/unstable.ckpt" "$TEST_DIR/bad-timed.ckpt"
 printf 'CLI: good/bad-attempt time limits preserve progress; divergence protection remains separate\n'
 "$CXXGPT" train "${COMMON[@]}" --steps 20 --time-limit 0.000000000001 --eval-every 999 \
@@ -214,7 +238,8 @@ for variant in dense ternary moe ternary-moe hybrid hybrid-moe nope nope-ternary
 done
 status=0
 "$CXXGPT" train "${COMMON[@]}" --data "$TEST_DIR/ignored.tok" --val "$TEST_DIR/ignored.tok" > "$TEST_DIR/ignored.log" 2>&1 || status=$?
-[[ "$status" == 1 ]] && grep -q 'no predictable targets' "$TEST_DIR/ignored.log"
+[[ "$status" == 1 ]]
+grep -q 'no predictable targets' "$TEST_DIR/ignored.log"
 printf 'CLI: AdamW/Muon masked/sparse accumulation, weighted validation, empty-group skips, and fully masked rejection passed\n'
 
 "$CXXGPT" bench-infer --vocab 13 --seq 8 --dim 32 --heads 2 --layers 1 --ffn 64 \
@@ -224,7 +249,8 @@ awk -F, 'NR>1 {if ($1 != NR-2 || $2 != (NR%2==0) || $5 <= 0 || $6 <= 0 || $7 < 0
 status=0
 "$CXXGPT" bench-infer --vocab 13 --seq 8 --dim 32 --heads 2 --layers 1 --ffn 64 \
     --tokens 8 --reps 0 --threads 2 > "$TEST_DIR/bad-reps.log" 2>&1 || status=$?
-[[ "$status" == 1 ]] && grep -q 'reps must be positive' "$TEST_DIR/bad-reps.log"
+[[ "$status" == 1 ]]
+grep -q 'reps must be positive' "$TEST_DIR/bad-reps.log"
 printf 'CLI: benchmark emits alternating raw trials and rejects zero repeats\n'
 
 "$CXXGPT" train "${COMMON[@]}" --steps 0 --init "$TEST_DIR/model.ckpt" --out "$TEST_DIR/fresh.ckpt" > "$TEST_DIR/init.log"
@@ -255,12 +281,14 @@ for options in '--matmul invalid' '--no-tf32 --matmul bf16' '--fused-attn --no-f
     # Fixed literal cases, no user-supplied option splitting.
     # shellcheck disable=SC2086
     "$CXXGPT" train "${COMMON[@]}" $options > "$TEST_DIR/precision-invalid.log" 2>&1 || status=$?
-    [[ $status == 1 ]] && grep -q 'check failed' "$TEST_DIR/precision-invalid.log"
+    [[ $status == 1 ]]
+    grep -q 'check failed' "$TEST_DIR/precision-invalid.log"
 done
 "$CXXGPT" train "${COMMON[@]}" --steps 0 --no-tf32 --out "$TEST_DIR/legacy-precision.ckpt" > "$TEST_DIR/legacy-precision.log"
 status=0
 "$CXXGPT_TRAINING_CLI" same-sampler "$TEST_DIR/model.ckpt" "$TEST_DIR/fresh.ckpt" > "$TEST_DIR/rng-different.log" 2>&1 || status=$?
-[[ "$status" == 1 ]] && grep -q 'different samples' "$TEST_DIR/rng-different.log"
+[[ "$status" == 1 ]]
+grep -q 'different samples' "$TEST_DIR/rng-different.log"
 cp "$TEST_DIR/model.ckpt" "$TEST_DIR/protected.ckpt"
 "$CXXGPT_TRAINING_CLI" recover-save "$TEST_DIR/protected.ckpt" > "$TEST_DIR/recover-save.log" 2>&1
 cmp "$TEST_DIR/model.ckpt" "$TEST_DIR/protected.ckpt"
@@ -282,17 +310,20 @@ cp "$TEST_DIR/model.ckpt" "$TEST_DIR/truncated.ckpt"
 "$CXXGPT_TRAINING_CLI" truncate "$TEST_DIR/truncated.ckpt"
 status=0
 "$CXXGPT" train "${COMMON[@]}" --steps 0 --init "$TEST_DIR/truncated.ckpt" > "$TEST_DIR/truncated.log" 2>&1 || status=$?
-[[ "$status" == 1 ]] && grep -q 'truncated optimizer state' "$TEST_DIR/truncated.log"
+[[ "$status" == 1 ]]
+grep -q 'truncated optimizer state' "$TEST_DIR/truncated.log"
 for kind in params m v short-v; do
     status=0
     "$CXXGPT_TRAINING_CLI" bad-save "$TEST_DIR/protected.ckpt" "$kind" > "$TEST_DIR/bad-save.log" 2>&1 || status=$?
-    [[ "$status" == 1 ]] && grep -q 'check failed' "$TEST_DIR/bad-save.log"
+    [[ "$status" == 1 ]]
+    grep -q 'check failed' "$TEST_DIR/bad-save.log"
     cmp "$TEST_DIR/model.ckpt" "$TEST_DIR/protected.ckpt"
 done
 status=0
 "$CXXGPT" train "${COMMON[@]}" --init "$TEST_DIR/unstable.ckpt" --out "$TEST_DIR/protected.ckpt" \
     --steps 20 --save-every 1 > "$TEST_DIR/diverged.log" 2>&1 || status=$?
-[[ "$status" == 1 ]] && grep -q '10 diverged steps' "$TEST_DIR/diverged.log"
+[[ "$status" == 1 ]]
+grep -q '10 diverged steps' "$TEST_DIR/diverged.log"
 [[ $(grep -c 'step 1: .*update skipped' "$TEST_DIR/diverged.log") == 10 ]]
 cmp "$TEST_DIR/model.ckpt" "$TEST_DIR/protected.ckpt"
 printf 'CLI: warm start/reset, resume precedence, truncated moments and checkpoint protection passed\n'
