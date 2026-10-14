@@ -11,6 +11,7 @@
 //
 // Run a subcommand with --help for its options.
 #include <cmath>
+#include <charconv>
 #include <csignal>
 #include <cstdio>
 #include <filesystem>
@@ -242,7 +243,12 @@ TokenData load_token_list(const std::string& spec) {
     std::vector<std::pair<std::string, int>> files;
     for (const std::string& item : split(spec, ',')) {
         const size_t star = item.rfind('*');
-        const int times = star == std::string::npos ? 1 : std::atoi(item.c_str() + star + 1);
+        int times = 1;
+        if (star != std::string::npos) {
+            const char* begin = item.data()+star+1; const char* end = item.data()+item.size();
+            const auto parsed = std::from_chars(begin,end,times);
+            CHECK(parsed.ec == std::errc{} && parsed.ptr == end, "bad repeat count in '%s'", item.c_str());
+        }
         CHECK(times >= 1, "bad repeat count in '%s'", item.c_str());
         files.emplace_back(item.substr(0, star), times);
     }
