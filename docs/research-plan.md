@@ -123,6 +123,53 @@ the neglected experts. A faster nudge may revive them, and the short runs
 show whether. If night 2 starts fresh (finer experts, bet 2), take the
 balancing fix along: more experts means more of them to keep alive.
 
+## Data: teaching it better without code
+
+**What night 1 learns from.** These are rough shares by token-file size, from
+night 1's default `MIX` in `night.sh`:
+
+| Source | Share | What it is |
+|---|---|---|
+| FineWeb-Edu | ~37% | educational web pages |
+| OpenMath2 | ~32% | math problems with worked solutions |
+| TinyStories | ~24% | simple children's stories |
+| MetaMath | ~6.5% | rephrased GSM8K and MATH problems |
+| GSM8K train, ×4 | ~0.3% | the 7,473 real problems |
+
+- About a quarter of training goes to children's stories. They help grammar
+  early on, but they do not teach reasoning.
+- A night trains on about 19% of the 1.96 B tokens, so even at ×4 a night
+  shows each GSM8K problem less than once on average.
+
+**1. A math cool-down at the end.**
+- What a model sees in the last stretch of training, while the learning rate
+  winds down, sticks disproportionately. Llama 3, MiniCPM and OLMo 2 spend
+  their last phase on their best, most task-relevant data, and report clear
+  gains on math tests from it.
+- For us: a night that continues from the previous one (`INIT=`) with a
+  math-heavy `MIX`: mostly OpenMath2, MetaMath and GSM8K, little web text, no
+  TinyStories. No code: `night.sh` takes `MIX` from the environment.
+- With `--init`, the schedule starts over (warmup, then decay from `LR`). A
+  cool-down probably wants a lower peak `LR` than a fresh night. Pick it in
+  the test below.
+- It belongs at the end of the whole run of nights. The plan also makes the
+  last nights ternary. Test the two changes one at a time, so we know which
+  one did what.
+
+**2. A better everyday mix.**
+- Replace most of TinyStories with more math and more educational web text.
+- Raise GSM8K's repeat factor. Up to about 4 passes over the same data cost
+  little compared with fresh data (Muennighoff et al., 2023), and today's ×4
+  gives less than one pass per night.
+
+**How to test.**
+- Two continuations from the same checkpoint, same length and `LR`: one with
+  the same mix, one with the math mix. Short runs (1-2 hours) first, a night
+  only if the gap is clear.
+- Night 1 trained on all of GSM8K train, so judge a continuation of it on the
+  GSM8K test (sparingly, recorded per the measurement rules) or on a separate
+  set such as SVAMP. A model trained from scratch can use the dev set.
+
 ## The bets, in the order to try them
 
 Prerequisites, before night 2:
