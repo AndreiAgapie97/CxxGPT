@@ -480,13 +480,19 @@ void act_quantize(T* xq, const T* x, int N, int C) {
             if (scale <= T(1) / std::numeric_limits<T>::max()) {
                 // Separate loops keep vectorization from speculating an
                 // unused overflowing reciprocal on the tiny-scale path.
-                for (int c = 0; c < C; ++c)
-                    q[c] = std::clamp(std::nearbyint(xn[c] / scale), T(-127), T(127)) * scale;
+                for (int c = 0; c < C; ++c) {
+                    const T rounded = std::clamp(std::nearbyint(xn[c] / scale), T(-127), T(127));
+                    // int8 zero dequantizes as +0; nearbyint can produce -0.
+                    q[c] = (rounded == T(0) ? T(0) : rounded) * scale;
+                }
                 continue;
             }
             const T inv = T(1) / scale;
-            for (int c = 0; c < C; ++c)
-                q[c] = std::clamp(std::nearbyint(xn[c] * inv), T(-127), T(127)) * scale;
+            for (int c = 0; c < C; ++c) {
+                const T rounded = std::clamp(std::nearbyint(xn[c] * inv), T(-127), T(127));
+                // int8 zero dequantizes as +0; nearbyint can produce -0.
+                q[c] = (rounded == T(0) ? T(0) : rounded) * scale;
+            }
         }
     });
 }

@@ -1,6 +1,7 @@
 // test_model.h — whole-model gradient checks and the BitLinear pieces.
 #pragma once
 #include <cfenv>
+#include <bit>
 
 #include "../src/generate.h"
 #include "../src/infer.h"
@@ -576,6 +577,17 @@ inline void test_router_balancing() {
 }
 
 inline void test_activation_int8_contract() {
+    // Ordinary negative inputs below half a grid step round to -0 in float,
+    // while the deployment int8 representation has only one zero value.
+    {
+        const float x[] = {1.0f,-0.0001f,-0.0f,0.0f};
+        float got[4]; int8_t q[4];
+        act_quantize(got,x,1,4); const float scale=quantize_int8(x,4,q);
+        for (int i=0;i<4;++i)
+            EXPECT(std::bit_cast<uint32_t>(got[i])==std::bit_cast<uint32_t>(float(q[i])*scale),
+                   "float/int8 activation bit patterns differ, including zero signs");
+    }
+
     for (int C : {1,7,8,9,15,16,17,31,33}) for (float magnitude : {1e-36f,1e-38f,1e-40f,1e-44f}) {
         std::vector<float> x(C), got(C); std::vector<int8_t> q(C);
         for (int j = 0; j < C; ++j) x[j] = j%3 == 0 ? magnitude : j%3 == 1 ? -magnitude : 0;
@@ -586,7 +598,7 @@ inline void test_activation_int8_contract() {
         for (int j = 0; j < C; ++j) {
             const double ratio = scale == 0 ? 0 : double(x[j])/double(scale);
             const int ref = int(std::clamp(std::nearbyint(ratio), -127.0, 127.0));
-            EXPECT(q[j] == ref && std::isfinite(got[j]) && got[j] == float(q[j])*scale,
+            EXPECT(q[j] == ref && std::isfinite(got[j]) && std::bit_cast<uint32_t>(got[j]) == std::bit_cast<uint32_t>(float(q[j])*scale),
                    "tiny activation quantization differs from finite double reference");
         }
     }
@@ -603,7 +615,7 @@ inline void test_activation_int8_contract() {
         for (int n = 0; n < N; ++n) {
             const float scale = quantize_int8(x.data()+n*C, C, q.data());
             for (int j = 0; j < C; ++j)
-                EXPECT(got[n*C+j] == scale*float(q[j]), "training/packed int8 levels differ at C=%d mode=%d", C, mode);
+                EXPECT(std::bit_cast<uint32_t>(got[n*C+j]) == std::bit_cast<uint32_t>(scale*float(q[j])), "training/packed int8 levels differ at C=%d mode=%d", C, mode);
         }
     }
 }
