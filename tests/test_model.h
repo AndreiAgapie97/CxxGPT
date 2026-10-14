@@ -608,7 +608,14 @@ inline void test_activation_int8_contract() {
     }
 }
 
+inline void test_sampling_zero_boundary() {
+    Rng rng(1); const uint64_t zero[] = {0,0,0,0}; rng.set_state(zero);
+    const float logits[] = {-1000,0,-1000};
+    EXPECT(pick_token(logits,3,1.0,&rng) == 1, "u=0 selected an underflowed zero-probability token");
+}
+
 inline void test_model() {
+    test_sampling_zero_boundary();
     test_activation_int8_contract();
     test_router_balancing();
     test_router_selection_and_gates();

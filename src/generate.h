@@ -25,7 +25,7 @@ int pick_token(const T* logits, int V, double temperature, Rng* rng) {
     for (int i = 0; i < V; ++i) sum += p[i] = std::exp((double(logits[i]) - logits[best]) / temperature);
     double u = rng->uniform() * sum;
     for (int i = 0; i < V; ++i)
-        if ((u -= p[i]) <= 0) return i;
+        if ((u -= p[i]) < 0) return i;
     return best;
 }
 
