@@ -13,6 +13,8 @@
 
 #include <algorithm>
 #include <atomic>
+#include <barrier>
+#include <stdexcept>
 #include <cassert>
 #include <chrono>
 #include <cmath>
@@ -373,6 +375,21 @@ static void run_tests() {
     }
 
     test_fp32_helpers();
+    // All first three claims rendezvous, so the caller and both workers throw.
+    {
+        ThreadPool tp(3); std::barrier sync(3); std::atomic<int> completed{0}; bool caught=false;
+        try {
+            tp.parallel_for(120,[&](int begin,int end) {
+                if (begin<60) sync.arrive_and_wait();
+                completed.fetch_add(end-begin);
+                throw std::runtime_error("fixture job failure");
+            },1);
+        } catch (const std::runtime_error&) { caught=true; }
+        check(caught && completed.load()==120, "pool exception did not finish/rethrow safely");
+        std::vector<int> hits(120,0);
+        tp.parallel_for(120,[&](int begin,int end) { for (int i=begin;i<end;++i) ++hits[i]; },1);
+        check(std::all_of(hits.begin(),hits.end(),[](int n) {return n==1;}), "pool was unusable after exception");
+    }
     test_thread_pool();
     test_concurrent_callers();
     test_moe();

@@ -8,6 +8,7 @@
 #include <condition_variable>
 #include <cstdint>
 #include <functional>
+#include <exception>
 #include <mutex>
 #include <thread>
 #include <vector>
@@ -45,7 +46,8 @@ public:
     // [0, total), spread across the pool's threads and the caller. Ranges are
     // claimed dynamically, so a slow or preempted thread just takes fewer.
     // Safe to call from several threads (jobs run one at a time), but not
-    // reentrant: fn must not call parallel_for itself.
+    // reentrant: fn must not call parallel_for itself. Exceptions are rethrown
+    // to the caller after all claimed ranges finish; partial output is unspecified.
     // min_per_thread: below nthreads * min_per_thread items the caller runs
     // the job alone; also the smallest chunk handed out.
     void parallel_for(int total, const std::function<void(int, int)>& fn,
@@ -55,6 +57,7 @@ public:
             return;
         }
         std::lock_guard<std::mutex> one_job(call_m_);
+        job_error_ = nullptr;
         // Close the previous job first. A worker can still hold its exhausted
         // cursor (gen, old_total); compared against the new total, that would
         // look like unclaimed rows, and its CAS would succeed until the cursor
@@ -83,12 +86,18 @@ public:
             if (spins < 1u << 20) cpu_relax();
             else std::this_thread::yield();  // a worker got preempted mid-chunk
         }
+        // Every claimed range is finished, so fn is no longer borrowed by workers.
+        std::lock_guard<std::mutex> error_lock(error_m_);
+        if (job_error_) std::rethrow_exception(job_error_);
     }
 
     static constexpr int kSpinMicros = 1000;
     static constexpr int kDefaultMinPerThread = 16;
 
 private:
+    std::mutex error_m_;
+    std::exception_ptr job_error_;
+
     static constexpr int kChunksPerThread = 2;  // each claim costs ~0.5 us of cache traffic
     static constexpr uint32_t kClosed = 0x7FFFFFFF;  // cursor row: no job open
 
@@ -107,7 +116,12 @@ private:
                                                std::memory_order_acquire))
                 continue;
             // The claim succeeded, so job `gen` is still running and job_ is its.
-            (*job_.load(std::memory_order_relaxed))(r0, r1);
+            try {
+                (*job_.load(std::memory_order_relaxed))(r0,r1);
+            } catch (...) {
+                std::lock_guard<std::mutex> error_lock(error_m_);
+                if (!job_error_) job_error_ = std::current_exception();
+            }
             done_.fetch_add(r1 - r0, std::memory_order_release);
         }
     }
