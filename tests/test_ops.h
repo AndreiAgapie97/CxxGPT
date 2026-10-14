@@ -235,6 +235,7 @@ inline void test_ops_threaded_float_vs_double() {
 
 // fast_exp against std::exp over the whole float range it supports.
 inline void test_fast_exp() {
+    EXPECT(std::isnan(fast_exp(std::numeric_limits<float>::quiet_NaN())), "fast_exp did not propagate NaN");
     double worst = 0.0;
     for (float x = -87.0f; x <= 88.0f; x += 0.0137f) {
         const double ref = std::exp(double(x));

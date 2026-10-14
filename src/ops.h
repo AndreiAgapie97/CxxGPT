@@ -48,6 +48,7 @@ inline T dot(const T* a, const T* b, int n) {
 // (e^-87.3 is the smallest normal float). double keeps std::exp, so the
 // gradient checks are unaffected.
 inline float fast_exp(float x) {
+    if (std::isnan(x)) return x;  // propagate failure without an undefined float-to-int cast
     x = std::min(std::max(x, -87.33654f), 88.37626f);
     const float k = (x * 1.44269504088896341f + 12582912.0f) - 12582912.0f;
     float r = x - k * 0.693359375f;
