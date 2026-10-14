@@ -125,6 +125,14 @@ int main(int argc, char** argv) {
         EXPECT(a.params == b.params, "different INIT data seed changed loaded weights");
         return g_failures ? 1 : 0;
     }
+    if (argc == 4 && std::string(argv[1]) == "unchanged-zero-step") {
+        Model<float> a(peek_checkpoint_config(argv[2])), b(peek_checkpoint_config(argv[3]));
+        AdamW opt; Rng rng(0);
+        load_checkpoint(argv[2], a, nullptr, nullptr); load_checkpoint(argv[3], b, &opt, &rng);
+        EXPECT(a.params == b.params && a.router_bias == b.router_bias, "skipped attempt changed saved weights");
+        EXPECT(opt.step == 0 && opt.m.empty() && opt.v.empty(), "skipped attempt advanced optimizer");
+        return g_failures ? 1 : 0;
+    }
     if (argc == 4 && std::string(argv[1]) == "bad-save") {
         Model<float> model(peek_checkpoint_config(argv[2]));
         AdamW opt; Rng rng(0);

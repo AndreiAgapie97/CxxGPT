@@ -776,8 +776,8 @@ int cmd_train(Args& a) {
                 break;
             }
             if (time_limit > 0 && now_seconds() - t_start > time_limit) {
-                diverged = true;
-                break;
+                std::printf("time limit reached\n");
+                break;  // skipped attempts below the streak limit do not imply divergence
             }
             continue;  // failed attempts do not advance optimizer or schedule
         }

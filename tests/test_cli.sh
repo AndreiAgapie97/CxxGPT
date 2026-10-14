@@ -52,6 +52,19 @@ grep -q 'saved .* (interrupted)' "$TEST_DIR/signal.log"
 # Loading/resuming the interrupted checkpoint proves it is complete and usable.
 "$CXXGPT" train "${COMMON[@]}" --out "$TEST_DIR/signal.ckpt" --steps 0 --resume > "$TEST_DIR/signal-resume.log"
 printf 'CLI: save-before-reasoning and actual SIGINT save/resume passed\n'
+# A3/C10: normal time limit and one bad attempt both stop with a usable save.
+"$CXXGPT" train "${COMMON[@]}" --steps 20 --time-limit 0.000000000001 \
+    --out "$TEST_DIR/timed.ckpt" > "$TEST_DIR/timed.log"
+grep -q 'time limit reached' "$TEST_DIR/timed.log"
+grep -q 'saved .* at step 1' "$TEST_DIR/timed.log"
+"$CXXGPT" train "${COMMON[@]}" --init "$TEST_DIR/unstable.ckpt" --steps 20 \
+    --time-limit 0.000000000001 --out "$TEST_DIR/bad-timed.ckpt" > "$TEST_DIR/bad-timed.log"
+[[ $(grep -c 'update skipped' "$TEST_DIR/bad-timed.log") == 1 ]]
+grep -q 'time limit reached' "$TEST_DIR/bad-timed.log"
+grep -q 'saved .* at step 0' "$TEST_DIR/bad-timed.log"
+! grep -q 'diverged\|lower --lr' "$TEST_DIR/bad-timed.log"
+./test_training_cli unchanged-zero-step "$TEST_DIR/unstable.ckpt" "$TEST_DIR/bad-timed.ckpt"
+printf 'CLI: good/bad-attempt time limits preserve progress; divergence protection remains separate\n'
 for variant in dense ternary moe ternary-moe hybrid hybrid-moe nope nope-ternary-moe; do
     ARCH=()
     if [[ "$variant" == *ternary* ]]; then ARCH+=(--ternary); fi
