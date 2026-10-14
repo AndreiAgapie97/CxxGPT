@@ -245,7 +245,8 @@ void append_problem(TokenData& d, const Problem& p, const Tokenizer& tok) {
 
 // "a.tok,b.tok*3": the files concatenated, b three times (to weight a small
 // dataset up). A file without a mask counts as all trained-on.
-TokenData load_token_list(const std::string& spec) {
+TokenData load_token_list(const std::string& spec, bool* repeats = nullptr) {
+    if (repeats) *repeats = false;
     std::vector<std::pair<std::string, int>> files;
     for (const std::string& item : split(spec, ',')) {
         const size_t star = item.rfind('*');
@@ -256,6 +257,7 @@ TokenData load_token_list(const std::string& spec) {
             CHECK(parsed.ec == std::errc{} && parsed.ptr == end, "bad repeat count in '%s'", item.c_str());
         }
         CHECK(times >= 1, "bad repeat count in '%s'", item.c_str());
+        if (repeats && times>1) *repeats = true;
         files.emplace_back(item.substr(0, star), times);
     }
     return TokenData::load_list(files);
@@ -648,7 +650,8 @@ int cmd_train(Args& a) {
     const std::string data_path = a.str("data"), val_path = a.str("val");
     const std::string out = a.str("out", "model.ckpt"), log_path = a.str("log"), init = a.str("init");
     CHECK(!data_path.empty(), "--data is required (see cxxgpt train --help)");
-    const TokenData data = load_token_list(data_path);
+    bool repeated_data = false;
+    const TokenData data = load_token_list(data_path,&repeated_data);
     TokenData val_data;
     if (!val_path.empty()) val_data = load_token_list(val_path);
     const double val_frac = a.real("val-frac", 0.05);
@@ -738,6 +741,8 @@ int cmd_train(Args& a) {
     size_t val_lo = 0, val_hi = val_data.tokens.size();
     if (val_path.empty()) {
         CHECK(val_frac >= 0 && val_frac < 1, "--val-frac must be in [0, 1)");
+        if (repeated_data && val_frac>0)
+            std::fprintf(stderr, "warning: default validation slices repeated data and can overlap training; use a separate --val file\n");
         train_end = size_t(double(data.tokens.size()) * (1.0 - val_frac));
         val = &data;
         val_lo = train_end;

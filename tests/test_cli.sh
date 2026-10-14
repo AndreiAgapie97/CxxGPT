@@ -57,6 +57,12 @@ status=0
 grep -q 'one-logit softmax has zero task gradient' "$TEST_DIR/top1.log"
 
 "$CXXGPT_TRAINING_CLI" generate "$TEST_DIR"
+"$CXXGPT" train "${COMMON[@]}" --data "$TEST_DIR/data.tok*3" --val '' --val-frac 0.5 --steps 0 \
+    --out "$TEST_DIR/repeated-val.ckpt" > "$TEST_DIR/repeated-val.log" 2>&1
+grep -q 'validation slices repeated data' "$TEST_DIR/repeated-val.log"
+"$CXXGPT" train "${COMMON[@]}" --data "$TEST_DIR/data.tok*3" --steps 0 \
+    --out "$TEST_DIR/explicit-val.ckpt" > "$TEST_DIR/explicit-val.log" 2>&1
+require_absent -q 'validation slices repeated data' "$TEST_DIR/explicit-val.log"
 "$CXXGPT" train "${COMMON[@]}" --steps 2 --seed 7 --eval-every 0 --out "$TEST_DIR/budget-proof.ckpt" \
     > "$TEST_DIR/budget-proof.log"
 "$CXXGPT_CURRICULUM" --mode budget --data "$TEST_DIR/data.tok" --ckpt "$TEST_DIR/budget-proof.ckpt" \
