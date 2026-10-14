@@ -29,6 +29,12 @@ for option in dim heads experts shared ffn ehidden topk batch accum log-every ev
     fi
 done
 printf 'CLI: single-window train/validation and twelve invalid configurations passed\n'
+for options in '--dim 4294967304' '--steps 9999999999999999999999999' '--lr nan' '--lr inf' '--lr 1e999' '--lr 0.1junk'; do
+    status=0
+    # Fixed cases; all must fail in parsing before construction/allocation.
+    "$CXXGPT" train "${COMMON[@]}" $options > "$TEST_DIR/strict-args.log" 2>&1 || status=$?
+    [[ "$status" == 1 ]] && grep -q 'check failed' "$TEST_DIR/strict-args.log"
+done
 status=0
 "$CXXGPT" train "${COMMON[@]}" --experts 4 --topk 1 > "$TEST_DIR/top1.log" 2>&1 || status=$?
 [[ "$status" == 1 ]] && grep -q 'one-logit softmax has zero task gradient' "$TEST_DIR/top1.log"

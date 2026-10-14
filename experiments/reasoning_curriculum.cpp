@@ -46,7 +46,7 @@ int main(int argc, char** argv) {
     if (mode == "budget") {
         const auto path = a.str("data"), ckpt = a.str("ckpt");
         const long steps = a.integer("steps", 1000), seed = a.integer("seed", 101);
-        const int batch = int(a.integer("batch", 2)), seq = int(a.integer("seq", 128));
+        const int batch = a.integer_int("batch", 2), seq = a.integer_int("seq", 128);
         a.done(); CHECK(steps > 0 && batch > 0 && seq > 0 && batch <= INT32_MAX / seq, "invalid budget");
         const auto data = TokenData::load(path); Rng rng(uint64_t(seed) + 1);
         std::vector<int> inputs(size_t(batch) * seq), targets(inputs.size());
@@ -68,8 +68,8 @@ int main(int argc, char** argv) {
     }
     CHECK(mode == "prepare", "unknown curriculum mode");
     const auto dir = a.str("out"), corpora = a.str("exclude-corpora"), old = a.str("exclude-problems");
-    const int train = int(a.integer("train", 2400)), per_cell = int(a.integer("per-cell", 100));
-    const int val_cell = int(a.integer("val-per-cell", 60));
+    const int train = a.integer_int("train", 2400), per_cell = a.integer_int("per-cell", 100);
+    const int val_cell = a.integer_int("val-per-cell", 60);
     Rng rng(uint64_t(a.integer("seed", 20261017)));
     a.done(); CHECK(!dir.empty() && !corpora.empty() && !old.empty() && train > 0 && train % 12 == 0 &&
                     per_cell > 0 && val_cell > 0, "invalid curriculum arguments");

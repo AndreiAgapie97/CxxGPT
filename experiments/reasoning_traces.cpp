@@ -20,7 +20,7 @@ struct Cell {
 int main(int argc, char** argv) {
     Args a(argc, argv, 1);
     const auto ckpt = a.str("ckpt"), path = a.str("problems"), transcript = a.str("transcripts");
-    const int threads = int(a.integer("threads", 2)), batch = int(a.integer("batch", 64));
+    const int threads = a.integer_int("threads", 2), batch = a.integer_int("batch", 64);
     a.done();
     CHECK(!ckpt.empty() && !path.empty() && threads > 0 && batch > 0, "invalid trace audit arguments");
     ThreadPool pool_(threads); g_pool = &pool_;

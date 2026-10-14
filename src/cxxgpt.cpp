@@ -41,7 +41,7 @@ volatile std::sig_atomic_t g_stop = 0;
 void on_signal(int) { g_stop = 1; }
 
 int threads_arg(Args& a) {
-    return int(a.integer("threads", long(std::max(1u, std::thread::hardware_concurrency()))));
+    return a.integer_int("threads", long(std::max(1u, std::thread::hardware_concurrency())));
 }
 
 std::string read_file(const std::string& path) {
@@ -53,19 +53,19 @@ std::string read_file(const std::string& path) {
 // Model options, shared by every command that builds a fresh model.
 Config config_from_args(Args& a, int vocab) {
     Config c;
-    c.vocab = int(a.integer("vocab", vocab));
-    c.seq_len = int(a.integer("seq", 256));
-    c.d_model = int(a.integer("dim", 256));
-    c.n_layers = int(a.integer("layers", 4));
-    c.n_heads = int(a.integer("heads", 4));
-    c.ffn_hidden = int(a.integer("ffn", 0));
-    c.n_experts = int(a.integer("experts", 0));
-    c.top_k = int(a.integer("topk", 2));
-    c.expert_hidden = int(a.integer("ehidden", 0));
-    c.n_shared = int(a.integer("shared", 0));
+    c.vocab = a.integer_int("vocab", vocab);
+    c.seq_len = a.integer_int("seq", 256);
+    c.d_model = a.integer_int("dim", 256);
+    c.n_layers = a.integer_int("layers", 4);
+    c.n_heads = a.integer_int("heads", 4);
+    c.ffn_hidden = a.integer_int("ffn", 0);
+    c.n_experts = a.integer_int("experts", 0);
+    c.top_k = a.integer_int("topk", 2);
+    c.expert_hidden = a.integer_int("ehidden", 0);
+    c.n_shared = a.integer_int("shared", 0);
     c.ternary = a.flag("ternary");
     c.fp_attention = a.flag("fp-attn");
-    c.nope_every = int(a.integer("nope-every", 0));
+    c.nope_every = a.integer_int("nope-every", 0);
     return c;
 }
 
@@ -88,7 +88,7 @@ void print_config(const Config& c, const Model<float>& m) {
 
 int cmd_bpe_train(Args& a) {
     const std::string in = a.str("in"), out = a.str("out");
-    const int vocab = int(a.integer("vocab", 4096));
+    const int vocab = a.integer_int("vocab", 4096);
     const long max_bytes = a.integer("max-bytes", 200L << 20);
     a.done();
     CHECK(!in.empty() && !out.empty(), "usage: cxxgpt bpe-train --in text.txt --vocab N --out tok.bpe");
@@ -254,9 +254,9 @@ TokenData load_token_list(const std::string& spec) {
 int cmd_gen_reasoning(Args& a) {
     const std::string out = a.str("out", "data/reason");
     const long n_train = a.integer("train", 200000), n_val = a.integer("val", 2000);
-    const int per_cell = int(a.integer("test-per-cell", 40));
-    const int min_d = int(a.integer("min-diff", 1)), max_d = int(a.integer("max-diff", 3));
-    const int test_max_d = int(a.integer("test-max-diff", max_d + 1));
+    const int per_cell = a.integer_int("test-per-cell", 40);
+    const int min_d = a.integer_int("min-diff", 1), max_d = a.integer_int("max-diff", 3);
+    const int test_max_d = a.integer_int("test-max-diff", max_d + 1);
     const std::vector<std::string> tasks = split(a.str("tasks", "chain,add,mul,expr,eq,cmp"), ',');
     Formats formats;
     formats.chain_plan = a.flag("chain-plan");      // chain solutions look variables up first
@@ -435,9 +435,9 @@ int cmd_eval_reasoning(Args& a) {
     ThreadPool tp(threads_arg(a));
     g_pool = &tp;
     const std::string ckpt = a.str("ckpt", "model.ckpt"), test_path = a.str("test", "data/reason.test.txt");
-    const int batch = int(a.integer("batch", 64)), limit = int(a.integer("limit", 0));
+    const int batch = a.integer_int("batch", 64), limit = a.integer_int("limit", 0);
     const bool show = a.flag("show-failures");
-    const int max_new = int(a.integer("max-new", 200));
+    const int max_new = a.integer_int("max-new", 200);
     CHECK(max_new > 0, "--max-new must be positive");
     // As TernaryEngine runs it: the embedding (and --fp-attn attention) in
     // int8 rows.
@@ -618,19 +618,19 @@ int cmd_train(Args& a) {
         if (switch_attn) cfg.fp_attention = fp_attn;
         if (switch_nope) cfg.nope_every = nope;
     }
-    const int B = int(a.integer("batch", 16)), accum = int(a.integer("accum", 1));
-    const int Tn = std::min(cfg.seq_len, int(a.integer("seq", cfg.seq_len)));
+    const int B = a.integer_int("batch", 16), accum = a.integer_int("accum", 1);
+    const int Tn = std::min(cfg.seq_len, a.integer_int("seq", cfg.seq_len));
     const long steps = a.integer("steps", 2000), warmup = a.integer("warmup", 100);
     const double lr = a.real("lr", 1e-3), min_frac = a.real("min-lr-frac", 0.1);
     const double clip = a.real("clip", 1.0), bias_rate = a.real("bias-rate", 1e-3);
     const long seed = a.integer("seed", 1);
-    const int log_every = int(a.integer("log-every", 10)), eval_every = int(a.integer("eval-every", 200));
-    const int eval_batches = int(a.integer("eval-batches", 20)), save_every = int(a.integer("save-every", 500));
+    const int log_every = a.integer_int("log-every", 10), eval_every = a.integer_int("eval-every", 200);
+    const int eval_batches = a.integer_int("eval-batches", 20), save_every = a.integer_int("save-every", 500);
     const double time_limit = a.real("time-limit", 0) * 60.0;
     const std::string reason_path = a.str("reason-test");
     const Tokenizer tok = load_tokenizer(a.str("bpe"));
-    const int reason_every = int(a.integer("reason-every", 0)), reason_limit = int(a.integer("reason-limit", 300));
-    const int max_new = int(a.integer("max-new", 200));
+    const int reason_every = a.integer_int("reason-every", 0), reason_limit = a.integer_int("reason-limit", 300);
+    const int max_new = a.integer_int("max-new", 200);
     CHECK(max_new > 0, "--max-new must be positive");
     g_profiler.enabled = a.flag("profile");
     const bool use_gpu = a.flag("gpu"), request_fused = a.flag("fused-attn"), disable_fused = a.flag("no-fused-attn");
@@ -849,7 +849,7 @@ int cmd_sample(Args& a) {
     ThreadPool tp(threads_arg(a));
     g_pool = &tp;
     const std::string ckpt = a.str("ckpt", "model.ckpt"), prompt = a.str("prompt"), bpe = a.str("bpe");
-    const int n = int(a.integer("n", 500));
+    const int n = a.integer_int("n", 500);
     const double temp = a.real("temp", 0.8);
     const bool answer = a.flag("answer");  // stop after the "#### answer" line, as eval-reasoning does
     Rng rng(uint64_t(a.integer("seed", 1)));
@@ -900,10 +900,10 @@ int cmd_bench_infer(Args& a) {
                     "Alternates fp32/packed run order on the same forced token stream.\n");
         return 0;
     }
-    int tokens = int(a.integer("tokens", 128));
+    int tokens = a.integer_int("tokens", 128);
     const bool tokens_given = a.has("tokens");
-    const int reps = int(a.integer("reps", 7));
-    const int warmup = int(a.integer("warmup", 2));
+    const int reps = a.integer_int("reps", 7);
+    const int warmup = a.integer_int("warmup", 2);
     const std::string log_path = a.str("log");
     Config cfg = config_from_args(a, 256);
     a.done();
