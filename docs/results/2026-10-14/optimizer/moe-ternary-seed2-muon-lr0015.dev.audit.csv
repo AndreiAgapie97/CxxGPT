@@ -1,0 +1,11 @@
+checkpoint,metric,tokens,mean_loss,correct,total
+moe-ternary-seed2-muon-lr0015,all_completion,16431,0.393983255,14705,16431
+moe-ternary-seed2-muon-lr0015,step_digit,5224,0.566744530,4277,5224
+moe-ternary-seed2-muon-lr0015,step_other,5103,0.238702298,4732,5103
+moe-ternary-seed2-muon-lr0015,delimiter,3600,0.003400474,3598,3600
+moe-ternary-seed2-muon-lr0015,answer_digit,1904,1.197487141,1498,1904
+moe-ternary-seed2-muon-lr0015,answer_other,600,0.004183989,600,600
+moe-ternary-seed2-muon-lr0015,teacher_coverage,0,0,600,600
+moe-ternary-seed2-muon-lr0015,exact_answer,0,0,157,600
+moe-ternary-seed2-muon-lr0015,sampled_val_token_mean,694,0.241040027,0,0
+moe-ternary-seed2-muon-lr0015,sampled_val_legacy_batch_mean,694,0.239249105,0,0

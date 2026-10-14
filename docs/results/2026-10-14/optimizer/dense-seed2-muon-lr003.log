@@ -1,0 +1,24 @@
+model: vocab 256, seq 128, dim 128, layers 2, heads 4, dense FFN 256
+params: 0.361 M total, 0.361 M active per token
+data: 80102 train tokens, 20009 val tokens; 2 x 128 x 1 = 256 tokens per step
+step    100 | loss 2.0787 | lr 2.99e-03 | gnorm  2.539 |   14.8 ms |   17329 tok/s
+step    200 | loss 1.0137 | lr 2.95e-03 | gnorm  1.577 |   16.6 ms |   15438 tok/s
+step    300 | loss 0.8538 | lr 2.87e-03 | gnorm  2.590 |   17.6 ms |   14557 tok/s
+step    400 | loss 0.7824 | lr 2.76e-03 | gnorm  4.355 |   17.4 ms |   14712 tok/s
+step    500 | loss 0.6702 | lr 2.63e-03 | gnorm  2.433 |   16.0 ms |   16001 tok/s
+step    600 | loss 0.5556 | lr 2.47e-03 | gnorm  2.005 |   15.0 ms |   17017 tok/s
+step    700 | loss 0.4250 | lr 2.29e-03 | gnorm  4.530 |   15.0 ms |   17046 tok/s
+step    800 | loss 0.3520 | lr 2.09e-03 | gnorm  1.989 |   15.6 ms |   16387 tok/s
+step    900 | loss 0.2783 | lr 1.89e-03 | gnorm  2.266 |   17.0 ms |   15095 tok/s
+step   1000 | loss 0.2324 | lr 1.67e-03 | gnorm  1.595 |   15.6 ms |   16409 tok/s
+step   1100 | loss 0.1971 | lr 1.46e-03 | gnorm  3.509 |   16.0 ms |   15995 tok/s
+step   1200 | loss 0.1793 | lr 1.25e-03 | gnorm  3.460 |   16.9 ms |   15128 tok/s
+step   1300 | loss 0.1643 | lr 1.05e-03 | gnorm  0.917 |   16.8 ms |   15233 tok/s
+step   1400 | loss 0.1549 | lr 8.69e-04 | gnorm  1.099 |   17.9 ms |   14303 tok/s
+step   1500 | loss 0.1443 | lr 7.05e-04 | gnorm  0.524 |   16.1 ms |   15938 tok/s
+step   1600 | loss 0.1186 | lr 5.64e-04 | gnorm  0.503 |   15.5 ms |   16475 tok/s
+step   1700 | loss 0.1158 | lr 4.51e-04 | gnorm  0.528 |   13.9 ms |   18398 tok/s
+step   1800 | loss 0.1157 | lr 3.68e-04 | gnorm  1.867 |   14.6 ms |   17496 tok/s
+step   1900 | loss 0.1202 | lr 3.17e-04 | gnorm  0.534 |   14.4 ms |   17807 tok/s
+step   2000 | loss 0.1108 | val 0.1038 | lr 3.00e-04 | gnorm  0.564 |   14.5 ms |   17716 tok/s
+saved runs/reasoning-optimizer-20261014/dense-seed2-muon-lr003.ckpt at step 2000

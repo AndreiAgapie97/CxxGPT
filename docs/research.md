@@ -509,10 +509,63 @@ No environmental or multi-step reinforcement learning ran in this follow-up.
 [Capacity results](results/2026-10-14/capacity) preserve exact counts, role loss,
 hashes, transcripts, both probes and trained-checkpoint memory profiles.
 
+## Optimizer selection and independent scoring: 2026-10-14
+
+Claude's warm-start scripting and learning-rate documentation through `e5c1658`
+were merged as `58e6f7c`; the laptop's staged fp32-to-ternary workflow through
+`b7f2322` was merged as `ce4ecad`. Both merges are compatible and conflict-free.
+The native numerical code is unchanged. GCC/Clang, native/CLI, ASan/UBSan and
+TSan checks pass; the optional selection protocol has independent examples
+for median/sum/loss/ID rules, immutable manifests and non-finite rejection.
+CUDA runtime is still unavailable; the laptop workflow has not run here.
+
+`6dcb433` presets a 2x2 optimizer/learning-rate grid at the larger capacity:
+AdamW/Muon, lr 0.0015/0.003, dense/ternary MoE, three seeds, 2,000 updates,
+full labels and the same sampler windows. Six saved AdamW 0.003 checkpoints
+are reused; eighteen models train afresh. Existing capacity questions are
+used only for development selection. Both selections and all model hashes
+are frozen before final scoring: dense Muon 0.0015 and ternary MoE Muon 0.003.
+The rule uses median exact answers, sum exact, median validation loss, then
+arm ID. Muon beats AdamW in all twelve same-LR development comparisons.
+
+The new seed 20261016 final probe has 600 unique questions, excluding corpora
+and all 1,260 older test/development questions. Independent parsing confirms
+exclusion. Original train/validation still overlap by 51 questions. Final
+scores evaluate the selected recipes and original AdamW 0.003 controls:
+
+| Architecture | Original AdamW exact /600, seeds 1/2/3 | Selected Muon exact /600 | Median accuracy, original / selected |
+| --- | --- | --- | ---: |
+| Dense | 13 / 9 / 21 | 271 / 389 / 391 | 2.2% / 64.8% |
+| Ternary MoE | 8 / 18 / 64 | 353 / 341 / 328 | 3.0% / 56.8% |
+
+All twelve models still answer zero of the 200 difficulty 3 questions. Gold
+completions all fit the context. The gains are within the trained digit-length
+range; they do not establish general reasoning, correct generated intermediate
+steps, or extrapolation. Dense's final comparison changes optimizer and LR;
+MoE's holds LR fixed. Different selected recipes and three seeds do not rank
+architectures. This final probe now becomes development data and must also
+be excluded from future independent final holdouts.
+
+Muon adds five matrix orthogonalization iterations. Completed CLI wall-time
+medians at lr 0.0015 are 14.0/31.1 seconds AdamW/Muon dense and 19.5/45.3 MoE.
+These limited two-thread shared-VM observations include initialization,
+validation and saving; equal updates are not equal computation. Saved controls
+have no new wall-time measurement. One interrupted attempt has additional,
+unmeasured cost; its last logged update was 1400 and it had no saved checkpoint.
+Recovery preserves ten completed arms and verifies unchanged native hashes.
+All 24 samplers match references, frozen checkpoint hashes pass, and a completed
+recovery recheck preserves every model, audit, final transcript and selection.
+
+[Optimizer results](results/2026-10-14/optimizer) preserve the manifest,
+all development/final counts, role loss, timings, interrupted logs, exclusions,
+probe text and validation. No environmental or multi-step RL experiment ran
+in this follow-up. GPU stable loss, masked accumulation, compact Muon state
+and conditional weight buffers still require `make gpu-test` on NVIDIA hardware.
+
 ## Publishing and continuation status
 
 The local research branch preserves all earlier work and ordinary Claude
-merges through `ab1b092`. There are no unresolved merge conflicts. GitHub
+merges through `b7f2322`. There are no unresolved merge conflicts. GitHub
 reads and fetches work, but Git HTTPS still denies push with HTTP 403 and
 the GitHub app's tree-write check returns `Resource not accessible by
 integration` (403). No remote `gpt/research` branch or research PR exists.

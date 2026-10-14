@@ -36,7 +36,13 @@ questions; compute grows about 6.3x, so this is not an architecture ranking.
 CPU memory accounting separates vector payload/capacity from process RSS.
 Fp32 models drop an unused quantized copy; four pre/post CLI checkpoints are
 byte-identical. A 216-process sweep demonstrates context-cache growth,
-embedding dominance and transient construction costs. GPU runtime remains pending.
+embedding dominance and transient construction costs. GPU runtime remains pending. A
+2x2 optimizer/LR grid selects on development questions and freezes recipes
+before a fresh final probe: median exact accuracy rises from 2.2% to 64.8%
+dense and 3.0% to 56.8% ternary MoE. Every tested model still fails all
+harder digit-length questions. Muon costs more computation; these recipes
+do not establish an architecture ranking. Immutable selection, finite-score
+and interruption-recovery checks preserve the evaluation split.
 
 Claude's CUDA backend, streaming pipeline, laptop/overnight setup, Muon
 optimizer, evaluation/loading updates, and compact GPU optimizer state are

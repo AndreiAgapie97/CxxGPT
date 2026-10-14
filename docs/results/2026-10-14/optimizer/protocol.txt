@@ -1,0 +1,2 @@
+2 optimizers x lr0.0015/0.003 x dense/moe-ternary x seeds1/2/3; 2000 updates, B2/T128, dim128/layers2/heads4/FFN256/expert128/topk2/E4/shared0, full labels; warmup20 clip1 wd0.1 cosine minimum0.1; threads=2; reuse six AdamW0.003 reference checkpoints; fresh final probe seed20261016, 600 questions
+Selection: maximum median dev exact, then sum dev exact, then minimum median sampled validation loss, then arm ID. Freeze both selections before any final scoring; final compares selected recipe and original AdamW0.003.

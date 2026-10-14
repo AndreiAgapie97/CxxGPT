@@ -13,7 +13,7 @@ if [[ "${RESUME_RUN:-0}" == 1 ]]; then
     sha256sum -c "$RUN_DIR/binary-sha256.txt" > "$RUN_DIR/recovery-binaries-check.txt"
     sha256sum -c "$RUN_DIR/data-sha256.txt" > "$RUN_DIR/recovery-data-check.txt"
     awk '$2 ~ /^(src|experiments)\// {print}' "$RUN_DIR/source-sha256.txt" | sha256sum -c > "$RUN_DIR/recovery-source-check.txt"
-    sha256sum scripts/reasoning-optimizer.sh > "$RUN_DIR/recovery-driver-sha256.txt"
+    sha256sum scripts/reasoning-optimizer.sh >> "$RUN_DIR/recovery-driver-sha256.txt"
     if [[ -f "$RUN_DIR/selection.json" ]]; then
         sha256sum -c "$RUN_DIR/selection-sha256.txt"
         sha256sum -c "$RUN_DIR/checkpoints-sha256.txt"
@@ -79,7 +79,8 @@ for seed in 1 2 3; do
             ./test_training_cli same-sampler "$REFERENCE_DIR/$variant-seed$seed-large.ckpt" "$prefix.ckpt"
             printf '%s seed%s %s matched reference data RNG\n' "$variant" "$seed" "$arm" >> "$RUN_DIR/sampler-checks.txt"
             ./reasoning_audit --ckpt "$prefix.ckpt" --problems "$RUN_DIR/dev-probe.txt" \
-                --val-data "$SOURCE_DIR/reason.val.tok" --threads "$THREADS" > "$prefix.dev.audit.csv"
+                --val-data "$SOURCE_DIR/reason.val.tok" --threads "$THREADS" > "$prefix.dev.audit.csv.tmp"
+            mv "$prefix.dev.audit.csv.tmp" "$prefix.dev.audit.csv"
             printf '%s seed%s %s complete\n' "$variant" "$seed" "$arm"
         done
     done
@@ -95,10 +96,16 @@ while read -r variant selected; do
     for arm in "${TEST_ARMS[@]}"; do
         for seed in 1 2 3; do
             prefix="$RUN_DIR/$variant-seed$seed-$arm"
-            [[ -f "$prefix.final.audit.csv" ]] || ./reasoning_audit --ckpt "$prefix.ckpt" --problems "$RUN_DIR/targets/probe.txt" \
-                --val-data "$SOURCE_DIR/reason.val.tok" --threads "$THREADS" > "$prefix.final.audit.csv"
-            [[ -f "$prefix.final.eval" ]] || ./cxxgpt eval-reasoning --ckpt "$prefix.ckpt" --test "$RUN_DIR/targets/probe.txt" \
-                --threads "$THREADS" --show-failures > "$prefix.final.eval"
+            if [[ ! -f "$prefix.final.audit.csv" ]]; then
+                ./reasoning_audit --ckpt "$prefix.ckpt" --problems "$RUN_DIR/targets/probe.txt" \
+                --val-data "$SOURCE_DIR/reason.val.tok" --threads "$THREADS" > "$prefix.final.audit.csv.tmp"
+                mv "$prefix.final.audit.csv.tmp" "$prefix.final.audit.csv"
+            fi
+            if [[ ! -f "$prefix.final.eval" ]]; then
+                ./cxxgpt eval-reasoning --ckpt "$prefix.ckpt" --test "$RUN_DIR/targets/probe.txt" \
+                --threads "$THREADS" --show-failures > "$prefix.final.eval.tmp"
+                mv "$prefix.final.eval.tmp" "$prefix.final.eval"
+            fi
         done
     done
 done < "$RUN_DIR/selected.txt"

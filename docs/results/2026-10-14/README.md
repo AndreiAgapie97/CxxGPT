@@ -59,3 +59,9 @@ checks and process-counter limitations. `capacity/` records a fixed larger-model
 experiment and a second fresh 600-question probe, with strong seed variation
 and no hardest-level success for its best seed. Both development probes are
 retained as text for exclusion from future independent holdouts.
+
+`optimizer/` records a fixed optimizer/LR grid with development selection and
+an independent final probe, frozen manifests, strong in-range exact-answer
+gains, zero harder-length success, computation cost and interruption recovery.
+Its final probe is now development data too; retain and exclude all three
+600-question probe files when creating future independent final holdouts.
