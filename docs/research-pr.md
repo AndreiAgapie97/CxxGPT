@@ -66,5 +66,4 @@ Validation:
   regression fixtures; **GPU runtime assertions remain pending `make gpu-test` on NVIDIA hardware. Keep this PR
   draft until that validation is recorded.**
 
-The branch targets `main`, where Claude's current development lives. The GitHub
-default branch still points to the older inference prototype.
+The branch targets `main`, now also the GitHub default branch.

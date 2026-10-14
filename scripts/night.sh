@@ -16,8 +16,11 @@
 #   HOURS=7.5   RUN=night1 (outputs runs/$RUN.*)   DATA=data
 #   INIT: a checkpoint to start from (for example runs/night1.ckpt), with a
 #         fresh optimizer and schedule; its model replaces MODEL.
-#   TERNARY=1 (with INIT): turn the checkpoint's weights ternary from this
-#         night on (full-precision nights first, ternary ones at the end).
+#   TERNARY=1 (with INIT): turn the checkpoint's FFN weights ternary from
+#         this night on, attention staying full precision (--fp-attn: on the
+#         curriculum, ternary attention cost far more than it saves);
+#         TERNARY=all turns attention ternary too. Full-precision nights
+#         first, ternary ones at the end.
 #   MIX: the training files, comma-separated, "*N" repeats one N times;
 #        by default web text, stories, OpenMath, MetaMath and GSM8K train x4.
 # Validation is on the GSM8K test set, which training never sees: the loss
@@ -54,7 +57,12 @@ resume=()
 # (a --ternary in MODEL must not switch it by accident: that is TERNARY=1).
 if [ -n "${INIT:-}" ]; then
   model=()
-  [ "${TERNARY:-0}" = 1 ] && model=(--ternary)
+  case "${TERNARY:-0}" in
+    1) model=(--ternary --fp-attn) ;;
+    all) model=(--ternary --fp-attn 0) ;;
+    0) ;;
+    *) echo "TERNARY must be 0, 1 or all"; exit 1 ;;
+  esac
 else
   read -ra model <<< "$MODEL"
 fi

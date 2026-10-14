@@ -7,8 +7,12 @@
 // exact fp32 matmuls the only differences are summation order; ternary
 // models also see rare int8 rounding flips, so their tolerance is looser.
 // Muon runs the same comparison on the dense and MoE models. Some runs clip
-// the gradient (to half its norm), as training with --clip does. A last check
-// trains on the GPU alone, with TF32, until a toy pattern is learned.
+// the gradient (to half its norm), as training with --clip does. Attention
+// runs on the fused kernels (attention.cuh), except in one run that checks
+// the cuBLAS path (--no-fused-attn). Two runs check --fp-attn and
+// --nope-every. One run multiplies in bf16, against looser tolerances. A
+// last check trains on the GPU alone, with TF32 and with bf16, until a toy
+// pattern is learned.
 #include <cmath>
 #include <cstdio>
 #include <string>
@@ -42,10 +46,18 @@ void random_batch(Rng& rng, int V, int N, std::vector<int>& tok, std::vector<int
     }
 }
 
-// clip > 0: clip the gradient to that fraction of its norm, scaling it on the
-// GPU the way GpuBackend does.
-void compare(const char* name, const Config& cfg, double tol_loss, double tol_grad, double tol_param,
-             bool muon = false, double clip = 0) {
+struct Run {
+    bool muon = false;
+    // > 0: clip the gradient to that fraction of its norm, scaling it on
+    // the GPU the way GpuBackend does.
+    double clip = 0;
+    bool fused = true;  // the GPU's fused attention kernels
+    Matmul matmul = Matmul::fp32;
+};
+
+void compare(const char* name, const Config& cfg, double tol_loss, double tol_grad, double tol_param, Run run = {}) {
+    const bool muon = run.muon;
+    const double clip = run.clip;
     Model<float> cpu(cfg);
     cpu.init(5);
     Rng rng(6);
@@ -53,7 +65,7 @@ void compare(const char* name, const Config& cfg, double tol_loss, double tol_gr
         for (auto& b : layer) b = float(0.01 * rng.normal());
     AdamW opt;
     opt.muon = muon;
-    GpuTrainer gpu(cfg, cpu.infos, /*tf32=*/false);
+    GpuTrainer gpu(cfg, cpu.infos, run.matmul, run.fused);
     gpu.set_params(cpu.params.data());
     gpu.set_adam_state(0, nullptr, nullptr);
     gpu.set_router_bias(cpu.router_bias);
@@ -99,7 +111,7 @@ void compare(const char* name, const Config& cfg, double tol_loss, double tol_gr
     EXPECT(gstep == opt.step && dm <= 3 * tol_grad && dv <= 3 * tol_grad,
            "%s: optimizer state differs from the CPU's (step %ld vs %ld, m by %g, v by %g)", name, gstep, opt.step,
            dm, dv);
-    GpuTrainer gpu2(cfg, cpu.infos, /*tf32=*/false);
+    GpuTrainer gpu2(cfg, cpu.infos, run.matmul, run.fused);
     gpu2.set_adam_state(gstep, gm.data(), gv.data());
     gpu2.set_muon(muon, opt.muon_momentum, opt.muon_steps);
     gpu2.get_adam_state(&gstep2, gm2.data(), gv2.data());
@@ -119,15 +131,21 @@ void compare(const char* name, const Config& cfg, double tol_loss, double tol_gr
 // objective on CUDA too. Runtime validation requires physical GPU hardware.
 void masked_accumulation() {
     const auto group = masked_accumulation_fixture();
-    for (int variant = 0; variant < 4; ++variant) {
+  for (bool fused : {false, true}) {
+    for (int variant = 0; variant < 8; ++variant) {
         Config cfg;
         cfg.vocab = 13; cfg.seq_len = 8; cfg.d_model = 32;
         cfg.n_heads = 2; cfg.n_layers = 1; cfg.ffn_hidden = 48;
-        cfg.ternary = variant % 2;
-        if (variant >= 2) { cfg.n_experts = 4; cfg.top_k = 2; cfg.expert_hidden = 24; cfg.n_shared = 1; }
+        cfg.ternary = variant % 2 || variant == 4;
+        cfg.fp_attention = variant == 4 || variant == 5;
+        if (variant >= 4) cfg.n_layers = 2;
+        if (variant >= 5) cfg.nope_every = variant == 6 ? 1 : 2;
+        if (variant == 2 || variant == 3 || variant == 5 || variant == 7) {
+            cfg.n_experts = 4; cfg.top_k = 2; cfg.expert_hidden = 24; cfg.n_shared = 1;
+        }
         Model<float> cpu(cfg);
         cpu.init(57);
-        GpuTrainer gpu(cfg, cpu.infos, /*tf32=*/false);
+        GpuTrainer gpu(cfg, cpu.infos, Matmul::fp32, fused);
         gpu.set_params(cpu.params.data());
         cpu.zero_grad();
         const double lc = cpu.forward(group.inputs.data(), group.targets.data(), 4, 8, true);
@@ -146,18 +164,19 @@ void masked_accumulation() {
                    variant, p.name.c_str(), d);
             worst = std::max(worst, d);
         }
-        std::printf("  variant %d masked GPU accumulation: loss difference %.1e gradient %.1e\n",
-                    variant, std::abs(lc - lg), worst);
+        std::printf("  variant %d masked GPU accumulation, fused=%d: loss difference %.1e gradient %.1e\n",
+                    variant, int(fused), std::abs(lc - lg), worst);
         auto empty = group;
         std::fill(empty.targets.begin(), empty.targets.end(), -1); empty.refresh_counts();
         EXPECT(accumulated_backward(gpu, empty) == 0, "empty GPU accumulated loss nonzero");
         gpu.get_grads(grad.data());
         for (float g : grad) EXPECT(g == 0, "empty GPU group retained stale gradient");
     }
+  }
 }
 
-// The GPU alone, with TF32, learns a repeating sequence.
-void learns_pattern(bool muon) {
+// The GPU alone learns a repeating sequence.
+void learns_pattern(bool muon, Matmul matmul = Matmul::tf32) {
     Config cfg;
     cfg.vocab = 64;
     cfg.seq_len = 32;
@@ -169,7 +188,7 @@ void learns_pattern(bool muon) {
     cfg.ternary = true;
     Model<float> host(cfg);
     host.init(7);
-    GpuTrainer gpu(cfg, host.infos, /*tf32=*/true);
+    GpuTrainer gpu(cfg, host.infos, matmul);
     gpu.set_params(host.params.data());
     gpu.set_muon(muon);
     const int B = 8, N = B * cfg.seq_len;
@@ -188,7 +207,8 @@ void learns_pattern(bool muon) {
         gpu.adamw_step(3e-3, 0.9, 0.95, 1e-8, 0.0, norm > 1.0 ? 1.0 / norm : 1.0);
     }
     const char* opt = muon ? "Muon" : "AdamW";
-    std::printf("  learns pattern (%s): loss %.3f -> %.3f\n", opt, first, last);
+    const char* mm = matmul == Matmul::bf16 ? "bf16" : matmul == Matmul::fp32 ? "fp32" : "tf32";
+    std::printf("  learns pattern (%s, %s): loss %.3f -> %.3f\n", opt, mm, first, last);
     EXPECT(last < 0.1 * first, "GPU training with %s did not learn the pattern: %.3f -> %.3f", opt, first, last);
 }
 
@@ -227,6 +247,45 @@ void extreme_cross_entropy() {
     std::printf("  extreme cross-entropy: CPU %.1f GPU %.1f reference %.1f\n", lc, lg, ref);
 }
 
+// Profiling names the parts of a step, with times from CUDA events.
+void profile_regions() {
+    Config cfg;
+    cfg.vocab = 64;
+    cfg.seq_len = 32;
+    cfg.d_model = 64;
+    cfg.n_layers = 2;
+    cfg.n_heads = 2;
+    cfg.n_experts = 4;
+    cfg.top_k = 2;
+    cfg.ternary = true;
+    Model<float> host(cfg);
+    host.init(8);
+    GpuTrainer gpu(cfg, host.infos);
+    gpu.set_params(host.params.data());
+    gpu.set_profile(true);
+    gpu.set_muon(true);
+    const int B = 2, N = B * cfg.seq_len;
+    std::vector<int> tok(N), tgt(N);
+    for (int n = 0; n < N; ++n) tok[n] = tgt[n] = n % cfg.vocab;
+    gpu.zero_grad();
+    gpu.forward(tok.data(), tgt.data(), B, cfg.seq_len, true);
+    gpu.backward(1.0);
+    gpu.adamw_step(1e-3, 0.9, 0.95, 1e-8, 0.0, 1.0);
+    const auto prof = gpu.take_profile();
+    double total = 0;
+    std::string names;
+    for (const auto& [name, s] : prof) {
+        EXPECT(s >= 0 && s < 10, "profile: %s took %g s", name.c_str(), s);
+        total += s;
+        names += " [" + name + "]";
+    }
+    for (const char* want : {"matmul fwd", "matmul bwd", "attention fwd", "attention bwd", "moe routing",
+                             "output layer and loss", "muon", "adamw", "ternary weights"})
+        EXPECT(names.find("[" + std::string(want) + "]") != std::string::npos, "profile has no '%s' part", want);
+    EXPECT(gpu.take_profile().empty(), "take_profile did not start over");
+    std::printf("  profile: %zu parts, %.2f ms in all\n", prof.size(), total * 1e3);
+}
+
 }  // namespace
 
 int main() {
@@ -243,6 +302,21 @@ int main() {
     dense.n_layers = 2;
     dense.n_heads = 4;
     compare("dense", dense, 1e-5, 1e-4, 1e-4);
+    compare("dense, cuBLAS attention", dense, 1e-5, 1e-4, 1e-4, {.fused = false});
+    // bf16 keeps 8 significant bits of each input: about 4e-3 apart per
+    // product, so a looser check that nothing else differs.
+    compare("dense bf16", dense, 1e-2, 5e-2, 5e-2, {.matmul = Matmul::bf16});
+
+    // Fused attention over several tiles of rows (70 tokens), and at its
+    // largest head size, which needs more than 48 KB of shared memory.
+    Config wide = dense;
+    wide.seq_len = 70;
+    wide.d_model = 128;
+    wide.n_heads = 2;
+    compare("heads of 64", wide, 1e-5, 1e-4, 1e-4);
+    wide.seq_len = 40;
+    wide.n_heads = 1;
+    compare("head of 128", wide, 1e-5, 1e-4, 1e-4);
 
     Config tern = dense;
     tern.ternary = true;
@@ -258,19 +332,30 @@ int main() {
     Config moe1 = moe;
     moe1.top_k = 1;
     moe1.n_shared = 0;
-    compare("moe top-1", moe1, 1e-5, 1e-4, 1e-4, false, 0.5);
+    compare("moe top-1", moe1, 1e-5, 1e-4, 1e-4, {.clip = 0.5});
 
     Config ours = moe;
     ours.ternary = true;
     compare("ternary moe", ours, 1e-3, 3e-2, 1e-2);
 
+    // Ternary FFN with full-precision attention (--fp-attn), and layers
+    // without RoPE (--nope-every 2: the second of every two).
+    Config fpa = ours;
+    fpa.fp_attention = true;
+    compare("ternary moe, fp attention", fpa, 1e-3, 3e-2, 1e-2);
+    Config nope = dense;
+    nope.nope_every = 2;
+    compare("dense, half NoPE", nope, 1e-5, 1e-4, 1e-4);
+
     // Muon moves the weights about as much as the gradients differ, ten
     // times more than AdamW does, hence the looser weight tolerance.
-    compare("dense muon", dense, 1e-5, 1e-4, 1e-3, true);
-    compare("moe muon", moe, 1e-5, 1e-4, 1e-3, true, 0.5);
+    compare("dense muon", dense, 1e-5, 1e-4, 1e-3, {.muon = true});
+    compare("moe muon", moe, 1e-5, 1e-4, 1e-3, {.muon = true, .clip = 0.5});
 
     learns_pattern(false);
     learns_pattern(true);
+    learns_pattern(false, Matmul::bf16);
+    profile_regions();
     if (g_failures) return 1;
     std::printf("all passed\n");
     return 0;

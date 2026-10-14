@@ -135,6 +135,13 @@ RUN=night2 INIT=runs/night1.ckpt MIX="..." TOKS=... BATCH=... ACCUM=... scripts/
 The model trains in full precision first, and the last night or two
 switch it to ternary, which is what our kernels run: `TERNARY=1` with
 `INIT`, and the ternary row's `TOKS`, `BATCH` and `ACCUM` from the probe.
+`TERNARY=1` keeps attention in full precision (`--fp-attn`; on the
+curriculum ternary attention cost 9.5 points of accuracy, README "Ternary
+FFN, full-precision attention"); `TERNARY=all` makes it ternary too.
+On `gpt/research`, the latter explicitly clears a saved hybrid flag, so it
+also works when `INIT` is a hybrid checkpoint. CPU model sampling supports
+hybrid checkpoints; the packed bitplane engine currently requires all-ternary
+attention and FFNs.
 On the curriculum, switching for the last third of training cost half as
 much as training ternary throughout (README, "Full precision first,
 ternary at the end").
@@ -143,3 +150,38 @@ RUN=night5 INIT=runs/night4.ckpt TERNARY=1 TOKS=... BATCH=... ACCUM=... scripts/
 ```
 CPU-scale experiments and engine work continue on the cloud VM during the
 day.
+
+### Trying the faster GPU code (branch `claude/cpp-ai-model-j4lk16`)
+
+Two GPU speed changes wait on this branch until the laptop has tested them,
+so `main` stays what the nights run:
+- fused attention (on by default here; `--no-fused-attn` goes back): the
+  attention weights are never stored, which saves about 1.2 GB of GPU
+  memory at the night-1 size and leaves room for a larger batch or model;
+- `--matmul bf16`: matrix products on the tensor cores at twice the TF32
+  rate, with coarser rounding of each input; it is only worth having if
+  the probe shows it faster.
+
+`gpt/research` integrates these experimental implementations too, including
+GPU hybrid attention and NoPE, but keeps cuBLAS attention as its default
+until NVIDIA runtime checks pass. On that branch, opt in with `--fused-attn`
+and compare `GPU="--gpu --fused-attn" scripts/probe.sh` with the default
+cuBLAS run. `--no-fused-attn` and the earlier `--no-tf32` precision alias remain
+accepted. Run `make gpu-test` before relying on any of the new GPU paths.
+
+Before a night (about 25 minutes), in a second clone so the main one is
+untouched:
+```sh
+git clone -b claude/cpp-ai-model-j4lk16 https://github.com/AndreiAgapie97/CxxGPT.git ~/CxxGPT-fast
+cd ~/CxxGPT-fast && make gpu && ./test_gpu 2>&1 | tee test-gpu.txt   # must end with "all passed"
+GPU="--gpu --no-fused-attn" scripts/probe.sh 2>&1 | tee probe-cublas-attn.txt
+scripts/probe.sh 2>&1 | tee probe-fused.txt
+GPU="--gpu --matmul bf16" scripts/probe.sh 2>&1 | tee probe-bf16.txt
+./cxxgpt-gpu train --gpu --profile --data data/reason.train.tok --vocab 16384 --seq 512 \
+  --batch 8 --accum 16 --steps 10 --warmup 5 --eval-every 0 --save-every 0 --out /tmp/profile.ckpt \
+  --muon --dim 768 --layers 12 --heads 12 --experts 8 --topk 2 2>&1 | tail -25 | tee profile.txt
+```
+The last command shows where a training step spends its GPU time (if it
+runs out of memory, use `--batch 4 --accum 32`). Paste the five outputs in
+the morning: if the tests pass and the numbers are better, the branch joins
+`main`, and the profile says what to speed up next.

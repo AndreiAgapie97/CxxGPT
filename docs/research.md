@@ -1,8 +1,8 @@
 # Native C++ research log
 
 Research work lives on `gpt/research`, based on Claude's `main` (initial
-baseline `62b8b87`). The GitHub default branch currently points to the older
-inference prototype. The user's branch instruction takes precedence over
+baseline `62b8b87`). The GitHub default branch and PR target are now `main`
+(verified 2026-10-14 after the owner's change). The user's branch instruction takes precedence over
 CLAUDE.md's instruction to commit to `main`. Published research commits are
 integrated with ordinary merges; neither branch is force-pushed.
 
@@ -630,10 +630,36 @@ independent Python standard-library checker validates split exclusions,
 arithmetic answers, budgets and generated native counts; model execution
 itself remains native C++. Results will be recorded after the fixed run.
 
+## CUDA side-branch integration and warm-start precision
+
+Claude's active side branch through `892a286` adds fused causal attention,
+bf16 linear matmuls, CUDA-event profiling, GPU hybrid attention/NoPE, and
+hybrid ternary nights. The ordinary merge preserves stable GPU loss and
+token-weighted accumulation, all research native tests, and both GPU test
+sets. On this branch fused attention remains explicit `--fused-attn` until
+NVIDIA runtime validation; cuBLAS attention is the default. The earlier
+`--no-tf32` flag and boolean GPU constructor remain compatible. No CUDA
+speed, GPU memory reduction or real-device correctness is measured here.
+
+The attention CPU emulator checks the actual fused kernel code against
+double forward/log-sum-exp and Q/K/V gradients across five shapes, including
+partial tiles and head size 128. Its error helper now rejects NaN/infinity
+instead of silently treating them as zero error. GPU masked accumulation
+fixtures cover eight architectures/configurations with fused and unfused
+attention; runtime assertions remain pending hardware.
+
+Integration also exposes a warm-start issue: a saved hybrid flag could not
+be cleared, so `TERNARY=all` after a hybrid night still retained fp attention.
+Explicit `--fp-attn 0` now overrides it on `--init`, and the all-ternary night
+uses that flag. Explicit NoPE overrides are supported on warm starts too;
+absent flags retain the saved configuration and resume remains authoritative.
+CLI fixtures verify unchanged master weights and fresh optimizer/sampler
+state for both conversions, and reject contradictory precision/fused flags.
+
 ## Publishing and continuation status
 
 The local research branch preserves all earlier work and ordinary Claude
-merges through `cf183cd`. There are no unresolved merge conflicts. GitHub
+merges through main `cf183cd` and active Claude branch `892a286`. There are no unresolved merge conflicts. GitHub
 reads and fetches work, but Git HTTPS still denies push with HTTP 403 and
 the GitHub app's tree-write check returns `Resource not accessible by
 integration` (403). No remote `gpt/research` branch or research PR exists.

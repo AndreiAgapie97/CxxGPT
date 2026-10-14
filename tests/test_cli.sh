@@ -80,6 +80,18 @@ printf 'CLI: benchmark emits alternating raw trials and rejects zero repeats\n'
 ./test_training_cli fresh-ternary "$TEST_DIR/model.ckpt" "$TEST_DIR/fresh-ternary.ckpt"
 "$CXXGPT" train "${COMMON[@]}" --steps 0 --ternary --fp-attn --init "$TEST_DIR/model.ckpt" --out "$TEST_DIR/fresh-hybrid.ckpt" > "$TEST_DIR/init-hybrid.log"
 ./test_training_cli fresh-hybrid "$TEST_DIR/model.ckpt" "$TEST_DIR/fresh-hybrid.ckpt"
+"$CXXGPT" train "${COMMON[@]}" --steps 0 --ternary --fp-attn 0 --init "$TEST_DIR/fresh-hybrid.ckpt" --out "$TEST_DIR/fresh-all.ckpt" > "$TEST_DIR/init-all.log"
+./test_training_cli fresh-all-ternary "$TEST_DIR/fresh-hybrid.ckpt" "$TEST_DIR/fresh-all.ckpt"
+"$CXXGPT" train "${COMMON[@]}" --steps 0 --nope-every 1 --init "$TEST_DIR/model.ckpt" --out "$TEST_DIR/fresh-nope.ckpt" > "$TEST_DIR/init-nope.log"
+./test_training_cli fresh-nope "$TEST_DIR/model.ckpt" "$TEST_DIR/fresh-nope.ckpt"
+for options in '--matmul invalid' '--no-tf32 --matmul bf16' '--fused-attn --no-fused-attn'; do
+    status=0
+    # Fixed literal cases, no user-supplied option splitting.
+    # shellcheck disable=SC2086
+    "$CXXGPT" train "${COMMON[@]}" $options > "$TEST_DIR/precision-invalid.log" 2>&1 || status=$?
+    [[ $status == 1 ]] && grep -q 'check failed' "$TEST_DIR/precision-invalid.log"
+done
+"$CXXGPT" train "${COMMON[@]}" --steps 0 --no-tf32 --out "$TEST_DIR/legacy-precision.ckpt" > "$TEST_DIR/legacy-precision.log"
 status=0
 ./test_training_cli same-sampler "$TEST_DIR/model.ckpt" "$TEST_DIR/fresh.ckpt" > "$TEST_DIR/rng-different.log" 2>&1 || status=$?
 [[ "$status" == 1 ]] && grep -q 'different samples' "$TEST_DIR/rng-different.log"

@@ -521,12 +521,14 @@ struct GpuBackend : Backend {
     Model<float>& model;
     AdamW& opt;
     GpuTrainer gpu;
-    GpuBackend(Model<float>& m, AdamW& o, bool tf32) : model(m), opt(o), gpu(m.cfg, m.infos, tf32) {
+    GpuBackend(Model<float>& m, AdamW& o, Matmul matmul, bool fused_attn)
+        : model(m), opt(o), gpu(m.cfg, m.infos, matmul, fused_attn) {
         gpu.set_params(model.params.data());
         const bool has_state = opt.m.size() == model.params.size();
         gpu.set_adam_state(opt.step, has_state ? opt.m.data() : nullptr, has_state ? opt.v.data() : nullptr);
         gpu.set_router_bias(model.router_bias);
         gpu.set_muon(opt.muon, opt.muon_momentum, opt.muon_steps);
+        gpu.set_profile(g_profiler.enabled);
     }
     double forward(const int* inp, const int* tgt, int B, int Tn, bool training) override {
         return gpu.forward(inp, tgt, B, Tn, training);
@@ -539,6 +541,9 @@ struct GpuBackend : Backend {
         const double scale = max_norm > 0 && norm > max_norm ? double(float(max_norm / norm)) : 1.0;
         gpu.adamw_step(lr, opt.beta1, opt.beta2, opt.eps, opt.weight_decay, scale);
         ++opt.step;
+        // GPU time per part of the step (evaluation passes included).
+        if (g_profiler.enabled)
+            for (const auto& [name, seconds] : gpu.take_profile()) g_profiler.add(name.c_str(), seconds);
         return norm;
     }
     double balance(double rate) override {
@@ -580,7 +585,7 @@ int cmd_train(Args& a) {
             "        --bpe tok.bpe (the tokenizer the data was made with, for --reason-test)\n"
             "model:  --seq 256 --dim 256 --layers 4 --heads 4 --ffn 0(auto)\n"
             "        --experts 0 --topk 2 --ehidden 0(auto) --shared 0 --ternary\n"
-            "        --fp-attn (with --ternary: attention stays full precision)\n"
+            "        --fp-attn (with --ternary: attention stays full precision; --fp-attn 0 clears it on --init)\n"
             "        --nope-every 0 (N: every Nth layer has no position encoding; 1: none has)\n"
             "train:  --batch 16 --accum 1 --steps 2000 --lr 1e-3 --min-lr-frac 0.1\n"
             "        --warmup 100 --wd 0.1 --clip 1.0 --bias-rate 1e-3 --seed 1\n"
@@ -590,7 +595,10 @@ int cmd_train(Args& a) {
             "output: --out model.ckpt --resume --log FILE.csv --log-every 10\n"
             "        --eval-every 200 --eval-batches 20 --save-every 500\n"
             "        --time-limit MINUTES --threads N --profile\n"
-            "gpu:    --gpu (train on the GPU; needs cxxgpt-gpu, from make gpu) --no-tf32 (exact fp32 matmuls)\n"
+            "gpu:    --gpu (train on the GPU; needs cxxgpt-gpu, from make gpu)\n"
+            "        --matmul tf32 (tensor cores; fp32: exact, slower; bf16: coarser, maybe faster)\n"
+            "        --no-tf32 is an alias for fp32; --fused-attn opts into experimental kernels\n"
+            "        default attention uses cuBLAS until NVIDIA runtime validation\n"
             "reason: --reason-test FILE --reason-every STEPS --reason-limit 300\n"
             "Ctrl-C saves a checkpoint and stops; --resume continues from --out, and\n"
             "takes precedence over --init once --out exists.\n");
@@ -615,9 +623,12 @@ int cmd_train(Args& a) {
         // weights ternary from here on: the same weights, used differently
         // (and --fp-attn keeps attention in full precision).
         const bool to_ternary = cfg.ternary, fp_attn = cfg.fp_attention;
+        const bool switch_attn = a.has("fp-attn"), switch_nope = a.has("nope-every");
+        const int nope = cfg.nope_every;
         cfg = peek_checkpoint_config(init);
         cfg.ternary = cfg.ternary || to_ternary;
-        cfg.fp_attention = cfg.fp_attention || fp_attn;
+        if (switch_attn) cfg.fp_attention = fp_attn;
+        if (switch_nope) cfg.nope_every = nope;
     }
     const int B = int(a.integer("batch", 16)), accum = int(a.integer("accum", 1));
     const int Tn = std::min(cfg.seq_len, int(a.integer("seq", cfg.seq_len)));
@@ -632,7 +643,13 @@ int cmd_train(Args& a) {
     const Tokenizer tok = load_tokenizer(a.str("bpe"));
     const int reason_every = int(a.integer("reason-every", 0)), reason_limit = int(a.integer("reason-limit", 300));
     g_profiler.enabled = a.flag("profile");
-    const bool use_gpu = a.flag("gpu"), tf32 = !a.flag("no-tf32");
+    const bool use_gpu = a.flag("gpu"), request_fused = a.flag("fused-attn"), disable_fused = a.flag("no-fused-attn");
+    CHECK(!request_fused || !disable_fused, "choose only one of --fused-attn and --no-fused-attn");
+    const bool fused_attn = request_fused;
+    const bool no_tf32 = a.flag("no-tf32");
+    const std::string matmul = a.str("matmul", no_tf32 ? "fp32" : "tf32");
+    CHECK(!no_tf32 || matmul == "fp32", "--no-tf32 conflicts with --matmul %s", matmul.c_str());
+    CHECK(matmul == "fp32" || matmul == "tf32" || matmul == "bf16", "--matmul takes fp32, tf32 or bf16");
     AdamW opt;
     opt.weight_decay = a.real("wd", 0.1);
     opt.muon = a.flag("muon");
@@ -655,10 +672,12 @@ int cmd_train(Args& a) {
     std::unique_ptr<Backend> backend;
     if (use_gpu) {
 #ifdef CXXGPT_CUDA
-        backend = std::make_unique<GpuBackend>(model, opt, tf32);
-        std::printf("gpu: %s, %s matmuls\n", GpuTrainer::device_name().c_str(), tf32 ? "TF32" : "fp32");
+        const Matmul mm = matmul == "fp32" ? Matmul::fp32 : matmul == "bf16" ? Matmul::bf16 : Matmul::tf32;
+        backend = std::make_unique<GpuBackend>(model, opt, mm, fused_attn);
+        std::printf("gpu: %s, %s matmuls, %s attention\n", GpuTrainer::device_name().c_str(), matmul.c_str(),
+                    fused_attn ? "fused" : "cuBLAS");
 #else
-        (void)tf32;
+        (void)fused_attn;
         CHECK(false, "this cxxgpt was built without CUDA; use cxxgpt-gpu (make gpu)");
 #endif
     } else {

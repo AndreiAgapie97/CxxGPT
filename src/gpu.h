@@ -5,10 +5,18 @@
 // checkpoint moves freely between CPU and GPU, and the CPU's evaluation,
 // sampling and ternary inference engine all work on GPU-trained weights.
 //
-// Everything stays in fp32. Matrix products go through cuBLAS; with tf32 on
-// (the default) they use TF32 tensor cores, about 10 significant bits per
-// product, which is the usual trade for training speed. tf32 = false gives
-// plain fp32, which the tests use to compare against the CPU engine.
+// Everything is stored in fp32. Matrix products go through cuBLAS, with fp32
+// inputs, outputs and sums; Matmul says how the inputs are multiplied:
+// - fp32: exactly, which the tests use to compare against the CPU engine;
+// - tf32 (the default): on the tensor cores, each input rounded to 11
+//   significant bits, the usual trade for training speed;
+// - bf16: on the tensor cores at twice tf32's rate (RTX 40xx), each input
+//   rounded to 8 significant bits. The rounding happens inside cuBLAS, so
+//   whether it is faster overall is for the GPU to show (scripts/probe.sh).
+//
+// Fused attention (attention.cuh) is opt-in until NVIDIA runtime validation.
+// It never stores the Tn x Tn matrix of attention weights; the default
+// retains cuBLAS products through that matrix and supplies a second reference.
 //
 // This header is plain C++, so the rest of the code (built by g++ or
 // clang++) can use the GPU without including any CUDA header.
@@ -17,13 +25,20 @@
 #include <cstddef>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "config.h"
 
+enum class Matmul { fp32, tf32, bf16 };
+
 class GpuTrainer {
 public:
-    GpuTrainer(const Config& cfg, const std::vector<ParamInfo>& infos, bool tf32 = true);
+    GpuTrainer(const Config& cfg, const std::vector<ParamInfo>& infos, Matmul matmul = Matmul::tf32,
+               bool fused_attention = false);
+    // Preserve the earlier precision-selector API and its cuBLAS attention.
+    GpuTrainer(const Config& cfg, const std::vector<ParamInfo>& infos, bool tf32)
+        : GpuTrainer(cfg, infos, tf32 ? Matmul::tf32 : Matmul::fp32, false) {}
     ~GpuTrainer();
     GpuTrainer(const GpuTrainer&) = delete;
     GpuTrainer& operator=(const GpuTrainer&) = delete;
@@ -55,6 +70,13 @@ public:
     void set_muon(bool on, double momentum = 0.95, int ns_steps = 5);
     // Tokens routed to each expert since the last call, [layer][expert].
     std::vector<std::vector<double>> take_expert_load();
+
+    // Profiling, off by default: the GPU time of each part of the step
+    // (attention, matrix products, MoE routing, optimizer, ...), measured
+    // with CUDA events. take_profile returns seconds per part since its last
+    // call.
+    void set_profile(bool on);
+    std::vector<std::pair<std::string, double>> take_profile();
 
     size_t num_params() const;
     size_t device_bytes() const;  // memory this trainer holds on the GPU

@@ -4,6 +4,7 @@
 #include <cstring>
 #include <thread>
 
+#include "test_attention.h"
 #include "test_model.h"
 #include "test_memory.h"
 #include "test_ops.h"
@@ -36,6 +37,7 @@ int main(int argc, char** argv) {
         {"train", test_train},
         {"optim", test_optim},
         {"generated traces", test_reasoning_traces},
+        {"attention", test_attention},
     };
     for (auto& s : suites) {
         const int before = g_failures;
