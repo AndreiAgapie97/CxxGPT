@@ -315,6 +315,7 @@ inline const std::vector<std::string>& reasoning_tasks() {
 }
 
 inline Problem make_problem(const std::string& task, int difficulty, Rng& rng, const Formats& f = {}) {
+    CHECK(difficulty >= 1 && difficulty <= 5, "reasoning difficulty must be in [1,5]");
     using namespace reasoning_detail;
     if (task == "chain") return chain(rng, difficulty, f.chain_plan);
     if (task == "add") return add(rng, difficulty);

@@ -47,6 +47,16 @@ status=0
 [[ "$status" == 1 ]] && grep -q 'one-logit softmax has zero task gradient' "$TEST_DIR/top1.log"
 
 "$CXXGPT_TRAINING_CLI" generate "$TEST_DIR"
+for options in '--min-diff 4 --max-diff 2' '--max-diff 10' '--test-max-diff 17' '--test-per-cell 0'; do
+    status=0
+    "$CXXGPT" gen-reasoning --out "$TEST_DIR/invalid-reason" $options --train 0 --val 0 \
+        > "$TEST_DIR/invalid-reason.log" 2>&1 || status=$?
+    [[ "$status" == 1 ]] && grep -q 'check failed' "$TEST_DIR/invalid-reason.log"
+done
+status=0
+"$CXXGPT" gen-reasoning --out "$TEST_DIR/exhausted" --tasks mul --min-diff 1 --max-diff 1 \
+    --test-max-diff 1 --test-per-cell 721 --train 0 --val 0 > "$TEST_DIR/exhausted.log" 2>&1 || status=$?
+[[ "$status" == 1 ]] && grep -q 'question domain exhausted' "$TEST_DIR/exhausted.log"
 for batch in 0 -1; do
     status=0
     "$CXXGPT" eval-reasoning --ckpt "$TEST_DIR/audit.ckpt" --test "$TEST_DIR/audit.txt" --batch "$batch" \

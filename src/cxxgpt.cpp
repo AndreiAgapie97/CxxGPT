@@ -264,7 +264,7 @@ int cmd_gen_reasoning(Args& a) {
     const long n_train = a.integer("train", 200000), n_val = a.integer("val", 2000);
     const int per_cell = a.integer_int("test-per-cell", 40);
     const int min_d = a.integer_int("min-diff", 1), max_d = a.integer_int("max-diff", 3);
-    const int test_max_d = a.integer_int("test-max-diff", max_d + 1);
+    const int test_max_d = a.integer_int("test-max-diff", max_d < 5 ? max_d+1 : 5);
     const std::vector<std::string> tasks = split(a.str("tasks", "chain,add,mul,expr,eq,cmp"), ',');
     Formats formats;
     formats.chain_plan = a.flag("chain-plan");      // chain solutions look variables up first
@@ -273,6 +273,9 @@ int cmd_gen_reasoning(Args& a) {
     const std::string bpe = a.str("bpe");
     a.done();
     const Tokenizer tok = load_tokenizer(bpe);
+    CHECK(min_d >= 1 && min_d <= max_d && max_d <= 5 && test_max_d >= min_d && test_max_d <= 5,
+          "reasoning difficulties must be ordered within [1,5]");
+    CHECK(per_cell > 0 && n_train >= 0 && n_val >= 0, "reasoning split counts must be nonnegative; test-per-cell positive");
     for (const auto& t : tasks) make_problem(t, 1, rng);  // rejects unknown names
 
     // Test set first: every (task, difficulty) cell, including one level
@@ -280,20 +283,25 @@ int cmd_gen_reasoning(Args& a) {
     std::vector<Problem> test;
     std::set<std::string> held_out;
     for (const auto& t : tasks)
-        for (int d = min_d; d <= test_max_d; ++d)
+        for (int d = min_d; d <= test_max_d; ++d) {
+            int tries = 0;
             for (int i = 0; i < per_cell;) {
+                CHECK(++tries <= 1000000, "question domain exhausted while preparing %s d=%d", t.c_str(), d);
                 Problem p = make_problem(t, d, rng, formats);
                 if (!held_out.insert(p.question).second) continue;  // no duplicates
                 test.push_back(std::move(p));
                 ++i;
             }
+        }
     save_problems(out + ".test.txt", test);
 
     auto make_tokens = [&](long n, const std::string& path) {
         TokenData d;
         d.vocab = uint32_t(tok.vocab_size());
         long skipped = 0;
+        int tries = 0;
         for (long i = 0; i < n;) {
+            CHECK(++tries <= 1000000, "question domain exhausted while preparing training/validation");
             const std::string& t = tasks[rng.below(tasks.size())];
             const Problem p =
                 make_problem(t, min_d + int(rng.below(uint64_t(max_d - min_d + 1))), rng, formats);
@@ -303,6 +311,7 @@ int cmd_gen_reasoning(Args& a) {
             }
             append_problem(d, p, tok);
             ++i;
+            tries = 0;
         }
         d.save(path);
         std::printf("%s: %ld problems, %zu tokens (%ld test duplicates skipped)\n", path.c_str(), n,
