@@ -34,6 +34,13 @@ status=0
 [[ "$status" == 1 ]] && grep -q 'one-logit softmax has zero task gradient' "$TEST_DIR/top1.log"
 
 ./test_training_cli generate "$TEST_DIR"
+for command in bad-target bad-target-backward; do
+  for target in -2 3; do
+    status=0
+    ./test_training_cli "$command" "$target" > "$TEST_DIR/target-range.log" 2>&1 || status=$?
+    [[ "$status" == 1 ]] && grep -q 'target .* out of range' "$TEST_DIR/target-range.log"
+  done
+done
 printf 'qa\t1\tq\twork\t14\r\nqa\t2\ttail\twork\t1080' > "$TEST_DIR/line-endings.txt"
 ./test_training_cli problems "$TEST_DIR/line-endings.txt"
 "$CXXGPT" eval-reasoning --ckpt "$TEST_DIR/audit.ckpt" --test "$TEST_DIR/line-endings.txt" --max-new 1 --threads 2 > "$TEST_DIR/line-endings.log"

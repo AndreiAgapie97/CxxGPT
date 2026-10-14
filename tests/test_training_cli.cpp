@@ -5,6 +5,20 @@
 #include "../src/reasoning.h"
 
 int main(int argc, char** argv) {
+    if (argc == 3 && std::string(argv[1]) == "bad-target") {
+        float logits[] = {1,2,3}, loss = 0, gradient[3];
+        const int target = std::stoi(argv[2]);
+        cross_entropy_forward(logits, &loss, &target, 1, 3);
+        cross_entropy_backward(gradient, logits, &target, 1, 3, 1.0f);
+        return 2;  // bad target must fail before indexing, valid ignore must return loss zero
+    }
+    if (argc == 3 && std::string(argv[1]) == "bad-target-backward") {
+        const float probs[] = {0.2f,0.3f,0.5f}; float gradient[3];
+        const int target = std::stoi(argv[2]);
+        cross_entropy_backward(gradient, probs, &target, 1, 3, 1.0f);
+        return 2;
+    }
+
     if (argc == 3 && std::string(argv[1]) == "curriculum") {
         const std::string dir(argv[2]);
         const auto control = load_problems(dir + "/control.txt"), expanded = load_problems(dir + "/expanded.txt");

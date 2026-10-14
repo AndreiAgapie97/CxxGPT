@@ -385,6 +385,7 @@ void add_into(T* dst, const T* src, long n) {
 template <class T>
 double cross_entropy_forward(T* probs, T* losses, const int* targets, int N, int V) {
     PROFILE("xent_fwd");
+    for (int n = 0; n < N; ++n) CHECK(targets[n] >= -1 && targets[n] < V, "target %d out of range", targets[n]);
     for_rows(N, [&](int n0, int n1) {
         for (int n = n0; n < n1; ++n) {
             T* p = probs + long(n) * V;
@@ -417,6 +418,7 @@ double cross_entropy_forward(T* probs, T* losses, const int* targets, int N, int
 template <class T>
 void cross_entropy_backward(T* dlogits, const T* probs, const int* targets, int N, int V, T dloss) {
     PROFILE("xent_bwd");
+    for (int n = 0; n < N; ++n) CHECK(targets[n] >= -1 && targets[n] < V, "target %d out of range", targets[n]);
     for_rows(N, [&](int n0, int n1) {
         for (int n = n0; n < n1; ++n) {
             const T* p = probs + long(n) * V;
