@@ -17,7 +17,7 @@ all: ternary_moe test_engine cxxgpt
 ternary_moe: ternary_moe.cpp src/ternary.h src/thread_pool.h
 	$(CXX) $(CXXFLAGS) $< -o $@
 
-test_engine: tests/test_engine.cpp $(HEADERS) $(TEST_HEADERS)
+test_engine: tests/test_engine.cpp $(HEADERS) $(TEST_HEADERS) src/attention.cuh
 	$(CXX) $(CXXFLAGS) $< -o $@
 
 cxxgpt: src/cxxgpt.cpp $(HEADERS)
@@ -32,7 +32,7 @@ CUDA_ARCH ?= native
 NVCCFLAGS ?= -O3 -std=c++20 -arch=$(CUDA_ARCH) -Xcompiler -Wall,-Wextra $(NVCC_EXTRA)
 CUDA_LIBS ?= -L$(CUDA_HOME)/lib64 -Wl,-rpath,$(CUDA_HOME)/lib64 -lcublas -lcudart
 
-gpu.o: src/gpu.cu src/gpu.h src/config.h src/common.h
+gpu.o: src/gpu.cu src/gpu.h src/attention.cuh src/config.h src/common.h
 	$(NVCC) $(NVCCFLAGS) -c $< -o $@
 
 cxxgpt-gpu: src/cxxgpt.cpp gpu.o $(HEADERS)
@@ -57,7 +57,7 @@ bench: ternary_moe
 	./ternary_moe
 
 # Sanitizer builds run the tests only.
-asan: ternary_moe.cpp tests/test_engine.cpp $(HEADERS) $(TEST_HEADERS)
+asan: ternary_moe.cpp tests/test_engine.cpp $(HEADERS) $(TEST_HEADERS) src/attention.cuh
 	$(CXX) $(SANFLAGS) -fsanitize=address,undefined -fno-sanitize-recover=undefined \
 	    ternary_moe.cpp -o ternary_moe_asan
 	$(CXX) $(SANFLAGS) -fsanitize=address,undefined -fno-sanitize-recover=undefined \
@@ -65,7 +65,7 @@ asan: ternary_moe.cpp tests/test_engine.cpp $(HEADERS) $(TEST_HEADERS)
 	./ternary_moe_asan --tests
 	./test_engine_asan
 
-tsan: ternary_moe.cpp tests/test_engine.cpp $(HEADERS) $(TEST_HEADERS)
+tsan: ternary_moe.cpp tests/test_engine.cpp $(HEADERS) $(TEST_HEADERS) src/attention.cuh
 	$(CXX) $(SANFLAGS) -fsanitize=thread ternary_moe.cpp -o ternary_moe_tsan
 	$(CXX) $(SANFLAGS) -fsanitize=thread tests/test_engine.cpp -o test_engine_tsan
 	./ternary_moe_tsan --tests

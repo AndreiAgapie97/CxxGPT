@@ -7,8 +7,10 @@
 // exact fp32 matmuls the only differences are summation order; ternary
 // models also see rare int8 rounding flips, so their tolerance is looser.
 // Muon runs the same comparison on the dense and MoE models. Some runs clip
-// the gradient (to half its norm), as training with --clip does. A last check
-// trains on the GPU alone, with TF32, until a toy pattern is learned.
+// the gradient (to half its norm), as training with --clip does. Attention
+// runs on the fused kernels (attention.cuh), except in one run that checks
+// the cuBLAS path (--no-fused-attn). A last check trains on the GPU alone,
+// with TF32, until a toy pattern is learned.
 #include <cmath>
 #include <cstdio>
 #include <string>
@@ -41,9 +43,9 @@ void random_batch(Rng& rng, int V, int N, std::vector<int>& tok, std::vector<int
 }
 
 // clip > 0: clip the gradient to that fraction of its norm, scaling it on the
-// GPU the way GpuBackend does.
+// GPU the way GpuBackend does. fused: the GPU's fused attention kernels.
 void compare(const char* name, const Config& cfg, double tol_loss, double tol_grad, double tol_param,
-             bool muon = false, double clip = 0) {
+             bool muon = false, double clip = 0, bool fused = true) {
     Model<float> cpu(cfg);
     cpu.init(5);
     Rng rng(6);
@@ -51,7 +53,7 @@ void compare(const char* name, const Config& cfg, double tol_loss, double tol_gr
         for (auto& b : layer) b = float(0.01 * rng.normal());
     AdamW opt;
     opt.muon = muon;
-    GpuTrainer gpu(cfg, cpu.infos, /*tf32=*/false);
+    GpuTrainer gpu(cfg, cpu.infos, /*tf32=*/false, fused);
     gpu.set_params(cpu.params.data());
     gpu.set_adam_state(0, nullptr, nullptr);
     gpu.set_router_bias(cpu.router_bias);
@@ -97,7 +99,7 @@ void compare(const char* name, const Config& cfg, double tol_loss, double tol_gr
     EXPECT(gstep == opt.step && dm <= 3 * tol_grad && dv <= 3 * tol_grad,
            "%s: optimizer state differs from the CPU's (step %ld vs %ld, m by %g, v by %g)", name, gstep, opt.step,
            dm, dv);
-    GpuTrainer gpu2(cfg, cpu.infos, /*tf32=*/false);
+    GpuTrainer gpu2(cfg, cpu.infos, /*tf32=*/false, fused);
     gpu2.set_adam_state(gstep, gm.data(), gv.data());
     gpu2.set_muon(muon, opt.muon_momentum, opt.muon_steps);
     gpu2.get_adam_state(&gstep2, gm2.data(), gv2.data());
@@ -163,6 +165,18 @@ int main() {
     dense.n_layers = 2;
     dense.n_heads = 4;
     compare("dense", dense, 1e-5, 1e-4, 1e-4);
+    compare("dense, cuBLAS attention", dense, 1e-5, 1e-4, 1e-4, false, 0, false);
+
+    // Fused attention over several tiles of rows (70 tokens), and at its
+    // largest head size, which needs more than 48 KB of shared memory.
+    Config wide = dense;
+    wide.seq_len = 70;
+    wide.d_model = 128;
+    wide.n_heads = 2;
+    compare("heads of 64", wide, 1e-5, 1e-4, 1e-4);
+    wide.seq_len = 40;
+    wide.n_heads = 1;
+    compare("head of 128", wide, 1e-5, 1e-4, 1e-4);
 
     Config tern = dense;
     tern.ternary = true;

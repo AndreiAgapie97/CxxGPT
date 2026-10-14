@@ -10,6 +10,11 @@
 // product, which is the usual trade for training speed. tf32 = false gives
 // plain fp32, which the tests use to compare against the CPU engine.
 //
+// Attention runs on fused kernels (attention.cuh) that never store the
+// Tn x Tn matrix of attention weights; fused_attention = false goes back to
+// cuBLAS products through that matrix (more memory, kept as a fallback and
+// a second reference for the tests).
+//
 // This header is plain C++, so the rest of the code (built by g++ or
 // clang++) can use the GPU without including any CUDA header.
 #pragma once
@@ -23,7 +28,8 @@
 
 class GpuTrainer {
 public:
-    GpuTrainer(const Config& cfg, const std::vector<ParamInfo>& infos, bool tf32 = true);
+    GpuTrainer(const Config& cfg, const std::vector<ParamInfo>& infos, bool tf32 = true,
+               bool fused_attention = true);
     ~GpuTrainer();
     GpuTrainer(const GpuTrainer&) = delete;
     GpuTrainer& operator=(const GpuTrainer&) = delete;

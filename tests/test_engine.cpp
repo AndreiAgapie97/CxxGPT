@@ -4,6 +4,7 @@
 #include <cstring>
 #include <thread>
 
+#include "test_attention.h"
 #include "test_model.h"
 #include "test_ops.h"
 #include "test_reasoning.h"
@@ -25,6 +26,7 @@ int main(int argc, char** argv) {
         {"tokenizer", test_tokenizer},
         {"data", test_data},
         {"optim", test_optim},
+        {"attention", test_attention},
     };
     for (auto& s : suites) {
         const int before = g_failures;

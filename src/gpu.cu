@@ -21,6 +21,8 @@
 #include <cublas_v2.h>
 #include <cuda_runtime.h>
 
+#include "attention.cuh"
+
 #define CUDA_CHECK(call)                                                                       \
     do {                                                                                       \
         const cudaError_t err_ = (call);                                                       \
@@ -588,22 +590,27 @@ struct GpuTrainer::Impl {
     DevBuf<float> router_bias;  // [layer, expert]
     std::vector<std::vector<double>> expert_load;
 
+    // Attention: fused kernels (attention.cuh), which keep one number per
+    // row (lse), or cuBLAS products through the full matrix of weights (att).
+    bool fused_attn = true;
+
     struct LayerActs {
-        DevBuf<float> ln1, rstd1, qkv, att, atty, resid1, ln2, rstd2, resid2, fc, sw;
+        DevBuf<float> ln1, rstd1, qkv, att, lse, atty, resid1, ln2, rstd2, resid2, fc, sw;
         DevBuf<float> rlogits, gate, xg, efc, esw, ey;
         DevBuf<int> sel, order, row_of;
         std::vector<int> expert_start;  // host copy, [E + 1]
     };
     std::vector<LayerActs> acts;
     DevBuf<float> x0, lnf_out, rstdf, logits, losses, xq, out_tmp;
-    DevBuf<float> dresid, dC, dqkv, datty, dfc, dsw, dey, dxg, drl, dS, dgate, dw_partial;
+    DevBuf<float> dresid, dC, dqkv, datty, dfc, dsw, dey, dxg, drl, dS, dsum, dgate, dw_partial;
     DevBuf<int> tokens, targets, counts, expert_start_d;
     int B_ = 0, T_ = 0, B_cur = 0, T_cur = 0, n_valid = 0;
     bool has_targets = false;
     std::vector<float> losses_h;
     std::vector<int> counts_h;
 
-    Impl(const Config& c, const std::vector<ParamInfo>& in, bool tf32) : cfg(c), infos(in) {
+    Impl(const Config& c, const std::vector<ParamInfo>& in, bool tf32, bool fused)
+        : cfg(c), infos(in), fused_attn(fused) {
         cfg.validate();
         CHECK(!cfg.fp_attention, "full-precision attention (--fp-attn) is not on the GPU yet");
         CHECK(cfg.nope_every == 0, "layers without RoPE (--nope-every) are not on the GPU yet");
@@ -614,6 +621,20 @@ struct GpuTrainer::Impl {
         for (const auto& p : infos) n_params = std::max(n_params, p.offset + p.size);
         CUBLAS_CHECK(cublasCreate(&blas));
         CUBLAS_CHECK(cublasSetMathMode(blas, tf32 ? CUBLAS_TF32_TENSOR_OP_MATH : CUBLAS_DEFAULT_MATH));
+        if (fused_attn) {
+            const int HS = cfg.head_size();
+            CHECK(HS <= attn::kMaxHS, "fused attention takes heads of up to %d (this model: %d); use --no-fused-attn",
+                  attn::kMaxHS, HS);
+            // Above 48 KB of shared memory per block (the backward kernels
+            // at head size 128), CUDA wants to be told first.
+            auto allow = [](const void* kernel, int floats) {
+                CUDA_CHECK(cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
+                                                floats * int(sizeof(float))));
+            };
+            allow((const void*)attn::fwd, attn::fwd_smem(HS));
+            allow((const void*)attn::bwd_dq, attn::dq_smem(HS));
+            allow((const void*)attn::bwd_dkv, attn::dkv_smem(HS));
+        }
         params.resize(n_params);
         grads.resize(n_params);
         if (cfg.ternary) qparams.resize(n_params);  // read only through W(), for ternary models
@@ -784,9 +805,22 @@ struct GpuTrainer::Impl {
         LAUNCH_CHECK();
     }
 
-    // attention_forward: per sequence, the heads as one strided batch.
-    void attention_forward(float* out, float* att, const float* qkv, int B, int Tn) {
+    // Attention of layer activations a: a.atty from a.qkv.
+    void attention_forward(LayerActs& a, int B, int Tn) {
         const int C = cfg.d_model, NH = cfg.n_heads, HS = cfg.head_size();
+        const float scale = 1.0f / std::sqrt(float(HS));
+        if (fused_attn) {
+            const dim3 grid((Tn + attn::kBlockRows - 1) / attn::kBlockRows, NH, B);
+            attn::fwd<<<grid, attn::kThreads, attn::fwd_smem(HS) * sizeof(float)>>>(a.qkv.p, a.atty.p, a.lse.p, Tn,
+                                                                                    C, NH, HS, scale);
+            LAUNCH_CHECK();
+            return;
+        }
+        // Without: per sequence, the heads as one strided batch of cuBLAS
+        // products, through the full matrix of weights.
+        float* out = a.atty.p;
+        float* att = a.att.p;
+        const float* qkv = a.qkv.p;
         const long long TT = (long long)Tn * Tn;
         for (int b = 0; b < B; ++b) {
             const float* q = qkv + size_t(b) * Tn * 3 * C;
@@ -795,8 +829,7 @@ struct GpuTrainer::Impl {
             gemm_batched(false, true, Tn, Tn, HS, q, 3 * C, HS, q + C, 3 * C, HS, S, Tn, TT, 0.0f, NH);
         }
         const int rows = B * NH * Tn;
-        attn_softmax_fwd<<<blocks_for(rows, kRowsPerBlock), kBlock>>>(att, rows, Tn,
-                                                                      1.0f / std::sqrt(float(HS)));
+        attn_softmax_fwd<<<blocks_for(rows, kRowsPerBlock), kBlock>>>(att, rows, Tn, scale);
         LAUNCH_CHECK();
         for (int b = 0; b < B; ++b) {
             const float* vv = qkv + size_t(b) * Tn * 3 * C + 2 * C;
@@ -806,9 +839,26 @@ struct GpuTrainer::Impl {
         }
     }
 
-    // attention_backward (accumulates into dqkv).
-    void attention_backward(float* dqkv_, const float* dout, const float* att, const float* qkv, int B, int Tn) {
+    // attention_forward's backward: accumulates into dqkv_, given dout = d(a.atty).
+    void attention_backward(float* dqkv_, const float* dout, const LayerActs& a, int B, int Tn) {
         const int C = cfg.d_model, NH = cfg.n_heads, HS = cfg.head_size();
+        const float scale = 1.0f / std::sqrt(float(HS));
+        if (fused_attn) {
+            const int rows = B * NH * Tn;
+            attn::bwd_dsum<<<(rows + attn::kWarps - 1) / attn::kWarps, attn::kThreads>>>(a.atty.p, dout, dsum.p, rows,
+                                                                                         Tn, C, NH, HS);
+            LAUNCH_CHECK();
+            const dim3 grid((Tn + attn::kBlockRows - 1) / attn::kBlockRows, NH, B);
+            attn::bwd_dq<<<grid, attn::kThreads, attn::dq_smem(HS) * sizeof(float)>>>(a.qkv.p, dout, a.lse.p, dsum.p,
+                                                                                      dqkv_, Tn, C, NH, HS, scale);
+            LAUNCH_CHECK();
+            attn::bwd_dkv<<<grid, attn::kThreads, attn::dkv_smem(HS) * sizeof(float)>>>(
+                a.qkv.p, dout, a.lse.p, dsum.p, dqkv_, Tn, C, NH, HS, scale);
+            LAUNCH_CHECK();
+            return;
+        }
+        const float* att = a.att.p;
+        const float* qkv = a.qkv.p;
         const long long TT = (long long)Tn * Tn;
         for (int b = 0; b < B; ++b) {
             const float* vv = qkv + size_t(b) * Tn * 3 * C + 2 * C;
@@ -817,8 +867,7 @@ struct GpuTrainer::Impl {
                          dS.p + size_t(b) * NH * TT, Tn, TT, 0.0f, NH);
         }
         const int rows = B * NH * Tn;
-        attn_softmax_bwd<<<blocks_for(rows, kRowsPerBlock), kBlock>>>(dS.p, att, rows, Tn,
-                                                                      1.0f / std::sqrt(float(HS)));
+        attn_softmax_bwd<<<blocks_for(rows, kRowsPerBlock), kBlock>>>(dS.p, att, rows, Tn, scale);
         LAUNCH_CHECK();
         for (int b = 0; b < B; ++b) {
             const float* q = qkv + size_t(b) * Tn * 3 * C;
@@ -865,11 +914,12 @@ struct GpuTrainer::Impl {
         const size_t N = size_t(B) * Tn, C = cfg.d_model, V = cfg.vocab;
         const size_t F = cfg.always_hidden(), E = cfg.n_experts, K = cfg.top_k;
         const size_t Fe = cfg.ehidden(), NK = cfg.moe() ? N * K : 0;
-        const size_t att = size_t(B) * cfg.n_heads * Tn * Tn;
+        const size_t att = size_t(B) * cfg.n_heads * Tn * Tn, rows = size_t(B) * cfg.n_heads * Tn;
         acts.resize(cfg.n_layers);
         for (auto& a : acts) {
             a.ln1.resize(N * C); a.rstd1.resize(N); a.qkv.resize(N * 3 * C);
-            a.att.resize(att); a.atty.resize(N * C);
+            if (fused_attn) a.lse.resize(rows); else a.att.resize(att);
+            a.atty.resize(N * C);
             a.resid1.resize(N * C); a.ln2.resize(N * C); a.rstd2.resize(N);
             a.resid2.resize(N * C); a.fc.resize(N * 2 * F); a.sw.resize(N * F);
             if (cfg.moe()) {
@@ -886,7 +936,7 @@ struct GpuTrainer::Impl {
         out_tmp.resize(N * C);
         dresid.resize(N * C); dC.resize(N * C); dqkv.resize(N * 3 * C); datty.resize(N * C);
         dfc.resize(std::max(N * 2 * F, NK * 2 * Fe)); dsw.resize(std::max(N * F, NK * Fe));
-        dS.resize(att);
+        if (fused_attn) dsum.resize(rows); else dS.resize(att);
         dw_partial.resize((N + 63) / 64 * C);
         if (cfg.moe()) { dey.resize(NK * C); dxg.resize(NK * C); drl.resize(N * E); dgate.resize(NK); }
         losses_h.resize(N);
@@ -998,7 +1048,7 @@ struct GpuTrainer::Impl {
             rmsnorm_forward(a.ln1.p, a.rstd1.p, x, P(o.ln1), N, C);
             proj_forward(a.qkv.p, a.ln1.p, o.wqkv, N, C, 3 * C);
             rope_apply(a.qkv.p, B, Tn, false);
-            attention_forward(a.atty.p, a.att.p, a.qkv.p, B, Tn);
+            attention_forward(a, B, Tn);
             proj_forward(out_tmp.p, a.atty.p, o.wo, N, C, C);
             add(a.resid1.p, x, out_tmp.p, size_t(N) * C);
             rmsnorm_forward(a.ln2.p, a.rstd2.p, a.resid1.p, P(o.ln2), N, C);
@@ -1041,7 +1091,7 @@ struct GpuTrainer::Impl {
             datty.zero(size_t(N) * C);
             proj_backward(datty.p, dresid.p, a.atty.p, o.wo, N, C, C);
             dqkv.zero(size_t(N) * 3 * C);
-            attention_backward(dqkv.p, datty.p, a.att.p, a.qkv.p, B, Tn);
+            attention_backward(dqkv.p, datty.p, a, B, Tn);
             rope_apply(dqkv.p, B, Tn, true);
             dC.zero(size_t(N) * C);
             proj_backward(dC.p, dqkv.p, a.ln1.p, o.wqkv, N, C, 3 * C);
@@ -1153,8 +1203,8 @@ struct GpuTrainer::Impl {
     }
 };
 
-GpuTrainer::GpuTrainer(const Config& cfg, const std::vector<ParamInfo>& infos, bool tf32)
-    : impl_(std::make_unique<Impl>(cfg, infos, tf32)) {}
+GpuTrainer::GpuTrainer(const Config& cfg, const std::vector<ParamInfo>& infos, bool tf32, bool fused_attention)
+    : impl_(std::make_unique<Impl>(cfg, infos, tf32, fused_attention)) {}
 
 GpuTrainer::~GpuTrainer() = default;
 
