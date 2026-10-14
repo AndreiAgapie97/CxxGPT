@@ -181,6 +181,8 @@ int cmd_text2tok(Args& a) {
             buf.resize(old + size_t(f.gcount()));
             eof = !f;
             starved = false;
+            CHECK(buf.size() <= kBlock*size_t(threads) + (64u<<20),
+                  "no safe text split within buffer limit; prepare shorter lines/documents");
         }
         const std::string_view all(buf);
         std::vector<std::string_view> blocks;

@@ -57,6 +57,14 @@ status=0
 grep -q 'one-logit softmax has zero task gradient' "$TEST_DIR/top1.log"
 
 "$CXXGPT_TRAINING_CLI" generate "$TEST_DIR"
+# Cross the streaming block size without a newline; threaded cuts preserve bytes.
+python3 - "$TEST_DIR/one-line.txt" <<'PYLINE'
+import pathlib,sys
+pathlib.Path(sys.argv[1]).write_text(' alpha beta gamma '*500000)
+PYLINE
+"$CXXGPT" text2tok --in "$TEST_DIR/one-line.txt" --out "$TEST_DIR/one-line-one.tok" --threads 1 > "$TEST_DIR/one-line-one.log"
+"$CXXGPT" text2tok --in "$TEST_DIR/one-line.txt" --out "$TEST_DIR/one-line-two.tok" --threads 2 > "$TEST_DIR/one-line-two.log"
+cmp "$TEST_DIR/one-line-one.tok" "$TEST_DIR/one-line-two.tok"
 python3 - "$TEST_DIR/long.txt" <<'PYLONG'
 import pathlib,sys
 pathlib.Path(sys.argv[1]).write_text('a'*65537)

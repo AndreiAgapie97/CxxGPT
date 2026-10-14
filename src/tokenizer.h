@@ -61,15 +61,15 @@ public:
         }
     }
 
-    // The first position p >= from where a line starts with something other
-    // than whitespace (s[p-1] is '\n'), or s.size() if there is none. Such a
-    // p always starts a chunk, whatever came before, so text cut there
-    // encodes exactly as the whole does: big files can be encoded in
-    // independent pieces, in parallel.
+    // First complete lexical chunk boundary at/after from. A lone last byte
+    // is not a cut: a later read might change its leading-space classification.
+    // Cutting only on newlines made one-line corpora grow without bound.
     static size_t next_safe_split(std::string_view s, size_t from) {
-        for (size_t p = std::max<size_t>(from, 1); p < s.size(); ++p)
-            if (s[p - 1] == '\n' && !is_space(s[p])) return p;
-        return s.size();
+        size_t cut = s.size();
+        for_each_chunk(s, [&](size_t begin, size_t) {
+            if (begin >= from && begin > 0 && begin+1 < s.size()) cut = std::min(cut,begin);
+        });
+        return cut;
     }
 
     static std::vector<std::pair<size_t, size_t>> chunks(std::string_view s) {

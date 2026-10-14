@@ -98,6 +98,13 @@ inline void test_tokenizer() {
         EXPECT(pieces == tok.encode(r), "encoding in pieces differs from encoding the whole");
     }
 
+    // One-line boundaries and adversarial trailing space are also safe.
+    for (const std::string text : {" alpha beta gamma delta", "word  next!  ", "a1b2c3d4e5"}) {
+        const size_t cut = Tokenizer::next_safe_split(text, text.size()/2);
+        auto pieces = tok.encode(text.substr(0,cut)); const auto tail = tok.encode(text.substr(cut));
+        pieces.insert(pieces.end(),tail.begin(),tail.end());
+        EXPECT(pieces == tok.encode(text), "lexical split changes whole-text token ids");
+    }
     // Training is deterministic.
     Tokenizer tok3;
     tok3.train(corpus, 300);
