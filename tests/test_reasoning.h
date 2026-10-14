@@ -169,6 +169,15 @@ inline void test_formats() {
 }
 
 inline void test_reasoning() {
+    Rng eq_rng(67);
+    for (int d : {3, 4}) for (int i = 0; i < 100; ++i) {
+        const auto p = make_problem("eq", d, eq_rng);
+        const size_t start = p.question.find("*x") + 3, end = p.question.find('=');
+        const int b = std::stoi(p.question.substr(start, end - start));
+        const int x = std::stoi(reasoning_check::solve(p));
+        EXPECT(b >= 1 && b <= 999 && x >= 0 && x <= (d == 3 ? 30 : 39),
+               "documented eq support changed: %s", p.question.c_str());
+    }
     for (const std::string text : {"#### 1,080\n", "#### 1080 \n", "#### 1080\r\n"})
         EXPECT(answer_matches(text, "1080"), "normalized generated answer was marked wrong: %s", text.c_str());
     EXPECT(answer_matches("#### 14 \n", "14") && answer_matches("#### 14\r\n", "14"),

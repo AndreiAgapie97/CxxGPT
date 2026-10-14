@@ -142,8 +142,8 @@ Four variants with the same width (dim 256, 4 layers, 4 heads), data,
 steps and learning rate: 2500 steps of 4096 tokens on the reasoning
 curriculum, CPU. The MoE variants have 8 experts (top-2) with the same
 active parameters per token as the dense ones. Accuracy is exact-answer on
-960 held-out problems: 6 tasks × difficulties 1–4, where 4 is one level
-harder than anything in training.
+960 held-out question strings: 6 tasks × difficulties 1–4. The d=4 label
+is above the trained labels, but does not uniformly mean new mathematical support.
 
 | variant | params (active) | val loss | accuracy | d = 1–3 | d = 4 |
 |---|---:|---:|---:|---:|---:|
@@ -151,6 +151,12 @@ harder than anything in training.
 | dense, ternary | 3.3 M | 0.1152 | 57.0% | 74.2% | 5.4% |
 | MoE | 9.8 M (3.3 M) | **0.0986** | **62.0%** | **81.0%** | 5.0% |
 | MoE, ternary | 9.8 M (3.3 M) | 0.1116 | 55.2% | 72.4% | 3.8% |
+
+**Equation limit:** eq caps its additive constant at 999 at both d=3 and
+d=4. The unknown ranges from 0–30 and 0–39, respectively, so much of eq
+d=4 uses the earlier operand domain. Aggregate d=4 scores are therefore
+not a clean measure of extrapolation. The existing generator and recorded
+results are preserved; the evaluation table already prints eq separately.
 
 One seed each. A binomial standard error of about 1.6 points assumes
 independent problems; it does not measure seed variance or correlations
@@ -161,8 +167,9 @@ between related synthetic problems.
 - **With AdamW, ternary costs dense little** (0.1136 → 0.1152) but costs
   MoE much more (0.0986 → 0.1116), which erases most of MoE's gain. With
   Muon, the better-trained models show a similar cost for both (below).
-- **Nobody generalizes to longer problems (d = 4).** Small transformers
-  are known to struggle with this on arithmetic; it is on the list.
+- **These aggregate d=4 results do not establish length generalization.**
+  Equation support overlaps training; inspect the per-task evaluation
+  rather than interpreting the whole column as unseen-length accuracy.
 - **Chain** (multi-hop variable lookup) is the hardest task. Most
   failures are a wrong first step: the solution resolves variables from
   the given value toward the question, so the model has to pick the path
