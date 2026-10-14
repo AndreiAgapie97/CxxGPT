@@ -29,7 +29,9 @@ int pick_token(const T* logits, int V, double temperature, Rng* rng) {
     return best;
 }
 
-// Continues every prompt by up to max_new tokens, all in one batch.
+// Continues every prompt by max_new tokens, all in one batch, or by fewer
+// when the context runs out: with prompts of up to L tokens, at most
+// seq_len - L + 1 (the last token is never fed back, so it needs no slot).
 // done(generated) is asked after each new token; a sequence that is done
 // stops growing (its slot keeps computing until the batch finishes).
 template <class T>
@@ -45,8 +47,10 @@ std::vector<std::vector<int>> generate(Model<T>& model, const std::vector<std::v
         CHECK(!p.empty(), "empty prompt");
         L = std::max(L, int(p.size()));
     }
-    const int total = std::min(model.cfg.seq_len, L + max_new);
-    CHECK(L < total, "prompt of %d tokens leaves no room in seq_len %d", L, model.cfg.seq_len);
+    CHECK(max_new > 0, "nothing to generate: max_new is %d", max_new);
+    CHECK(L < model.cfg.seq_len, "a prompt of %d tokens fills the model's context of %d", L, model.cfg.seq_len);
+    // Positions fed: the prompt, then each picked token but the last.
+    const int total = std::min(model.cfg.seq_len, L - 1 + max_new);
     std::vector<int> start(B);
     for (int b = 0; b < B; ++b) start[b] = L - int(prompts[b].size());
     model.decode_begin(B, start);

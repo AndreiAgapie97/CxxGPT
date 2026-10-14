@@ -87,7 +87,10 @@ int cmd_bpe_train(Args& a) {
     CHECK(!in.empty() && !out.empty(), "usage: cxxgpt bpe-train --in text.txt --vocab N --out tok.bpe");
     CHECK(vocab >= 256 && vocab <= 65536, "--vocab must be in [256, 65536] (tokens are stored as uint16)");
     std::string text = read_file(in);
-    if (long(text.size()) > max_bytes) text.resize(size_t(max_bytes));
+    if (long(text.size()) > max_bytes) {
+        std::printf("learning from the first %ld of %zu bytes (--max-bytes)\n", max_bytes, text.size());
+        text.resize(size_t(max_bytes));
+    }
     const double t0 = now_seconds();
     Tokenizer tok;
     tok.train(text, vocab, true);
@@ -256,8 +259,9 @@ int cmd_gen_reasoning(Args& a) {
     const std::vector<std::string> tasks = split(a.str("tasks", "chain,add,mul,expr,eq,cmp"), ',');
     const bool chain_plan = a.flag("chain-plan");  // chain solutions look variables up first
     Rng rng(uint64_t(a.integer("seed", 1)));
-    const Tokenizer tok = load_tokenizer(a.str("bpe"));
+    const std::string bpe = a.str("bpe");
     a.done();
+    const Tokenizer tok = load_tokenizer(bpe);
     for (const auto& t : tasks) make_problem(t, 1, rng);  // rejects unknown names
 
     // Test set first: every (task, difficulty) cell, including one level
@@ -330,8 +334,9 @@ int cmd_prep_qa(Args& a) {
     const std::string q_key = a.str("question-key", "question"), a_key = a.str("answer-key", "answer");
     const std::string final_key = a.str("final-key");
     const bool keep_calc = a.flag("keep-calc");
-    const Tokenizer tok = load_tokenizer(a.str("bpe"));
+    const std::string bpe = a.str("bpe");
     a.done();
+    const Tokenizer tok = load_tokenizer(bpe);
     CHECK(!in.empty() && !out.empty(), "usage: cxxgpt prep-qa --in FILE.jsonl --out PREFIX [--bpe tok.bpe]");
     std::ifstream f(in);
     CHECK(f, "cannot open %s", in.c_str());
@@ -441,8 +446,9 @@ int cmd_eval_reasoning(Args& a) {
     const std::string ckpt = a.str("ckpt", "model.ckpt"), test_path = a.str("test", "data/reason.test.txt");
     const int batch = int(a.integer("batch", 64)), limit = int(a.integer("limit", 0));
     const bool show = a.flag("show-failures");
-    const Tokenizer tok = load_tokenizer(a.str("bpe"));
+    const std::string bpe = a.str("bpe");
     a.done();
+    const Tokenizer tok = load_tokenizer(bpe);
     Model<float> model(peek_checkpoint_config(ckpt));
     load_checkpoint(ckpt, model, nullptr, nullptr);
     std::vector<Problem> test = load_problems(test_path);
@@ -794,9 +800,10 @@ int cmd_sample(Args& a) {
     // empty prompt starts a new document.
     std::vector<int> ids = tok.encode(prompt);
     ids.insert(ids.begin(), kBos);
+    CHECK(n > 0, "--n must be at least 1");
+    CHECK(int(ids.size()) < model.cfg.seq_len, "the prompt is %zu tokens with the BOS in front; the model's context "
+          "holds %d", ids.size(), model.cfg.seq_len);
     std::fwrite(prompt.data(), 1, prompt.size(), stdout);
-    const int room = model.cfg.seq_len - int(ids.size());
-    CHECK(room > 0, "prompt longer than the model's seq_len");
     // Padding ids (model vocab beyond the tokenizer's) decode as '?'.
     auto text_of = [&](const std::vector<int>& g) {
         std::vector<int> ok;
@@ -805,7 +812,7 @@ int cmd_sample(Args& a) {
     };
     // A BOS would start the next document: this one is over.
     const auto out = generate(
-        model, {ids}, std::min(n, room),
+        model, {ids}, n,
         [&](const std::vector<int>& g) { return g.back() == kBos || (answer && completion_done(text_of(g))); },
         temp, &rng);
     std::vector<int> gen = out[0];

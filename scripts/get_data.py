@@ -24,6 +24,7 @@ pyarrow for Parquet files (pip install pyarrow). For gated datasets, set
 HF_TOKEN to a Hugging Face access token.
 """
 import argparse
+import http.client
 import io
 import json
 import os
@@ -99,21 +100,39 @@ def download(url, dest, retries=6):
     sys.exit(f"giving up on {url}")
 
 
+def retrying(what, fetch, retries=5):
+    """fetch(), tried again after 1, 2, 4... s when the network fails or the
+    server is busy (HTTP 429, 5xx); other HTTP errors stop the script."""
+    for attempt in range(retries):
+        try:
+            return fetch()
+        except urllib.error.HTTPError as e:
+            if e.code != 429 and e.code < 500:
+                sys.exit(f"{what}: HTTP {e.code}")
+            err = e
+        except (urllib.error.URLError, TimeoutError, ConnectionError, http.client.HTTPException) as e:
+            err = e
+        if attempt + 1 < retries:
+            log(f"  {err}; retrying in {2 ** attempt} s")
+            time.sleep(2 ** attempt)
+    sys.exit(f"{what}: {err}; giving up")
+
+
 def fetch_range(url, start, end):
     """Bytes start..end (inclusive) of url, and the size of the whole file."""
-    req = urllib.request.Request(url, headers=headers({"Range": f"bytes={start}-{end}"}))
-    try:
+    def fetch():
+        req = urllib.request.Request(url, headers=headers({"Range": f"bytes={start}-{end}"}))
         with urllib.request.urlopen(req, timeout=60) as r:
             if r.status != 206 and start > 0:
                 sys.exit(f"{url}: the server ignored the byte range")
             # "bytes 0-0/12345" on a 206; a 200 sends the whole file.
             size = r.headers.get("Content-Range", "").rpartition("/")[2]
             size = int(size) if size.isdigit() else int(r.headers.get("Content-Length") or 0)
-            return r.read(end - start + 1), size
-    except urllib.error.HTTPError as e:
-        sys.exit(f"{url}: HTTP {e.code}")
-    except (urllib.error.URLError, TimeoutError) as e:
-        sys.exit(f"{url}: {e}")
+            data = r.read(end - start + 1)
+            if len(data) < min(end + 1, size) - start:  # the connection dropped early
+                raise ConnectionError(f"got {len(data)} of {min(end + 1, size) - start} bytes")
+            return data, size
+    return retrying(url, fetch)
 
 
 def check_url(url, n=1):
@@ -169,7 +188,10 @@ def check_parquet(url, columns):
     except ImportError:
         sys.exit("reading Parquet needs pyarrow: pip install pyarrow")
     f = RemoteFile(url)
-    names = pq.read_schema(f).names
+    try:
+        names = pq.read_schema(f).names
+    except Exception as e:  # pyarrow's errors: not a Parquet file, or a cut one
+        sys.exit(f"{url}: cannot read it as Parquet ({e})")
     missing = [c for c in columns if c not in names]
     if missing:
         sys.exit(f"{url}: no column {', '.join(missing)}; its columns: {', '.join(names)}")
@@ -179,8 +201,11 @@ def check_parquet(url, columns):
 def hf_files(repo, path=""):
     """Paths of the files in a Hugging Face dataset repo under path (recursive)."""
     url = f"{HF}/api/datasets/{repo}/tree/main/{path}?recursive=true"
-    with urllib.request.urlopen(urllib.request.Request(url, headers=headers()), timeout=60) as r:
-        return sorted(e["path"] for e in json.load(r) if e.get("type") == "file")
+
+    def fetch():
+        with urllib.request.urlopen(urllib.request.Request(url, headers=headers()), timeout=60) as r:
+            return sorted(e["path"] for e in json.load(r) if e.get("type") == "file")
+    return retrying(url, fetch)
 
 
 def hf_url(repo, path):
