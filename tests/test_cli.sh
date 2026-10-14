@@ -80,6 +80,15 @@ grep -q 'saved .* at step 0' "$TEST_DIR/bad-timed.log"
 ! grep -q 'diverged\|lower --lr' "$TEST_DIR/bad-timed.log"
 ./test_training_cli unchanged-zero-step "$TEST_DIR/unstable.ckpt" "$TEST_DIR/bad-timed.ckpt"
 printf 'CLI: good/bad-attempt time limits preserve progress; divergence protection remains separate\n'
+"$CXXGPT" train "${COMMON[@]}" --steps 20 --time-limit 0.000000000001 --eval-every 999 \
+    --out "$TEST_DIR/final-val.ckpt" --log "$TEST_DIR/final-val.csv" > "$TEST_DIR/final-val.log"
+grep -q '^step *1 | val .*final validation' "$TEST_DIR/final-val.log"
+grep -q '^# final validation step 1:' "$TEST_DIR/final-val.csv"
+"$CXXGPT" train "${COMMON[@]}" --steps 1 --resume --eval-every 999 \
+    --out "$TEST_DIR/final-val.ckpt" --log "$TEST_DIR/final-val.csv" > "$TEST_DIR/final-val-resume.log"
+grep -q '^# resumed at step 1$' "$TEST_DIR/final-val.csv"
+[[ $(grep -c '^step *1 | val .*final validation' "$TEST_DIR/final-val-resume.log") == 1 ]]
+awk -F, '!/^#/ && NF!=7 {exit 1}' "$TEST_DIR/final-val.csv"
 for variant in dense ternary moe ternary-moe hybrid hybrid-moe nope nope-ternary-moe; do
     ARCH=()
     if [[ "$variant" == *ternary* ]]; then ARCH+=(--ternary); fi

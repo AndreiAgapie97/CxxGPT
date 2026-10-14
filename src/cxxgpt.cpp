@@ -719,6 +719,7 @@ int cmd_train(Args& a) {
         log = create_file(log_path, "a");
         CHECK(log, "cannot open %s", log_path.c_str());
         if (fresh) std::fprintf(log, "step,loss,val_loss,lr,grad_norm,ms_per_step,load_ratio\n");
+        if (resume) std::fprintf(log, "# resumed at step %ld\n", opt.step);
     }
     std::signal(SIGINT, on_signal);
     std::signal(SIGTERM, on_signal);
@@ -753,6 +754,7 @@ int cmd_train(Args& a) {
     constexpr int kMaxBadSteps = 10;
     int bad_steps = 0;
     bool diverged = false;
+    long last_validation_step = -1;
     long saved_step = resume ? first_step : -1;  // what --out holds
     for (; step < steps && !g_stop;) {
         const double t0 = now_seconds();
@@ -796,8 +798,10 @@ int cmd_train(Args& a) {
 
         const bool last = step + 1 == steps;
         double vloss = -1;
-        if (eval_every > 0 && ((step + 1) % eval_every == 0 || last) && val_hi >= val_lo + Tn + 1)
+        if (eval_every > 0 && ((step + 1) % eval_every == 0 || last) && val_hi >= val_lo + Tn + 1) {
             vloss = eval_loss(be, *val, val_lo, val_hi, B, Tn, eval_batches);
+            last_validation_step = step + 1;
+        }
         if ((step + 1) % log_every == 0 || last || vloss >= 0) {
             std::printf("step %6ld | loss %.4f", step + 1, loss_acc / n_acc);
             if (vloss >= 0) std::printf(" | val %.4f", vloss);
@@ -836,6 +840,14 @@ int cmd_train(Args& a) {
             std::printf("not saved: no checkpoint yet; start again with a lower --lr\n");
         if (log) std::fclose(log);
         return 1;
+    }
+    // Time-limited runs may end between evaluations. SIGINT still saves promptly;
+    // do not repeat a validation already logged for this successful update.
+    if (!g_stop && eval_every > 0 && last_validation_step != opt.step && val_hi >= val_lo + Tn + 1) {
+        const double vloss = eval_loss(be, *val, val_lo, val_hi, B, Tn, eval_batches);
+        std::printf("step %6ld | val %.4f (final validation)\n", opt.step, vloss);
+        // Numeric CSV rows keep their seven columns; comments already carry reasoning evals.
+        if (log) std::fprintf(log, "# final validation step %ld: %.5f\n", opt.step, vloss);
     }
     be.sync();
     save_checkpoint(out, model, opt, data_rng);
