@@ -158,6 +158,13 @@ d=4 uses the earlier operand domain. Aggregate d=4 scores are therefore
 not a clean measure of extrapolation. The existing generator and recorded
 results are preserved; the evaluation table already prints eq separately.
 
+**Split limit:** separation excludes exact question strings, not mathematical
+equivalents or shared templates. For example, `12+34` and `34+12`, or the
+same comparison with swapped operands, can cross splits. Trained-level
+accuracy may include memorization. No commutative deduplication is added
+here because changing the generator would invalidate comparisons with the
+recorded data. New independent protocols should declare their exclusion key.
+
 One seed each. A binomial standard error of about 1.6 points assumes
 independent problems; it does not measure seed variance or correlations
 between related synthetic problems.
