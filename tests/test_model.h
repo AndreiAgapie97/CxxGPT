@@ -574,7 +574,27 @@ inline void test_router_balancing() {
     EXPECT(m.router_bias == bias && m.expert_load[0] == std::vector<double>(4,0), "zero-rate discard changed bias/kept loads");
 }
 
+inline void test_activation_int8_contract() {
+    Rng rng(78);
+    for (int C : {1,7,8,9,15,16,17,31,32,33,127}) for (int mode = 0; mode < 5; ++mode) {
+        const int N = 3; std::vector<float> x(N*C), got(N*C);
+        std::vector<int8_t> q(C);
+        for (auto& v : x) v = float(rng.normal());
+        if (mode == 1) std::fill(x.begin(), x.end(), 0);
+        if (mode == 2) for (int i = 0; i < N*C; ++i) x[i] = (i % 255 - 127)*0.5f;
+        if (mode == 3) for (auto& v : x) v *= 1e-10f;
+        if (mode == 4) for (auto& v : x) v *= 1e20f;
+        act_quantize(got.data(), x.data(), N, C);
+        for (int n = 0; n < N; ++n) {
+            const float scale = quantize_int8(x.data()+n*C, C, q.data());
+            for (int j = 0; j < C; ++j)
+                EXPECT(got[n*C+j] == scale*float(q[j]), "training/packed int8 levels differ at C=%d mode=%d", C, mode);
+        }
+    }
+}
+
 inline void test_model() {
+    test_activation_int8_contract();
     test_router_balancing();
     test_router_selection_and_gates();
     test_decode_baseline_routing_state();
