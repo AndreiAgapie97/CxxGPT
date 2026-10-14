@@ -60,6 +60,10 @@ inline void test_model_gradients() {
     dense.ffn_hidden = 12;
     model_gradcheck("dense", dense, 21);
 
+    Config nope = dense;  // layer 1 without RoPE
+    nope.nope_every = 2;
+    model_gradcheck("dense, half NoPE", nope, 24);
+
     Config moe = dense;
     moe.n_experts = 4;
     moe.top_k = 2;
@@ -237,15 +241,16 @@ inline void test_fp_attention() {
 // KV-cache decoding of left-padded sequences must give the logits the full
 // forward pass gives each sequence on its own.
 inline void test_decode_matches_forward() {
-    const char* names[] = {"dense", "ternary MoE", "ternary MoE, fp attention"};
-    for (int variant = 0; variant < 3; ++variant) {
+    const char* names[] = {"dense", "ternary MoE", "ternary MoE, fp attention", "dense, half NoPE"};
+    for (int variant = 0; variant < 4; ++variant) {
         Config cfg;
         cfg.vocab = 29;
         cfg.seq_len = 16;
         cfg.d_model = 32;
         cfg.n_layers = 2;
         cfg.n_heads = 4;
-        if (variant >= 1) {  // our architecture: ternary MoE with a shared expert
+        cfg.nope_every = variant == 3 ? 2 : 0;
+        if (variant == 1 || variant == 2) {  // our architecture: ternary MoE with a shared expert
             cfg.n_experts = 4;
             cfg.top_k = 2;
             cfg.n_shared = 1;
@@ -296,7 +301,7 @@ inline void test_decode_matches_forward() {
 // A ternary model on the bitplane int8 kernels computes what the training
 // forward pass computes (which fake-quantizes with the same arithmetic).
 inline void test_ternary_engine() {
-    for (int variant = 0; variant < 2; ++variant) {
+    for (int variant = 0; variant < 3; ++variant) {
         Config cfg;
         cfg.vocab = 40;
         cfg.seq_len = 24;
@@ -304,12 +309,13 @@ inline void test_ternary_engine() {
         cfg.n_layers = 2;
         cfg.n_heads = 4;
         cfg.ternary = true;
-        if (variant == 1) {
+        if (variant >= 1) {
             cfg.n_experts = 4;
             cfg.top_k = 2;
             cfg.n_shared = 1;
             cfg.expert_hidden = 64;
         }
+        if (variant == 2) cfg.nope_every = 2;  // layer 1 without RoPE
         Model<float> m(cfg);
         m.init(17);
         // Larger weights than the init, so activations are far from zero

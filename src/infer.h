@@ -103,7 +103,7 @@ public:
             auto& L = layers_[l];
             rmsnorm(h_.data(), x_.data(), L.ln1.data(), C);
             gemv(L.wqkv, h_.data(), qkv_.data());
-            rope_apply(qkv_.data(), rope_, 1, 1, C, NH, false, pos_);
+            if (cfg_.rope_layer(l)) rope_apply(qkv_.data(), rope_, 1, 1, C, NH, false, pos_);
             float* kc = kcache_[l].data();
             float* vc = vcache_[l].data();
             std::copy(&qkv_[C], &qkv_[2 * C], kc + size_t(pos_) * C);

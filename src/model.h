@@ -131,7 +131,7 @@ public:
             const auto& o = layer_[l];
             rmsnorm_forward(a.ln1.data(), a.rstd1.data(), x, P(o.ln1), N, C);
             proj_forward(a.qkv.data(), a.ln1.data(), o.wqkv, N, C, 3 * C, attn_ternary());
-            rope_forward(a.qkv.data(), rope, B, Tn, C, cfg.n_heads);
+            if (cfg.rope_layer(l)) rope_forward(a.qkv.data(), rope, B, Tn, C, cfg.n_heads);
             attention_forward(a.atty.data(), a.att.data(), a.qkv.data(), B, Tn, C, cfg.n_heads);
             proj_forward(out_tmp.data(), a.atty.data(), o.wo, N, C, C, attn_ternary());
             add_forward(a.resid1.data(), x, out_tmp.data(), long(N) * C);
@@ -183,7 +183,7 @@ public:
             zero(dqkv, size_t(N) * 3 * C);
             attention_backward(dqkv.data(), datty.data(), a.att.data(), a.qkv.data(), B, Tn, C,
                                cfg.n_heads);
-            rope_backward(dqkv.data(), rope, B, Tn, C, cfg.n_heads);
+            if (cfg.rope_layer(l)) rope_backward(dqkv.data(), rope, B, Tn, C, cfg.n_heads);
             zero(dC, size_t(N) * C);
             proj_backward(dC.data(), dqkv.data(), a.ln1.data(), o.wqkv, N, C, 3 * C, attn_ternary());
             rmsnorm_backward(dresid.data(), G(o.ln1), dC.data(), x_in, P(o.ln1), a.rstd1.data(), N, C);
@@ -268,7 +268,7 @@ public:
             const auto& o = layer_[l];
             rmsnorm_forward(a.ln1.data(), a.rstd1.data(), x, P(o.ln1), N, C);
             proj_forward(a.qkv.data(), a.ln1.data(), o.wqkv, N, C, 3 * C, attn_ternary());
-            rope_apply(a.qkv.data(), rope, B, 1, C, NH, false, pos);
+            if (cfg.rope_layer(l)) rope_apply(a.qkv.data(), rope, B, 1, C, NH, false, pos);
             T* kc = kcache_[l].data();
             T* vc = vcache_[l].data();
             for (int b = 0; b < B; ++b) {

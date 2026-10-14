@@ -176,25 +176,29 @@ inline void checkpoint_keeps_muon_state() {
 }
 
 // The model's shape survives a checkpoint, and checkpoints from before
-// fp_attention existed (11 config fields) still load, without it.
+// fp_attention and nope_every existed (11 config fields) still load,
+// without them.
 inline void checkpoint_config_fields() {
     Config c;
     c.vocab = 300;
     c.n_experts = 8;
     c.n_shared = 1;
     c.ternary = c.fp_attention = true;
+    c.nope_every = 3;
     FILE* f = std::tmpfile();
     write_config(f, c);
     std::rewind(f);
     const Config r = read_config(f);
-    EXPECT(r.vocab == 300 && r.n_experts == 8 && r.n_shared == 1 && r.ternary && r.fp_attention,
+    EXPECT(r.vocab == 300 && r.n_experts == 8 && r.n_shared == 1 && r.ternary && r.fp_attention &&
+               r.nope_every == 3,
            "config changed in a round trip");
     std::rewind(f);
     const int32_t old[] = {11, 300, 256, 256, 4, 4, 0, 8, 2, 0, 1, 1};  // the count, then 11 fields
     std::fwrite(old, 4, std::size(old), f);
     std::rewind(f);
     const Config o = read_config(f);
-    EXPECT(o.vocab == 300 && o.n_experts == 8 && o.n_shared == 1 && o.ternary && !o.fp_attention,
+    EXPECT(o.vocab == 300 && o.n_experts == 8 && o.n_shared == 1 && o.ternary && !o.fp_attention &&
+               o.nope_every == 0,
            "an 11-field config read wrong");
     std::fclose(f);
 }

@@ -14,6 +14,8 @@
 //   add    multi-digit addition, column by column with carries
 //   mul    multi-digit multiplication via partial products
 //   expr   nested arithmetic expression, innermost operation first
+//          (with expr_rewrite, each step also writes what is left:
+//          "(2+3)*4" -> "2+3=5: 5*4; 5*4=20")
 //   eq     linear equation a*x+b=c, solved in two steps
 //   cmp    which of two numbers is larger, digit by digit
 #pragma once
@@ -43,6 +45,17 @@ struct Problem {
 namespace reasoning_detail {
 
 inline int rand_in(Rng& rng, int lo, int hi) { return lo + int(rng.below(uint64_t(hi - lo + 1))); }
+
+}  // namespace reasoning_detail
+
+// How solutions are written. The problems themselves (the questions and
+// answers) are the same in every format: formats draw no random numbers.
+struct Formats {
+    bool chain_plan = false;    // chain: look the variables up first
+    bool expr_rewrite = false;  // expr: write the expression left after each step
+};
+
+namespace reasoning_detail {
 
 // A number with exactly `digits` digits (no leading zero unless 1 digit).
 inline long rand_digits(Rng& rng, int digits) {
@@ -196,7 +209,7 @@ struct Expr {
     int left = -1, right = -1;
 };
 
-inline Problem expr(Rng& rng, int d) {
+inline Problem expr(Rng& rng, int d, bool rewrite) {
     const int ops = d + 1;
     std::vector<Expr> nodes;
     std::function<int(int)> build = [&](int n_ops) -> int {
@@ -215,16 +228,6 @@ inline Problem expr(Rng& rng, int d) {
         return int(nodes.size()) - 1;
     };
     const int root = build(ops);
-    std::vector<std::string> steps;
-    // Post-order: each operation once both operands are numbers.
-    std::function<void(int)> solve = [&](int i) {
-        if (!nodes[i].op) return;
-        solve(nodes[i].left);
-        solve(nodes[i].right);
-        steps.push_back(std::to_string(nodes[nodes[i].left].value) + nodes[i].op +
-                        std::to_string(nodes[nodes[i].right].value) + "=" + std::to_string(nodes[i].value));
-    };
-    solve(root);
     // Print with parentheses around every non-leaf operand.
     std::function<std::string(int, bool)> print = [&](int i, bool top) -> std::string {
         if (!nodes[i].op) return std::to_string(nodes[i].value);
@@ -235,6 +238,20 @@ inline Problem expr(Rng& rng, int d) {
     p.task = "expr";
     p.difficulty = d;
     p.question = print(root, true);
+    std::vector<std::string> steps;
+    // Post-order: each operation once both operands are numbers. A computed
+    // node becomes a number, so printing the tree shows what is left.
+    std::function<void(int)> solve = [&](int i) {
+        if (!nodes[i].op) return;
+        solve(nodes[i].left);
+        solve(nodes[i].right);
+        std::string step = std::to_string(nodes[nodes[i].left].value) + nodes[i].op +
+                           std::to_string(nodes[nodes[i].right].value) + "=" + std::to_string(nodes[i].value);
+        nodes[i].op = 0;
+        if (rewrite && i != root) step += ": " + print(root, true);
+        steps.push_back(step);
+    };
+    solve(root);
     p.steps = join(steps, "; ");
     p.answer = std::to_string(nodes[root].value);
     return p;
@@ -296,14 +313,12 @@ inline const std::vector<std::string>& reasoning_tasks() {
     return t;
 }
 
-// chain_plan: chain solutions look the variables up before computing (see
-// chain()); the other tasks ignore it.
-inline Problem make_problem(const std::string& task, int difficulty, Rng& rng, bool chain_plan = false) {
+inline Problem make_problem(const std::string& task, int difficulty, Rng& rng, const Formats& f = {}) {
     using namespace reasoning_detail;
-    if (task == "chain") return chain(rng, difficulty, chain_plan);
+    if (task == "chain") return chain(rng, difficulty, f.chain_plan);
     if (task == "add") return add(rng, difficulty);
     if (task == "mul") return mul(rng, difficulty);
-    if (task == "expr") return expr(rng, difficulty);
+    if (task == "expr") return expr(rng, difficulty, f.expr_rewrite);
     if (task == "eq") return eq(rng, difficulty);
     if (task == "cmp") return cmp(rng, difficulty);
     CHECK(false, "unknown task '%s'", task.c_str());

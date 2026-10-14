@@ -64,6 +64,7 @@ Config config_from_args(Args& a, int vocab) {
     c.n_shared = int(a.integer("shared", 0));
     c.ternary = a.flag("ternary");
     c.fp_attention = a.flag("fp-attn");
+    c.nope_every = int(a.integer("nope-every", 0));
     return c;
 }
 
@@ -75,8 +76,11 @@ void print_config(const Config& c, const Model<float>& m) {
                     c.ehidden(), c.n_shared);
     else
         std::printf("dense FFN %d", c.dense_hidden());
-    std::printf("%s\n", !c.ternary ? "" : c.fp_attention ? ", ternary BitLinear FFN, full-precision attention"
-                                                          : ", ternary BitLinear");
+    std::printf("%s", !c.ternary ? "" : c.fp_attention ? ", ternary BitLinear FFN, full-precision attention"
+                                                        : ", ternary BitLinear");
+    if (c.nope_every == 1) std::printf(", no RoPE");
+    else if (c.nope_every) std::printf(", no RoPE in 1 of every %d layers", c.nope_every);
+    std::printf("\n");
     std::printf("params: %.3f M total, %.3f M active per token\n", m.num_params() / 1e6,
                 m.active_params() / 1e6);
 }
@@ -259,7 +263,9 @@ int cmd_gen_reasoning(Args& a) {
     const int min_d = int(a.integer("min-diff", 1)), max_d = int(a.integer("max-diff", 3));
     const int test_max_d = int(a.integer("test-max-diff", max_d + 1));
     const std::vector<std::string> tasks = split(a.str("tasks", "chain,add,mul,expr,eq,cmp"), ',');
-    const bool chain_plan = a.flag("chain-plan");  // chain solutions look variables up first
+    Formats formats;
+    formats.chain_plan = a.flag("chain-plan");      // chain solutions look variables up first
+    formats.expr_rewrite = a.flag("expr-rewrite");  // expr solutions write what is left after each step
     Rng rng(uint64_t(a.integer("seed", 1)));
     const std::string bpe = a.str("bpe");
     a.done();
@@ -273,7 +279,7 @@ int cmd_gen_reasoning(Args& a) {
     for (const auto& t : tasks)
         for (int d = min_d; d <= test_max_d; ++d)
             for (int i = 0; i < per_cell;) {
-                Problem p = make_problem(t, d, rng, chain_plan);
+                Problem p = make_problem(t, d, rng, formats);
                 if (!held_out.insert(p.question).second) continue;  // no duplicates
                 test.push_back(std::move(p));
                 ++i;
@@ -287,7 +293,7 @@ int cmd_gen_reasoning(Args& a) {
         for (long i = 0; i < n;) {
             const std::string& t = tasks[rng.below(tasks.size())];
             const Problem p =
-                make_problem(t, min_d + int(rng.below(uint64_t(max_d - min_d + 1))), rng, chain_plan);
+                make_problem(t, min_d + int(rng.below(uint64_t(max_d - min_d + 1))), rng, formats);
             if (held_out.count(p.question)) {
                 ++skipped;
                 continue;
@@ -574,6 +580,7 @@ int cmd_train(Args& a) {
             "model:  --seq 256 --dim 256 --layers 4 --heads 4 --ffn 0(auto)\n"
             "        --experts 0 --topk 2 --ehidden 0(auto) --shared 0 --ternary\n"
             "        --fp-attn (with --ternary: attention stays full precision)\n"
+            "        --nope-every 0 (N: every Nth layer has no position encoding; 1: none has)\n"
             "train:  --batch 16 --accum 1 --steps 2000 --lr 1e-3 --min-lr-frac 0.1\n"
             "        --warmup 100 --wd 0.1 --clip 1.0 --bias-rate 1e-3 --seed 1\n"
             "        --muon (Muon instead of AdamW for the matrices in the blocks)\n"
