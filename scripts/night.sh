@@ -8,7 +8,9 @@
 # time regardless, with a checkpoint; running the script again resumes it.
 #
 # Settings (environment), with their defaults:
-#   MODEL="--dim 768 --layers 12 --heads 12 --experts 8 --topk 2 --ternary"
+#   MODEL="--dim 768 --layers 12 --heads 12 --experts 8 --topk 2"
+#     (full precision: the first nights train that way, and the last ones
+#     switch to ternary with INIT and TERNARY=1; see docs/LAPTOP.md)
 #   OPT=--muon (or "" for AdamW everywhere)   LR=1.5e-3
 #   SEQ=512 BATCH=8 ACCUM=16 (tokens per step: SEQ x BATCH x ACCUM)
 #   HOURS=7.5   RUN=night1 (outputs runs/$RUN.*)   DATA=data
@@ -26,7 +28,7 @@ DATA=${DATA:-data}
 RUN=${RUN:-night1}
 HOURS=${HOURS:-7.5}
 TOKS=${TOKS:?set TOKS to the tokens per second scripts/probe.sh measured for this MODEL}
-MODEL=${MODEL:---dim 768 --layers 12 --heads 12 --experts 8 --topk 2 --ternary}
+MODEL=${MODEL:---dim 768 --layers 12 --heads 12 --experts 8 --topk 2}
 OPT=${OPT---muon}
 LR=${LR:-1.5e-3}
 SEQ=${SEQ:-512}
@@ -49,7 +51,7 @@ resume=()
 # Once runs/$RUN.ckpt exists, --resume wins over --init.
 [ -n "${INIT:-}" ] && resume+=(--init "$INIT")
 # A new model is built from MODEL; with INIT, the model is the checkpoint's
-# (MODEL's --ternary must not switch it by accident: that is TERNARY=1).
+# (a --ternary in MODEL must not switch it by accident: that is TERNARY=1).
 if [ -n "${INIT:-}" ]; then
   model=()
   [ "${TERNARY:-0}" = 1 ] && model=(--ternary)

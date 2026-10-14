@@ -82,6 +82,9 @@ and can do everything else from there.
    token but see fewer of them in a night: a reasonable pick is the
    largest size that still trains 0.3B tokens a night or more (the
    tokens/night column), so a week of nights gives it a couple of billion.
+   The first nights train in full precision (the sizes without
+   `-ternary`); the `d768-moe-ternary` row is the speed of the last
+   nights, once the model is switched to ternary (below).
 3. **Data:** downloads the public datasets (GSM8K, TinyStories,
    FineWeb-Edu, OpenMathInstruct-2, MetaMathQA), trains our tokenizer on a
    sample of them, and writes the token files. Safe to rerun if
@@ -126,6 +129,15 @@ Starting from night 1 looks like this (the model comes from the
 checkpoint; the learning-rate schedule starts over):
 ```sh
 RUN=night2 INIT=runs/night1.ckpt MIX="..." TOKS=... BATCH=... ACCUM=... scripts/night.sh
+```
+The model trains in full precision first, and the last night or two
+switch it to ternary, which is what our kernels run: `TERNARY=1` with
+`INIT`, and the ternary row's `TOKS`, `BATCH` and `ACCUM` from the probe.
+On the curriculum, switching for the last third of training cost half as
+much as training ternary throughout (README, "Full precision first,
+ternary at the end").
+```sh
+RUN=night5 INIT=runs/night4.ckpt TERNARY=1 TOKS=... BATCH=... ACCUM=... scripts/night.sh
 ```
 CPU-scale experiments and engine work continue on the cloud VM during the
 day.

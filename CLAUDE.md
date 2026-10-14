@@ -63,7 +63,9 @@ Reasoning is the first capability we go after.
    - a CUDA backend for the same model, tested op by op against the CPU
      engine;
    - overnight runs on public data (general text plus math and reasoning
-     sets).
+     sets): full precision first, then the last nights switched to
+     ternary (`night.sh` `INIT=... TERNARY=1`), which on the curriculum
+     cost half as much as ternary throughout.
 3. Inference on our ternary kernels: CPU first, then GPU.
 
 ## Hardware
