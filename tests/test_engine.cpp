@@ -5,6 +5,7 @@
 #include <thread>
 
 #include "test_attention.h"
+#include "test_clone_experts.h"
 #include "test_model.h"
 #include "test_memory.h"
 #include "test_ops.h"
@@ -37,6 +38,7 @@ int main(int argc, char** argv) {
         {"numerics", test_numerics},
         {"policy gradient", test_policy_gradient_expectation},
         {"train", test_train},
+        {"clone experts", test_clone_experts},
         {"optim", test_optim},
         {"generated traces", test_reasoning_traces},
         {"attention", test_attention},

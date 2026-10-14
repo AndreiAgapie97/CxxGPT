@@ -525,7 +525,8 @@ inline Config peek_checkpoint_config(const std::string& path) {
     return c;
 }
 
-inline void load_checkpoint(const std::string& path, Model<float>& model, AdamW* opt, Rng* data_rng) {
+inline void load_checkpoint(const std::string& path, Model<float>& model, AdamW* opt, Rng* data_rng,
+                            bool detect_optimizer = false) {
     FILE* f = std::fopen(path.c_str(), "rb");
     CHECK(f, "cannot open %s", path.c_str());
     char magic[8];
@@ -541,6 +542,13 @@ inline void load_checkpoint(const std::string& path, Model<float>& model, AdamW*
           (unsigned long long)n, model.params.size());
     CHECK(std::fread(model.params.data(), 4, n, f) == n, "truncated params");
     CHECK(std::fread(&has_opt, 4, 1, f) == 1, "truncated checkpoint");
+    CHECK(has_opt <= 2, "unknown checkpoint optimizer kind");
+    // Offline checkpoint edits must preserve AdamW versus Muon without
+    // making the caller guess. Training keeps the explicit resume check.
+    if (detect_optimizer && opt) {
+        opt->muon = has_opt == 2;
+        if (!has_opt) { opt->m.clear(); opt->v.clear(); }
+    }
     if (has_opt && opt)
         CHECK((has_opt == 2) == opt->muon, "%s was trained %s Muon; resume it %s --muon", path.c_str(),
               has_opt == 2 ? "with" : "without", has_opt == 2 ? "with" : "without");
