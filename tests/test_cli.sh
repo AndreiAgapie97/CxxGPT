@@ -34,6 +34,10 @@ status=0
 [[ "$status" == 1 ]] && grep -q 'one-logit softmax has zero task gradient' "$TEST_DIR/top1.log"
 
 ./test_training_cli generate "$TEST_DIR"
+status=0
+"$CXXGPT" eval-reasoning --ckpt "$TEST_DIR/audit.ckpt" --test "$TEST_DIR/audit.txt" --as-engine \
+    --threads 2 > "$TEST_DIR/engine-config.log" 2>&1 || status=$?
+[[ "$status" == 1 ]] && grep -q 'requires a ternary model' "$TEST_DIR/engine-config.log"
 for target in 1 -1; do
     status=0
     ./test_training_cli repeat-backward "$target" > "$TEST_DIR/repeat-backward.log" 2>&1 || status=$?

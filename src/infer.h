@@ -59,6 +59,7 @@ inline Int8Rows quantize_rows_int8(const float* w, int rows, int cols) {
 // computes what the engine computes, so it can be evaluated (or tested) as
 // the engine runs it.
 inline void round_to_engine_int8(Model<float>& m) {
+    CHECK(m.cfg.ternary, "--as-engine requires a ternary model");
     for (const auto& p : m.infos) {
         const bool attention = p.name.ends_with(".wqkv") || p.name.ends_with(".wo");
         if (!(p.name == "wte" || (m.cfg.fp_attention && attention))) continue;
