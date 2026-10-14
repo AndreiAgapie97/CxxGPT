@@ -19,6 +19,7 @@
 
 #include "common.h"
 #include "config.h"
+#include "memory.h"
 #include "ops.h"
 
 template <class T>
@@ -43,13 +44,38 @@ public:
         build_layout();
         params.assign(n_params_, T(0));
         grads.assign(n_params_, T(0));
-        qparams.assign(n_params_, T(0));
+        if (cfg.ternary) qparams.assign(n_params_, T(0));
         rope = RopeTable<T>(cfg.seq_len, cfg.head_size());
         router_bias.assign(cfg.n_layers, std::vector<T>(std::max(1, cfg.n_experts), T(0)));
         expert_load.assign(cfg.n_layers, std::vector<double>(std::max(1, cfg.n_experts), 0.0));
     }
 
     size_t num_params() const { return n_params_; }
+
+    // Vector element storage only: metadata, allocator overhead and worker
+    // thread-local GEMM/attention/Muon scratch are excluded. Capacity may
+    // exceed size after resizing; caches/activations persist across uses.
+    ModelMemory memory_bytes() const {
+        ModelMemory b;
+        b.parameters.add(params); b.gradients.add(grads); b.quantized.add(qparams);
+        for (const auto& v : router_bias) b.routing.add(v);
+        for (const auto& v : expert_load) b.routing.add(v);
+        b.rope.add(rope.cos); b.rope.add(rope.sin);
+        for (const auto& a : acts) {
+            for (const auto* v : {&a.ln1, &a.rstd1, &a.qkv, &a.att, &a.atty, &a.resid1,
+                                 &a.ln2, &a.rstd2, &a.resid2, &a.fc, &a.sw,
+                                 &a.rlogits, &a.gate, &a.xg, &a.efc, &a.esw, &a.ey}) b.activations.add(*v);
+            for (const auto* v : {&a.sel, &a.order, &a.row_of, &a.expert_start}) b.activations.add(*v);
+        }
+        for (const auto* v : {&x0, &lnf, &rstdf, &logits, &losses}) b.activations.add(*v);
+        b.activations.add(tokens_); b.activations.add(targets_);
+        for (const auto* v : {&dresid, &dC, &dqkv, &datty, &dfc, &dsw, &dey, &dxg, &drl, &dffn}) b.backward.add(*v);
+        for (const auto* v : {&xq, &out_tmp, &dgate_scratch_}) b.scratch.add(*v);
+        b.scratch.add(count_scratch_); b.scratch.add(fill_scratch_); b.kv.add(kv_start_);
+        for (const auto& v : kcache_) b.kv.add(v);
+        for (const auto& v : vcache_) b.kv.add(v);
+        return b;
+    }
 
     // Parameters a token actually uses: with MoE, only top_k of the experts.
     size_t active_params() const {

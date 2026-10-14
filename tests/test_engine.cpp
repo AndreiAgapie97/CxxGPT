@@ -5,6 +5,7 @@
 #include <thread>
 
 #include "test_model.h"
+#include "test_memory.h"
 #include "test_ops.h"
 #include "test_reasoning.h"
 #include "test_reasoning_metrics.h"
@@ -24,6 +25,7 @@ int main(int argc, char** argv) {
     struct { const char* name; void (*fn)(); } suites[] = {
         {"ops", test_ops},
         {"model", test_model},
+        {"memory", test_memory},
         {"reasoning", test_reasoning},
         {"reasoning metrics", test_reasoning_metrics},
         {"tokenizer", test_tokenizer},

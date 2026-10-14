@@ -103,6 +103,28 @@ public:
         return b;
     }
 
+    // Vector payload, including inactive placeholder matrices; scales and
+    // vector/object metadata are not elements. weight_bytes() remains the
+    // active logical weight count, including its scalar scales.
+    PackedMemory memory_bytes() const {
+        PackedMemory b;
+        b.weights.add(wte_); b.weights.add(lnf_);
+        auto bp = [&](const TernaryMatrixBitplane& w) { b.weights.add(w.pos); b.weights.add(w.neg); };
+        for (const auto& l : layers_) {
+            b.weights.add(l.ln1); b.weights.add(l.ln2); b.weights.add(l.router); b.weights.add(l.bias);
+            bp(l.wqkv); bp(l.wo); bp(l.wfc); bp(l.wproj);
+            for (const auto& w : l.efc) bp(w);
+            for (const auto& w : l.eproj) bp(w);
+        }
+        b.rope.add(rope_.cos); b.rope.add(rope_.sin);
+        for (const auto& v : kcache_) b.kv.add(v);
+        for (const auto& v : vcache_) b.kv.add(v);
+        for (const auto* v : {&x_, &h_, &qkv_, &att_, &tmp_, &scores_, &fc_, &sw_, &down_,
+                             &logits_, &rlogits_, &sw_scale_}) b.scratch.add(*v);
+        b.scratch.add(xq_); b.scratch.add(swq_);
+        return b;
+    }
+
     // Feeds one token at the next position; returns logits [vocab].
     const float* step(int token) {
         const int C = cfg_.d_model, NH = cfg_.n_heads, HS = C / NH, S = cfg_.seq_len, V = cfg_.vocab;

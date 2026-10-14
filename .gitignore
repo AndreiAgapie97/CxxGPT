@@ -14,4 +14,5 @@ runs/
 test_training_cli
 reasoning_audit
 reasoning_targets
+memory_probe
 __pycache__/

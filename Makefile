@@ -14,6 +14,9 @@ TEST_HEADERS := $(wildcard tests/*.h)
 
 all: ternary_moe test_engine cxxgpt test_training_cli reasoning_audit reasoning_targets
 
+memory_probe: experiments/memory_probe.cpp $(HEADERS)
+	$(CXX) $(CXXFLAGS) $< -o $@
+
 reasoning_targets: experiments/reasoning_targets.cpp $(HEADERS)
 	$(CXX) $(CXXFLAGS) $< -o $@
 
@@ -83,10 +86,14 @@ asan: ternary_moe.cpp tests/test_engine.cpp experiments/toy_world.cpp src/cxxgpt
 	    experiments/reasoning_audit.cpp -o reasoning_audit_asan
 	$(CXX) $(SANFLAGS) -fsanitize=address,undefined -fno-sanitize-recover=undefined \
 	    experiments/reasoning_targets.cpp -o reasoning_targets_asan
+	$(CXX) $(SANFLAGS) -fsanitize=address,undefined -fno-sanitize-recover=undefined \
+	    experiments/memory_probe.cpp -o memory_probe_asan
 	./ternary_moe_asan --tests
 	./test_engine_asan
 	CXXGPT=./cxxgpt_asan CXXGPT_AUDIT=./reasoning_audit_asan CXXGPT_TARGETS=./reasoning_targets_asan bash tests/test_cli.sh
 	./research_experiment_asan --steps 5 --seeds 1 --threads 2 --continual --rl-steps 5 --out runs/asan-smoke-$$$$.csv
+	./memory_probe_asan --mode train --ternary --experts 4 --muon --batch 2 --seq 8 --steps 1 > /dev/null
+	./memory_probe_asan --mode packed --ternary --experts 4 --batch 1 > /dev/null
 
 tsan: ternary_moe.cpp tests/test_engine.cpp experiments/toy_world.cpp src/cxxgpt.cpp $(HEADERS) $(TEST_HEADERS) test_training_cli
 	$(CXX) $(SANFLAGS) -fsanitize=thread ternary_moe.cpp -o ternary_moe_tsan
@@ -95,10 +102,13 @@ tsan: ternary_moe.cpp tests/test_engine.cpp experiments/toy_world.cpp src/cxxgpt
 	$(CXX) $(SANFLAGS) -fsanitize=thread src/cxxgpt.cpp -o cxxgpt_tsan
 	$(CXX) $(SANFLAGS) -fsanitize=thread experiments/reasoning_audit.cpp -o reasoning_audit_tsan
 	$(CXX) $(SANFLAGS) -fsanitize=thread experiments/reasoning_targets.cpp -o reasoning_targets_tsan
+	$(CXX) $(SANFLAGS) -fsanitize=thread experiments/memory_probe.cpp -o memory_probe_tsan
 	./ternary_moe_tsan --tests
 	./test_engine_tsan
 	CXXGPT=./cxxgpt_tsan CXXGPT_AUDIT=./reasoning_audit_tsan CXXGPT_TARGETS=./reasoning_targets_tsan bash tests/test_cli.sh
 	./research_experiment_tsan --steps 5 --seeds 1 --threads 2 --continual --rl-steps 5 --out runs/tsan-smoke-$$$$.csv
+	./memory_probe_tsan --mode train --ternary --experts 4 --muon --batch 2 --seq 8 --steps 1 > /dev/null
+	./memory_probe_tsan --mode packed --ternary --experts 4 --batch 1 > /dev/null
 
 clean:
-	rm -f ternary_moe test_engine cxxgpt research_experiment reasoning_audit reasoning_targets test_training_cli *_asan *_tsan gpu.o cxxgpt-gpu test_gpu
+	rm -f ternary_moe test_engine cxxgpt research_experiment reasoning_audit reasoning_targets memory_probe test_training_cli *_asan *_tsan gpu.o cxxgpt-gpu test_gpu
