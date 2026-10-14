@@ -57,7 +57,9 @@ Reasoning is the first capability we go after.
   engine, then more tools through the same hook, taught by a program that
   writes word problems; finer experts, learning from checked solutions,
   place-value digit embeddings, int8 tensor cores for ternary), effort
-  levels (more tries, a judge, thinking loops), a ladder for growing past
+  levels (more tries, a judge, thinking loops), our own ideas (numbers
+  backwards inside the model, planted mistakes, cloning dead experts,
+  experts that compute exactly, and more), a ladder for growing past
   8 GB to 1-2 B parameters (recompute, bf16, 8-bit optimizer state, the
   optimizer in CPU RAM, streaming layers), and the seed-repeat funnel an
   idea passes before it gets a laptop night. Decisions are made on a dev set held out
