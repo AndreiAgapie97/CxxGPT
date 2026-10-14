@@ -183,19 +183,21 @@ norms and routers stay on AdamW. Same learning rate and steps.
 
 ### Learning rate and weight decay
 
-Ternary MoE with AdamW, otherwise the same runs:
+Ternary MoE, otherwise the same runs:
 
-| setting | val loss | accuracy | d = 1–3 | d = 4 |
-|---|---:|---:|---:|---:|
-| lr 1.5e-3, weight decay 0.1 (as above) | 0.1116 | 55.2% | 72.4% | 3.8% |
-| lr 3e-3 | **0.1063** | **60.0%** | **78.6%** | 4.2% |
-| weight decay 0 | 0.1120 | 53.9% | 70.8% | 2.9% |
+| optimizer | lr | val loss | accuracy | d = 1–3 | d = 4 |
+|---|---:|---:|---:|---:|---:|
+| AdamW | 1.5e-3 | 0.1116 | 55.2% | 72.4% | 3.8% |
+| AdamW | 3e-3 | 0.1063 | 60.0% | 78.6% | 4.2% |
+| Muon | 1.5e-3 | 0.0974 | 61.1% | 79.9% | 5.0% |
+| Muon | 3e-3 | **0.0956** | **61.7%** | **80.7%** | 4.6% |
+| AdamW, weight decay 0 (not 0.1) | 1.5e-3 | 0.1120 | 53.9% | 70.8% | 2.9% |
 
-- **A higher learning rate helps here** (5% lower validation loss), so
-  part of Muon's lead over AdamW on ternary MoE may come from a learning
-  rate that suits Muon better. `scripts/night.sh` keeps 1.5e-3 for now:
-  the best learning rate usually drops as models get wider, and a
-  diverged run costs a night.
+- **A higher learning rate helps both**, AdamW more (5% lower validation
+  loss, against 2% for Muon). At the same learning rate Muon stays well
+  ahead: 10% lower validation loss at 3e-3, 13% at 1.5e-3.
+  `scripts/night.sh` keeps 1.5e-3 for now: the best learning rate
+  usually drops as models get wider, and a diverged run costs a night.
 - **Weight decay makes no measurable difference.**
 
 ### Inference kernels
