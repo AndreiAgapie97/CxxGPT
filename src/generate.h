@@ -50,7 +50,9 @@ std::vector<std::vector<int>> generate(Model<T>& model, const std::vector<std::v
     CHECK(max_new > 0, "nothing to generate: max_new is %d", max_new);
     CHECK(L < model.cfg.seq_len, "a prompt of %d tokens fills the model's context of %d", L, model.cfg.seq_len);
     // Positions fed: the prompt, then each picked token but the last.
-    const int total = std::min(model.cfg.seq_len, L - 1 + max_new);
+    // Clamp before addition: even an INT_MAX CLI budget cannot overflow.
+    const int room = model.cfg.seq_len - L + 1;
+    const int total = L - 1 + std::min(max_new, room);
     std::vector<int> start(B);
     for (int b = 0; b < B; ++b) start[b] = L - int(prompts[b].size());
     model.decode_begin(B, start);
@@ -84,6 +86,8 @@ struct EvalResult {
     // (task, difficulty) -> (correct, total)
     std::map<std::pair<std::string, int>, std::pair<int, int>> by_task;
     int correct = 0, total = 0;
+    int max_new = 200;
+    size_t gold_over_cap = 0;
     std::vector<std::pair<Problem, std::string>> failures;  // a few, for inspection
     std::vector<std::string> completions;  // optional, in input order for trace audits
 };
@@ -134,9 +138,11 @@ EvalResult eval_reasoning(Model<T>& model, const std::vector<Problem>& problems,
         for (size_t k = k0; k < k1; ++k) texts[order[k]] = text_of(outs[k - k0]);
     }
     EvalResult r;
+    r.max_new = max_new;
     for (size_t i = 0; i < n; ++i) {
         const Problem& p = problems[i];
-        const bool ok = completion_done(texts[i]) && extract_answer(texts[i]) == p.answer;
+        r.gold_over_cap += tok.encode(p.completion()).size() > size_t(max_new);
+        const bool ok = completion_done(texts[i]) && answer_matches(texts[i], p.answer);
         auto& cell = r.by_task[{p.task, p.difficulty}];
         cell.first += ok;
         cell.second += 1;

@@ -29,6 +29,10 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 DATA=${DATA:-data}
 RUN=${RUN:-night1}
+# Keep night1's seed/order unchanged. Later INIT nights get another order;
+# resuming still restores the checkpoint RNG. An explicit --seed overrides this.
+seed=1
+if [[ "$RUN" =~ ([0-9]+) ]]; then seed=${BASH_REMATCH[1]}; fi
 HOURS=${HOURS:-7.5}
 TOKS=${TOKS:?set TOKS to the tokens per second scripts/probe.sh measured for this MODEL}
 MODEL=${MODEL:---dim 768 --layers 12 --heads 12 --experts 8 --topk 2}
@@ -76,4 +80,4 @@ echo "$RUN: $steps steps of $per_step tokens; stops after $minutes minutes at th
   --reason-test "$DATA/gsm8k/test.txt" --reason-every 2000 --reason-limit 250 \
   "${model[@]}" $OPT --seq "$SEQ" --batch "$BATCH" --accum "$ACCUM" --steps "$steps" --warmup 500 --lr "$LR" \
   --eval-every 500 --eval-batches "$eval_batches" --save-every 1000 --log-every 50 --time-limit "$minutes" \
-  --out "runs/$RUN.ckpt" --log "runs/$RUN.csv" "${resume[@]}" "$@" 2>&1 | tee -ia "runs/$RUN.log"
+  --seed "$seed" --out "runs/$RUN.ckpt" --log "runs/$RUN.csv" "${resume[@]}" "$@" 2>&1 | tee -ia "runs/$RUN.log"

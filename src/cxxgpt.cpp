@@ -117,12 +117,6 @@ std::vector<std::string> split(const std::string& s, char sep) {
     return out;
 }
 
-std::string trim(const std::string& s) {
-    const size_t b = s.find_first_not_of(" \t\r\n");
-    if (b == std::string::npos) return "";
-    return s.substr(b, s.find_last_not_of(" \t\r\n") - b + 1);
-}
-
 // The tokenizer at path, or the byte-level one (no merges) if path is empty.
 Tokenizer load_tokenizer(const std::string& path) {
     Tokenizer tok;
@@ -313,19 +307,6 @@ int cmd_gen_reasoning(Args& a) {
     return 0;
 }
 
-// "1,080" -> "1080": commas that group digits go, so the exact-match check
-// ignores digit grouping; other commas, as in "(1, 2)", stay.
-std::string strip_digit_commas(const std::string& s) {
-    auto digit = [&](size_t i) { return i < s.size() && s[i] >= '0' && s[i] <= '9'; };
-    std::string o;
-    for (size_t i = 0; i < s.size(); ++i) {
-        const bool grouping = s[i] == ',' && i > 0 && digit(i - 1) && digit(i + 1) && digit(i + 2) &&
-                              digit(i + 3) && !digit(i + 4);
-        if (!grouping) o += s[i];
-    }
-    return o;
-}
-
 // A JSON number as an answer: 18 -> "18", 2.5 -> "2.5".
 std::string format_number(double v) {
     char buf[32];
@@ -437,6 +418,7 @@ void print_eval(const EvalResult& r, size_t show_failures) {
         std::printf(" %5.1f%%\n", 100.0 * c / std::max(1, n));
     }
     std::printf("overall %.1f%% (%d / %d)\n", 100.0 * r.correct / std::max(1, r.total), r.correct, r.total);
+    std::printf("gold completions exceeding --max-new %d: %zu / %d\n", r.max_new, r.gold_over_cap, r.total);
     // Multi-line answers (GSM8K's) stay indented under their label.
     auto indent = [](std::string t) {
         for (size_t i = 0; (i = t.find('\n', i)) != std::string::npos; i += 15) t.replace(i, 1, "\n              ");
@@ -455,6 +437,8 @@ int cmd_eval_reasoning(Args& a) {
     const std::string ckpt = a.str("ckpt", "model.ckpt"), test_path = a.str("test", "data/reason.test.txt");
     const int batch = int(a.integer("batch", 64)), limit = int(a.integer("limit", 0));
     const bool show = a.flag("show-failures");
+    const int max_new = int(a.integer("max-new", 200));
+    CHECK(max_new > 0, "--max-new must be positive");
     // As TernaryEngine runs it: the embedding (and --fp-attn attention) in
     // int8 rows.
     const bool as_engine = a.flag("as-engine");
@@ -472,7 +456,7 @@ int cmd_eval_reasoning(Args& a) {
         test = std::move(sub);
     }
     const double t0 = now_seconds();
-    const EvalResult r = eval_reasoning(model, test, tok, batch);
+    const EvalResult r = eval_reasoning(model, test, tok, batch, max_new);
     print_eval(r, show ? r.failures.size() : 0);
     std::printf("(%.1f s)\n", now_seconds() - t0);
     return 0;
@@ -594,7 +578,7 @@ int cmd_train(Args& a) {
             "train:  --batch 16 --accum 1 --steps 2000 --lr 1e-3 --min-lr-frac 0.1\n"
             "        --warmup 100 --wd 0.1 --clip 1.0 --bias-rate 1e-3 --seed 1\n"
             "        --muon (Muon instead of AdamW for the matrices in the blocks)\n"
-            "start:  --init FILE (FILE's weights and model; new optimizer, schedule and data order;\n"
+            "start:  --init FILE (FILE's weights and model; new optimizer and schedule; data order from --seed;\n"
             "        with --ternary, the weights turn ternary from here on)\n"
             "output: --out model.ckpt --resume --log FILE.csv --log-every 10\n"
             "        --eval-every 200 --eval-batches 20 --save-every 500\n"
@@ -603,7 +587,7 @@ int cmd_train(Args& a) {
             "        --matmul tf32 (tensor cores; fp32: exact, slower; bf16: coarser, maybe faster)\n"
             "        --no-tf32 is an alias for fp32; --fused-attn opts into experimental kernels\n"
             "        default attention uses cuBLAS until NVIDIA runtime validation\n"
-            "reason: --reason-test FILE --reason-every STEPS --reason-limit 300\n"
+            "reason: --reason-test FILE --reason-every STEPS --reason-limit 300 --max-new 200\n"
             "Ctrl-C saves a checkpoint and stops; --resume continues from --out, and\n"
             "takes precedence over --init once --out exists.\n");
         return 0;
@@ -646,6 +630,8 @@ int cmd_train(Args& a) {
     const std::string reason_path = a.str("reason-test");
     const Tokenizer tok = load_tokenizer(a.str("bpe"));
     const int reason_every = int(a.integer("reason-every", 0)), reason_limit = int(a.integer("reason-limit", 300));
+    const int max_new = int(a.integer("max-new", 200));
+    CHECK(max_new > 0, "--max-new must be positive");
     g_profiler.enabled = a.flag("profile");
     const bool use_gpu = a.flag("gpu"), request_fused = a.flag("fused-attn"), disable_fused = a.flag("no-fused-attn");
     CHECK(!request_fused || !disable_fused, "choose only one of --fused-attn and --no-fused-attn");
@@ -659,6 +645,10 @@ int cmd_train(Args& a) {
     opt.muon = a.flag("muon");
     a.done();
     CHECK(cfg.vocab >= int(data.vocab), "model vocab %d < data vocab %u", cfg.vocab, data.vocab);
+    CHECK(val_path.empty() || cfg.vocab >= int(val_data.vocab),
+          "model vocab %d < validation vocab %u", cfg.vocab, val_data.vocab);
+    CHECK(reason_path.empty() || cfg.vocab >= tok.vocab_size(),
+          "model vocab %d < reasoning tokenizer vocab %d", cfg.vocab, tok.vocab_size());
     CHECK(log_every > 0 && eval_batches > 0, "log interval and evaluation batch count must be positive");
     AccumulationBatch group(B, Tn, accum);
 
@@ -715,6 +705,7 @@ int cmd_train(Args& a) {
         log = create_file(log_path, "a");
         CHECK(log, "cannot open %s", log_path.c_str());
         if (fresh) std::fprintf(log, "step,loss,val_loss,lr,grad_norm,ms_per_step,load_ratio\n");
+        if (resume) std::fprintf(log, "# resumed at step %ld\n", opt.step);
     }
     std::signal(SIGINT, on_signal);
     std::signal(SIGTERM, on_signal);
@@ -731,7 +722,7 @@ int cmd_train(Args& a) {
         if (reason_test.empty()) return;
         be.sync();
         const double t0 = now_seconds();
-        const EvalResult r = eval_reasoning(model, reason_test, tok);
+        const EvalResult r = eval_reasoning(model, reason_test, tok, 64, max_new);
         std::printf("reasoning eval at step %ld (%.1f s):\n", at_step, now_seconds() - t0);
         print_eval(r, 1);  // one wrong answer, to see what the model writes
         if (log) {
@@ -749,6 +740,7 @@ int cmd_train(Args& a) {
     constexpr int kMaxBadSteps = 10;
     int bad_steps = 0;
     bool diverged = false;
+    long last_validation_step = -1;
     long saved_step = resume ? first_step : -1;  // what --out holds
     for (; step < steps && !g_stop;) {
         const double t0 = now_seconds();
@@ -776,8 +768,8 @@ int cmd_train(Args& a) {
                 break;
             }
             if (time_limit > 0 && now_seconds() - t_start > time_limit) {
-                diverged = true;
-                break;
+                std::printf("time limit reached\n");
+                break;  // skipped attempts below the streak limit do not imply divergence
             }
             continue;  // failed attempts do not advance optimizer or schedule
         }
@@ -792,8 +784,10 @@ int cmd_train(Args& a) {
 
         const bool last = step + 1 == steps;
         double vloss = -1;
-        if (eval_every > 0 && ((step + 1) % eval_every == 0 || last) && val_hi >= val_lo + Tn + 1)
+        if (eval_every > 0 && ((step + 1) % eval_every == 0 || last) && val_hi >= val_lo + Tn + 1) {
             vloss = eval_loss(be, *val, val_lo, val_hi, B, Tn, eval_batches);
+            last_validation_step = step + 1;
+        }
         if ((step + 1) % log_every == 0 || last || vloss >= 0) {
             std::printf("step %6ld | loss %.4f", step + 1, loss_acc / n_acc);
             if (vloss >= 0) std::printf(" | val %.4f", vloss);
@@ -812,8 +806,7 @@ int cmd_train(Args& a) {
         }
         if (save_every > 0 && (step + 1) % save_every == 0) {
             be.sync();
-            save_checkpoint(out, model, opt, data_rng);
-            saved_step = opt.step;
+            if (save_checkpoint(out, model, opt, data_rng, true)) saved_step = opt.step;
         }
         if (reason_every > 0 && (step + 1) % reason_every == 0 && !last) reason_eval(step + 1);
         ++step;
@@ -834,10 +827,18 @@ int cmd_train(Args& a) {
         if (log) std::fclose(log);
         return 1;
     }
-    reason_eval(step);
+    // Time-limited runs may end between evaluations. SIGINT still saves promptly;
+    // do not repeat a validation already logged for this successful update.
+    if (!g_stop && eval_every > 0 && last_validation_step != opt.step && val_hi >= val_lo + Tn + 1) {
+        const double vloss = eval_loss(be, *val, val_lo, val_hi, B, Tn, eval_batches);
+        std::printf("step %6ld | val %.4f (final validation)\n", opt.step, vloss);
+        // Numeric CSV rows keep their seven columns; comments already carry reasoning evals.
+        if (log) std::fprintf(log, "# final validation step %ld: %.5f\n", opt.step, vloss);
+    }
     be.sync();
     save_checkpoint(out, model, opt, data_rng);
     std::printf("saved %s at step %ld%s\n", out.c_str(), opt.step, g_stop ? " (interrupted)" : "");
+    if (!g_stop) reason_eval(step);
     if (log) std::fclose(log);
     return 0;
 }

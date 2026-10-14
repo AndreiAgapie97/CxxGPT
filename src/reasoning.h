@@ -19,6 +19,7 @@
 //   eq     linear equation a*x+b=c, solved in two steps
 //   cmp    which of two numbers is larger, digit by digit
 #pragma once
+#include <charconv>
 
 #include <algorithm>
 #include <cstdio>
@@ -369,11 +370,8 @@ inline std::vector<Problem> load_problems(const std::string& path) {
     CHECK(f, "cannot open %s", path.c_str());
     std::vector<Problem> ps;
     std::string line;
-    for (int ch; (ch = std::fgetc(f)) != EOF;) {
-        if (ch != '\n') {
-            line += char(ch);
-            continue;
-        }
+    auto parse_line = [&] {
+        if (!line.empty() && line.back() == '\r') line.pop_back();  // CRLF record terminator
         std::vector<std::string> fields;
         size_t pos = 0;
         for (size_t tab; (tab = line.find('\t', pos)) != std::string::npos; pos = tab + 1)
@@ -382,13 +380,21 @@ inline std::vector<Problem> load_problems(const std::string& path) {
         CHECK(fields.size() == 5, "bad line in %s: %s", path.c_str(), line.c_str());
         Problem p;
         p.task = unescape_field(fields[0]);
-        p.difficulty = std::atoi(fields[1].c_str());
+        const auto parsed = std::from_chars(fields[1].data(), fields[1].data() + fields[1].size(), p.difficulty);
+        CHECK(parsed.ec == std::errc{} && parsed.ptr == fields[1].data() + fields[1].size() && p.difficulty > 0,
+              "bad difficulty in %s: %s", path.c_str(), fields[1].c_str());
         p.question = unescape_field(fields[2]);
         p.steps = unescape_field(fields[3]);
         p.answer = unescape_field(fields[4]);
         ps.push_back(std::move(p));
         line.clear();
+    };
+    for (int ch; (ch = std::fgetc(f)) != EOF;) {
+        if (ch == '\n') parse_line();
+        else line += char(ch);
     }
+    CHECK(!std::ferror(f), "error reading %s", path.c_str());
+    if (!line.empty()) parse_line();  // a final record need not end with a newline
     std::fclose(f);
     return ps;
 }
@@ -399,4 +405,28 @@ inline std::string extract_answer(const std::string& completion) {
     if (i == std::string::npos) return "";
     const size_t j = completion.find('\n', i);
     return completion.substr(i + 5, j == std::string::npos ? std::string::npos : j - i - 5);
+}
+
+// Shared by QA preparation and generated-answer scoring.
+inline std::string trim(const std::string& s) {
+    const size_t b = s.find_first_not_of(" \t\r\n");
+    if (b == std::string::npos) return "";
+    return s.substr(b, s.find_last_not_of(" \t\r\n") - b + 1);
+}
+
+// "1,080" -> "1080": commas that group digits go, so the exact-match check
+// ignores digit grouping; other commas, as in "(1, 2)", stay.
+inline std::string strip_digit_commas(const std::string& s) {
+    auto digit = [&](size_t i) { return i < s.size() && s[i] >= '0' && s[i] <= '9'; };
+    std::string o;
+    for (size_t i = 0; i < s.size(); ++i) {
+        const bool grouping = s[i] == ',' && i > 0 && digit(i - 1) && digit(i + 1) && digit(i + 2) &&
+                              digit(i + 3) && !digit(i + 4);
+        if (!grouping) o += s[i];
+    }
+    return o;
+}
+
+inline bool answer_matches(const std::string& completion, const std::string& gold) {
+    return strip_digit_commas(trim(extract_answer(completion))) == gold;
 }

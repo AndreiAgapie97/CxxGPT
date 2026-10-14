@@ -415,6 +415,10 @@ inline void test_eval_reasoning() {
     ps.insert(ps.begin() + 3, big);
     const EvalResult one = eval_reasoning(m, ps, {}, 1, 20, 100);
     const EvalResult three = eval_reasoning(m, ps, {}, 3, 20, 100);
+    size_t over = 0;
+    for (const auto& p : ps) over += p.completion().size() > 20;  // independent byte tokenizer count
+    EXPECT(one.max_new == 20 && one.gold_over_cap == over && three.gold_over_cap == over,
+           "gold generation-cap count depends on batching or misses a completion");
     EXPECT(one.total == 8 && three.total == 8, "eval scored %d and %d of 8 problems", one.total, three.total);
     bool too_long = false;
     for (const auto& [p, text] : three.failures)
@@ -483,6 +487,8 @@ inline void test_generate_length() {
     const auto capped = generate(m, prompts, 100, never);  // L = 5: room for 16 - 5 + 1
     EXPECT(capped[0].size() == 12 && capped[1].size() == 12, "context-capped generation gave %zu and %zu tokens",
            capped[0].size(), capped[1].size());
+    const auto huge = generate(m, prompts, std::numeric_limits<int>::max(), never);
+    EXPECT(huge == capped, "largest int budget overflowed instead of preserving context-capped tokens");
     const auto stopped = generate(m, prompts, 7, [](const std::vector<int>& g) { return g.size() == 2; });
     EXPECT(stopped[0].size() == 2 && stopped[1].size() == 2, "done did not stop the sequences");
 }
