@@ -5,6 +5,7 @@
 #include <thread>
 
 #include "test_attention.h"
+#include "test_calc.h"
 #include "test_model.h"
 #include "test_memory.h"
 #include "test_ops.h"
@@ -26,6 +27,8 @@ int main(int argc, char** argv) {
     g_pool = &tp;
 
     struct { const char* name; void (*fn)(); } suites[] = {
+        {"calculator", test_calc},
+        {"calculator hook", test_calc_hook},
         {"ops", test_ops},
         {"model", test_model},
         {"memory", test_memory},

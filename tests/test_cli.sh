@@ -173,6 +173,29 @@ status=0
     --test-max-diff 1 --test-per-cell 721 --train 0 --val 0 > "$TEST_DIR/exhausted.log" 2>&1 || status=$?
 [[ "$status" == 1 ]]
 grep -q 'question domain exhausted' "$TEST_DIR/exhausted.log"
+# Calculator evaluation always retains the unassisted baseline. A one-token
+# budget cannot complete a tool call, so both passes must have the same score.
+for tool in calc-notes calc-plain; do
+    "$CXXGPT" eval-reasoning --ckpt "$TEST_DIR/audit.ckpt" --test "$TEST_DIR/audit.txt" \
+        --tools "$tool" --max-new 1 --threads 2 > "$TEST_DIR/calc-eval.log"
+    grep -q '^without tool:$' "$TEST_DIR/calc-eval.log"
+    grep -q '^with calculator:$' "$TEST_DIR/calc-eval.log"
+    [[ $(grep -c '^overall ' "$TEST_DIR/calc-eval.log") == 2 ]]
+    [[ $(grep '^overall ' "$TEST_DIR/calc-eval.log" | sort -u | wc -l) == 1 ]]
+    grep -q '^calculator calls: 0 fired, 0 malformed$' "$TEST_DIR/calc-eval.log"
+    "$CXXGPT" sample --ckpt "$TEST_DIR/audit.ckpt" --tools "$tool" --n 1 --temp 0 --threads 2 \
+        > "$TEST_DIR/calc-sample.txt" 2> "$TEST_DIR/calc-sample.log"
+    grep -q '^calculator calls: 0 fired, 0 malformed$' "$TEST_DIR/calc-sample.log"
+done
+for command in sample eval-reasoning; do
+    "$CXXGPT" "$command" --help > "$TEST_DIR/calc-help.log"
+    grep -q -- '--tools' "$TEST_DIR/calc-help.log"
+    status=0
+    "$CXXGPT" "$command" --tools typo > "$TEST_DIR/calc-invalid.log" 2>&1 || status=$?
+    [[ "$status" == 1 ]]
+    grep -q -- '--tools must be none, calc-notes or calc-plain' "$TEST_DIR/calc-invalid.log"
+done
+printf 'CLI: calculator modes, paired scores, counts and strict options passed\n'
 for batch in 0 -1; do
     status=0
     "$CXXGPT" eval-reasoning --ckpt "$TEST_DIR/audit.ckpt" --test "$TEST_DIR/audit.txt" --batch "$batch" \

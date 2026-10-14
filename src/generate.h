@@ -8,6 +8,7 @@
 #include <string>
 #include <vector>
 
+#include "calc.h"
 #include "model.h"
 #include "reasoning.h"
 #include "tokenizer.h"
@@ -34,11 +35,16 @@ int pick_token(const T* logits, int V, double temperature, Rng* rng) {
 // seq_len - L + 1 (the last token is never fed back, so it needs no slot).
 // done(generated) is asked after each new token; a sequence that is done
 // stops growing (its slot keeps computing until the batch finishes).
-template <class T>
-std::vector<std::vector<int>> generate(Model<T>& model, const std::vector<std::vector<int>>& prompts,
+// Decoder is normally Model<T>; scripted decoders exercise the same loop in
+// tests. Calculator tokens use the same cache and budget as sampled tokens.
+template <class Decoder>
+std::vector<std::vector<int>> generate(Decoder& model, const std::vector<std::vector<int>>& prompts,
                                        int max_new,
                                        const std::function<bool(const std::vector<int>&)>& done,
-                                       double temperature = 0.0, Rng* rng = nullptr) {
+                                       double temperature = 0.0, Rng* rng = nullptr,
+                                       calc::Mode tool = calc::Mode::none, const Tokenizer* tokenizer = nullptr,
+                                       calc::Counts* counts = nullptr) {
+    CHECK(tool == calc::Mode::none || tokenizer, "calculator needs a tokenizer");
     const int B = int(prompts.size());
     std::vector<std::vector<int>> out(B);
     if (B == 0) return out;
@@ -57,20 +63,48 @@ std::vector<std::vector<int>> generate(Model<T>& model, const std::vector<std::v
     for (int b = 0; b < B; ++b) start[b] = L - int(prompts[b].size());
     model.decode_begin(B, start);
     std::vector<int> cur(B), finished(B, 0);
+    std::vector<std::string> texts(B);
+    std::vector<std::vector<int>> pending(B);
+    std::vector<size_t> next(B, 0);
     int n_finished = 0;
     for (int pos = 0; pos < total; ++pos) {
         for (int b = 0; b < B; ++b) {
             if (pos < L) cur[b] = pos < start[b] ? prompts[b][0] : prompts[b][pos - start[b]];
             // else cur[b] holds the token picked at the previous step
         }
-        const T* logits = model.decode_step(cur.data(), pos);
+        const auto* logits = model.decode_step(cur.data(), pos);
         if (pos < L - 1) continue;
         for (int b = 0; b < B; ++b) {
             if (finished[b]) continue;  // stopped slots consume no further random draws
-            const int t = pick_token(logits + size_t(b) * model.cfg.vocab, model.cfg.vocab, temperature, rng);
+            const bool injected = next[b] < pending[b].size();
+            int t = injected ? pending[b][next[b]++] :
+                pick_token(logits + size_t(b) * model.cfg.vocab, model.cfg.vocab, temperature, rng);
+            if (tool != calc::Mode::none && !injected && t < tokenizer->vocab_size()) {
+                const std::string& bytes = tokenizer->token_bytes(t);
+                // A BPE token can carry the trigger and more punctuation.
+                // Split that token so the result precedes its untouched tail.
+                for (size_t end = 1; end <= bytes.size(); ++end) {
+                    const auto result = calc::response(texts[b] + bytes.substr(0, end), tool);
+                    if (!result) continue;
+                    if (result->empty()) { if (counts) ++counts->malformed; break; }
+                    auto replacement = tokenizer->encode(bytes.substr(0, end));
+                    const auto answer = tokenizer->encode(*result);
+                    const auto tail = tokenizer->encode(bytes.substr(end));
+                    replacement.insert(replacement.end(), answer.begin(), answer.end());
+                    replacement.insert(replacement.end(), tail.begin(), tail.end());
+                    // Do not insert half a result at the context/token cap.
+                    if (replacement.size() <= size_t(total - pos)) {
+                        t = replacement[0]; pending[b] = std::move(replacement); next[b] = 1;
+                        if (counts) ++counts->fired;
+                    }
+                    break;
+                }
+            }
             cur[b] = t;
             out[b].push_back(t);
             if (done(out[b])) finished[b] = 1, ++n_finished;
+            if (tool != calc::Mode::none)
+                texts[b] += t < tokenizer->vocab_size() ? tokenizer->token_bytes(t) : "?";
         }
         if (n_finished == B) break;
     }
@@ -86,6 +120,7 @@ struct EvalResult {
     // (task, difficulty) -> (correct, total)
     std::map<std::pair<std::string, int>, std::pair<int, int>> by_task;
     int correct = 0, total = 0;
+    calc::Counts tool_calls;
     int max_new = 200;
     size_t gold_over_cap = 0;
     std::vector<std::pair<Problem, std::string>> failures;  // a few, for inspection
@@ -106,7 +141,7 @@ inline std::vector<int> prompt_tokens(const Problem& p, const Tokenizer& tok) {
 template <class T>
 EvalResult eval_reasoning(Model<T>& model, const std::vector<Problem>& problems, const Tokenizer& tok = {},
                           int batch = 64, int max_new = 200, size_t keep_failures = 8,
-                          bool keep_completions = false) {
+                          bool keep_completions = false, calc::Mode tool = calc::Mode::none) {
     CHECK(batch > 0 && max_new > 0, "evaluation batch and max_new must be positive");
     CHECK(model.cfg.vocab >= tok.vocab_size(), "model vocab %d < tokenizer vocab %d", model.cfg.vocab,
           tok.vocab_size());
@@ -130,15 +165,16 @@ EvalResult eval_reasoning(Model<T>& model, const std::vector<Problem>& problems,
     std::stable_sort(order.begin(), order.end(),
                      [&](size_t x, size_t y) { return prompts[x].size() < prompts[y].size(); });
     std::vector<std::string> texts(n, "(the prompt does not fit in the context)");
+    EvalResult r;
     for (size_t k0 = 0; k0 < order.size(); k0 += size_t(batch)) {
         const size_t k1 = std::min(order.size(), k0 + size_t(batch));
         std::vector<std::vector<int>> group;
         for (size_t k = k0; k < k1; ++k) group.push_back(prompts[order[k]]);
         const auto outs = generate(model, group, max_new,
-                                   [&](const std::vector<int>& gen) { return completion_done(text_of(gen)); });
+                                   [&](const std::vector<int>& gen) { return completion_done(text_of(gen)); },
+                                   0.0, nullptr, tool, &tok, &r.tool_calls);
         for (size_t k = k0; k < k1; ++k) texts[order[k]] = text_of(outs[k - k0]);
     }
-    EvalResult r;
     r.max_new = max_new;
     for (size_t i = 0; i < n; ++i) {
         const Problem& p = problems[i];

@@ -546,6 +546,15 @@ void print_eval(const EvalResult& r, size_t show_failures) {
     }
 }
 
+// Keep both entry points strict: a misspelled mode must not change a score silently.
+calc::Mode calculator_mode(Args& a) {
+    const std::string mode = a.str("tools", "none");
+    CHECK(mode == "none" || mode == "calc-notes" || mode == "calc-plain",
+          "--tools must be none, calc-notes or calc-plain");
+    return mode == "calc-notes" ? calc::Mode::notes :
+           mode == "calc-plain" ? calc::Mode::plain : calc::Mode::none;
+}
+
 int cmd_eval_reasoning(Args& a) {
     ThreadPool tp(threads_arg(a));
     g_pool = &tp;
@@ -558,6 +567,7 @@ int cmd_eval_reasoning(Args& a) {
     // int8 rows.
     const bool as_engine = a.flag("as-engine");
     const std::string bpe = a.str("bpe");
+    const calc::Mode tool = calculator_mode(a);
     a.done();
     const Tokenizer tok = load_tokenizer(bpe);
     Model<float> model(peek_checkpoint_config(ckpt));
@@ -572,7 +582,15 @@ int cmd_eval_reasoning(Args& a) {
     }
     const double t0 = now_seconds();
     const EvalResult r = eval_reasoning(model, test, tok, batch, max_new);
+    if (tool != calc::Mode::none) std::printf("without tool:\n");
     print_eval(r, show ? r.failures.size() : 0);
+    if (tool != calc::Mode::none) {
+        const EvalResult assisted = eval_reasoning(model, test, tok, batch, max_new, 8, false, tool);
+        std::printf("with calculator:\n");
+        print_eval(assisted, show ? assisted.failures.size() : 0);
+        std::printf("calculator calls: %zu fired, %zu malformed\n",
+                    assisted.tool_calls.fired, assisted.tool_calls.malformed);
+    }
     std::printf("(%.1f s)\n", now_seconds() - t0);
     return 0;
 }
@@ -980,6 +998,7 @@ int cmd_sample(Args& a) {
     const double temp = a.real("temp", 0.8);
     const bool answer = a.flag("answer");  // stop after the "#### answer" line, as eval-reasoning does
     Rng rng(uint64_t(a.integer("seed", 1)));
+    const calc::Mode tool = calculator_mode(a);
     a.done();
     Model<float> model(peek_checkpoint_config(ckpt));
     load_checkpoint(ckpt, model, nullptr, nullptr);
@@ -1002,15 +1021,18 @@ int cmd_sample(Args& a) {
         return tok.decode(ok);
     };
     // A BOS would start the next document: this one is over.
+    calc::Counts counts;
     const auto out = generate(
         model, {ids}, n,
         [&](const std::vector<int>& g) { return g.back() == kBos || (answer && completion_done(text_of(g))); },
-        temp, &rng);
+        temp, &rng, tool, &tok, &counts);
     std::vector<int> gen = out[0];
     if (!gen.empty() && gen.back() == kBos) gen.pop_back();
     const std::string text = text_of(gen);
     std::fwrite(text.data(), 1, text.size(), stdout);
     std::printf("\n");
+    if (tool != calc::Mode::none)
+        std::fprintf(stderr, "calculator calls: %zu fired, %zu malformed\n", counts.fired, counts.malformed);
     return 0;
 }
 
