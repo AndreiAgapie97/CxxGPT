@@ -55,6 +55,10 @@ done
 grep -q 'gold completions exceeding --max-new 1: 1 / 1' "$TEST_DIR/cap.log"
 "$CXXGPT" eval-reasoning --ckpt "$TEST_DIR/audit.ckpt" --test "$TEST_DIR/audit.txt" --threads 2 > "$TEST_DIR/cap-default.log"
 grep -q 'gold completions exceeding --max-new 200: 0 / 1' "$TEST_DIR/cap-default.log"
+"$CXXGPT" eval-reasoning --ckpt "$TEST_DIR/audit.ckpt" --test "$TEST_DIR/audit.txt" \
+    --max-new 2147483647 --threads 2 > "$TEST_DIR/cap-largest.log"
+grep -q 'gold completions exceeding --max-new 2147483647: 0 / 1' "$TEST_DIR/cap-largest.log"
+
 "$CXXGPT" train "${COMMON[@]}" --init "$TEST_DIR/audit.ckpt" --out "$TEST_DIR/cap.ckpt" \
     --reason-test "$TEST_DIR/audit.txt" --max-new 1 > "$TEST_DIR/train-cap.log"
 grep -q 'gold completions exceeding --max-new 1: 1 / 1' "$TEST_DIR/train-cap.log"
