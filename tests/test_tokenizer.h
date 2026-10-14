@@ -56,7 +56,7 @@ inline void test_tokenizer() {
     }
 
     // Save and load give the same encoder.
-    const std::string path = "/tmp/cxxgpt_test_tokenizer.bpe";
+    const std::string path = test_path("tokenizer.bpe");
     tok.save(path);
     Tokenizer tok2;
     tok2.load(path);

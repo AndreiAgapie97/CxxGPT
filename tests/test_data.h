@@ -42,7 +42,7 @@ inline void test_problem_file() {
     ps[0] = {"gsm8k", 1, "a\tb \\ c", "line 1\nline 2\\n is literal", "42"};
     ps[1] = {"chain", 3, "x=1", "x is 1", "1"};
     // Into folders that do not exist yet: writing creates them.
-    const std::string dir = "/tmp/cxxgpt_test_new_dir";
+    const std::string dir = test_path("new_dir");
     const std::string path = dir + "/a/b/problems.txt";
     std::filesystem::remove_all(dir);
     save_problems(path, ps);
@@ -57,7 +57,7 @@ inline void test_problem_file() {
 
 // A token file written in pieces reads back as one.
 inline void test_token_writer() {
-    const std::string path = "/tmp/cxxgpt_test_tokens.tok";
+    const std::string path = test_path("tokens.tok");
     std::vector<uint16_t> all;
     {
         TokenWriter w(path, 1000);
@@ -83,7 +83,7 @@ inline void test_token_list() {
     b.vocab = 500;
     for (int i = 0; i < 7; ++i) a.tokens.push_back(uint16_t(i * 41 % 300));
     for (int i = 0; i < 5; ++i) b.tokens.push_back(uint16_t(400 + i)), b.mask.push_back(uint8_t(i % 2));
-    const std::string pa = "/tmp/cxxgpt_test_list_a.tok", pb = "/tmp/cxxgpt_test_list_b.tok";
+    const std::string pa = test_path("list_a.tok"), pb = test_path("list_b.tok");
     a.save(pa);
     b.save(pb);
     const TokenData::Header h = TokenData::peek(pb);

@@ -5,6 +5,8 @@
 #include <cmath>
 #include <cstdio>
 #include <functional>
+#include <filesystem>
+#include <chrono>
 #include <limits>
 #include <vector>
 
@@ -85,4 +87,25 @@ inline double max_abs(const double* a, size_t n) {
     double m = 0.0;
     for (size_t i = 0; i < n; ++i) m = std::max(m, std::abs(a[i]));
     return m;
+}
+
+// Atomically reserve a process-local test workspace; parallel suites cannot
+// share files even if their clocks/counters happen to match.
+inline std::string test_path(const std::string& name) {
+    struct Workspace {
+        std::filesystem::path dir;
+        Workspace() {
+            const auto stamp = std::chrono::steady_clock::now().time_since_epoch().count();
+            for (int i = 0; i < 100; ++i) {
+                dir = std::filesystem::temp_directory_path() / ("cxxgpt-tests-" + std::to_string(stamp) + "-" + std::to_string(i));
+                std::error_code ec;
+                if (std::filesystem::create_directory(dir, ec)) return;
+                CHECK(!ec, "cannot reserve test directory: %s", ec.message().c_str());
+            }
+            CHECK(false, "cannot reserve unique test directory");
+        }
+        ~Workspace() { std::error_code ec; std::filesystem::remove_all(dir, ec); }
+    };
+    static Workspace workspace;
+    return (workspace.dir / name).string();
 }

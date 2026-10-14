@@ -222,7 +222,7 @@ inline void checkpoint_keeps_muon_state() {
     Rng rng(6);
     for (auto& g : model.grads) g = float(rng.normal());
     opt.update(model, 1e-2);
-    const std::string path = "/tmp/cxxgpt_test_muon.ckpt";
+    const std::string path = test_path("muon.ckpt");
     save_checkpoint(path, model, opt, rng);
     Model<float> model2(cfg);
     AdamW opt2;
