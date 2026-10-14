@@ -36,40 +36,43 @@ public:
     size_t num_merges() const { return merges_.size(); }
     const std::string& token_bytes(int id) const { return vocab_[id]; }
 
+    // End of the chunk of s that starts at i (see above). Where a chunk ends
+    // depends only on s and i, so scanning can start at any chunk start.
+    static size_t chunk_end(std::string_view s, size_t i) {
+        const size_t n = s.size();
+        const unsigned char c = s[i];
+        if (is_digit(c)) return i + 1;
+        if (c == ' ' && i + 1 < n && !is_space(s[i + 1]) && !is_digit(s[i + 1]))
+            return scan_run(s, i + 1);  // " word" or " ..."
+        if (is_space(c)) {
+            size_t j = i;
+            while (j < n && is_space(s[j])) ++j;
+            // A final ' ' before a word or punctuation leads that instead.
+            if (j < n && j - i > 1 && s[j - 1] == ' ' && !is_digit(s[j])) --j;
+            return j;
+        }
+        return scan_run(s, i);
+    }
+
     // Calls fn(begin, end) for each chunk of s (see above), in order.
     template <class Fn>
     static void for_each_chunk(std::string_view s, Fn&& fn) {
-        const size_t n = s.size();
-        size_t i = 0;
-        while (i < n) {
-            const size_t start = i;
-            const unsigned char c = s[i];
-            if (is_digit(c)) {
-                ++i;
-            } else if (c == ' ' && i + 1 < n && !is_space(s[i + 1]) && !is_digit(s[i + 1])) {
-                i = scan_run(s, i + 1);  // " word" or " ..."
-            } else if (is_space(c)) {
-                size_t j = i;
-                while (j < n && is_space(s[j])) ++j;
-                // A final ' ' before a word or punctuation leads that instead.
-                if (j < n && j - i > 1 && s[j - 1] == ' ' && !is_digit(s[j])) --j;
-                i = j;
-            } else {
-                i = scan_run(s, i);
-            }
-            fn(start, i);
+        for (size_t i = 0; i < s.size();) {
+            const size_t end = chunk_end(s, i);
+            fn(i, end);
+            i = end;
         }
     }
 
     // First complete lexical chunk boundary at/after from. A lone last byte
     // is not a cut: a later read might change its leading-space classification.
     // Cutting only on newlines made one-line corpora grow without bound.
-    static size_t next_safe_split(std::string_view s, size_t from) {
-        size_t cut = s.size();
-        for_each_chunk(s, [&](size_t begin, size_t) {
-            if (begin >= from && begin > 0 && begin+1 < s.size()) cut = std::min(cut,begin);
-        });
-        return cut;
+    // start must be a chunk start (0, or an earlier cut): scanning begins
+    // there and stops at the first boundary, instead of rescanning all of s.
+    static size_t next_safe_split(std::string_view s, size_t from, size_t start = 0) {
+        for (size_t i = start; i < s.size(); i = chunk_end(s, i))
+            if (i >= from && i > 0 && i + 1 < s.size()) return i;
+        return s.size();
     }
 
     static std::vector<std::pair<size_t, size_t>> chunks(std::string_view s) {

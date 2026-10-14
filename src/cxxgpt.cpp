@@ -196,7 +196,7 @@ int cmd_text2tok(Args& a) {
             if (target >= all.size()) {
                 end = eof ? all.size() : npos;
             } else if (sep.empty()) {
-                end = Tokenizer::next_safe_split(all, target);
+                end = Tokenizer::next_safe_split(all, target, pos);  // pos is 0 or an earlier cut
                 if (end == all.size() && !eof) end = npos;
             } else {
                 end = all.find(sep, target);

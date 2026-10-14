@@ -91,7 +91,10 @@ inline void test_tokenizer() {
         if (t % 3 == 0) r = corpus.substr(rng.below(corpus.size() - 200), 200);
         std::vector<int> pieces;
         for (size_t b = 0; b < r.size();) {
-            const size_t e = Tokenizer::next_safe_split(r, b + 1 + rng.below(8));
+            const size_t from = b + 1 + rng.below(8);
+            const size_t e = Tokenizer::next_safe_split(r, from);
+            // text2tok scans from the previous cut; that must find the same cut.
+            EXPECT(Tokenizer::next_safe_split(r, from, b) == e, "split search from the previous cut differs");
             for (int id : tok.encode(r.substr(b, e - b))) pieces.push_back(id);
             b = e;
         }
