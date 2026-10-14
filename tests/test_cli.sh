@@ -31,6 +31,21 @@ done
 printf 'CLI: single-window train/validation and twelve invalid configurations passed\n'
 
 ./test_training_cli generate "$TEST_DIR"
+# Vocab compatibility must fail before constructing/training the model.
+for kind in val reason; do
+    EXTRA=(--data "$TEST_DIR/masked.tok")
+    message='validation vocab'
+    if [[ "$kind" == reason ]]; then
+        EXTRA+=(--val "$TEST_DIR/masked.tok" --reason-test "$TEST_DIR/audit.txt")
+        message='reasoning tokenizer vocab'
+    fi
+    status=0
+    "$CXXGPT" train "${COMMON[@]}" "${EXTRA[@]}" --out "$TEST_DIR/vocab-$kind.ckpt" \
+        > "$TEST_DIR/vocab-$kind.log" 2>&1 || status=$?
+    [[ "$status" == 1 ]] && grep -q "$message" "$TEST_DIR/vocab-$kind.log"
+    ! grep -q '^step ' "$TEST_DIR/vocab-$kind.log"
+    [[ ! -e "$TEST_DIR/vocab-$kind.ckpt" ]]
+done
 # A2/C10: the final save precedes reasoning; SIGINT saves without another eval.
 "$CXXGPT" train "${COMMON[@]}" --init "$TEST_DIR/audit.ckpt" --out "$TEST_DIR/save-first.ckpt" \
     --reason-test "$TEST_DIR/audit.txt" > "$TEST_DIR/save-first.log"
@@ -94,7 +109,7 @@ for variant in dense ternary moe ternary-moe hybrid hybrid-moe nope nope-ternary
     done
 done
 status=0
-"$CXXGPT" train "${COMMON[@]}" --data "$TEST_DIR/ignored.tok" > "$TEST_DIR/ignored.log" 2>&1 || status=$?
+"$CXXGPT" train "${COMMON[@]}" --data "$TEST_DIR/ignored.tok" --val "$TEST_DIR/ignored.tok" > "$TEST_DIR/ignored.log" 2>&1 || status=$?
 [[ "$status" == 1 ]] && grep -q 'no predictable targets' "$TEST_DIR/ignored.log"
 printf 'CLI: AdamW/Muon masked/sparse accumulation, weighted validation, empty-group skips, and fully masked rejection passed\n'
 

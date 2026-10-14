@@ -659,6 +659,10 @@ int cmd_train(Args& a) {
     opt.muon = a.flag("muon");
     a.done();
     CHECK(cfg.vocab >= int(data.vocab), "model vocab %d < data vocab %u", cfg.vocab, data.vocab);
+    CHECK(val_path.empty() || cfg.vocab >= int(val_data.vocab),
+          "model vocab %d < validation vocab %u", cfg.vocab, val_data.vocab);
+    CHECK(reason_path.empty() || cfg.vocab >= tok.vocab_size(),
+          "model vocab %d < reasoning tokenizer vocab %d", cfg.vocab, tok.vocab_size());
     CHECK(log_every > 0 && eval_batches > 0, "log interval and evaluation batch count must be positive");
     AccumulationBatch group(B, Tn, accum);
 
