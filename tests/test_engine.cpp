@@ -9,6 +9,7 @@
 #include "test_memory.h"
 #include "test_ops.h"
 #include "test_reasoning.h"
+#include "test_wordgen.h"
 #include "test_reasoning_metrics.h"
 #include "test_tokenizer.h"
 #include "test_data.h"
@@ -29,6 +30,7 @@ int main(int argc, char** argv) {
         {"model", test_model},
         {"memory", test_memory},
         {"reasoning", test_reasoning},
+        {"word problems", test_wordgen},
         {"reasoning metrics", test_reasoning_metrics},
         {"tokenizer", test_tokenizer},
         {"data", test_data},
