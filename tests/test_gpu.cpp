@@ -419,6 +419,7 @@ int main() {
     learns_pattern(false);
     learns_pattern(true);
     learns_pattern(false, Matmul::bf16);
+    learns_pattern(true, Matmul::bf16);
     learns_pattern(false, Matmul::tf32, true);
     profile_regions();
     if (g_failures) return 1;

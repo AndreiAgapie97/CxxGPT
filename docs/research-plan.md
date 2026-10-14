@@ -697,7 +697,7 @@ What this says:
    `--matmul bf16` (2026-10-14), for the matrix products' inputs: a bf16
    copy of the weights, refreshed after each step (7 ms), and activations
    written in bf16 by the kernels that make them; weights, gradients,
-   optimizer state, the router, Muon and attention stay fp32. cuBLAS on
+   optimizer state, the router and attention stay fp32. cuBLAS on
    the night-1 shapes, one 65,536-token step's worth of products:
 
    | inputs | time |
@@ -711,13 +711,23 @@ What this says:
    Converting at each product instead of writing bf16 at the source gave
    only 20,800 and 7.4 GB. Not for ternary models yet (their quantized
    values are not exact in bf16; int8 tensor cores are the way there).
-3. **Muon in bf16** (10% of the step).
+3. **Muon in bf16** (16% of the step after item 2). **Done** with
+   `--matmul bf16` (2026-10-14): Newton–Schulz's products take bf16 copies
+   of X and A, with fp32 sums, X kept in fp32, and cuBLAS adding the b A and
+   a X terms in. Muon went from 434 to 288 ms a step; with item 5's first
+   step, the night-1 model trains at 25,600 tokens/s (2.55 s a step, steady
+   over a 200-step run). Reference Muon runs Newton–Schulz all in bf16.
 4. **Exams on the GPU.** Each one runs on the CPU while the GPU waits: about
    5 minutes for 250 problems, about 15 minutes per night with the final
    exam. Run them on the GPU, or less often.
 5. **No host sync in MoE routing:** fixed-capacity expert slots and one
-   batched product for all experts, which also allows CUDA graphs. Only 6%
-   today, more once the rest is faster.
+   batched product for all experts, which also allows CUDA graphs. First
+   step done (2026-10-14): the counts come back asynchronously into pinned
+   memory while the GPU already groups the rows, and the row offsets are
+   computed on the GPU. That saved only about 20 ms of the 236 ms "moe
+   routing" a step, because under WSL each wait for the GPU costs about
+   0.5 ms whatever is queued. The rest is about 70 ms of forward kernels
+   and 107 ms of backward ones, all limited by memory bandwidth.
 6. The review's smaller items: the attention softmax per sequence, no
    memsets in front of accumulations.
 

@@ -173,8 +173,9 @@ both against the CPU engine:
   inputs stored in bf16 (8 significant bits against TF32's 11), which the
   tensor cores multiply at twice the TF32 rate. Weights, gradients and the
   optimizer stay fp32 (the products use a bf16 copy of the weights), and
-  so do the router, Muon and attention. On the night-1 model at 8 x 16:
-  24,200 tokens/s against 17,600, with 7.0 GB of GPU memory against 6.7.
+  so do the router and attention; Muon's products take bf16 inputs too.
+  On the night-1 model at 8 x 16: 25,600 tokens/s against 17,600, with
+  7.0 GB of GPU memory against 6.7.
   Not for ternary models yet. `GPU="--gpu --matmul bf16" scripts/probe.sh`
   measures it for each size.
 

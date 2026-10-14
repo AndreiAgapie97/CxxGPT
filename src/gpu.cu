@@ -428,15 +428,19 @@ __global__ void muon_momentum(float* X, float* mom, const float* g, int batch, i
 }
 
 // newton_schulz's first step: each len-long matrix of X divided by its
-// Frobenius norm (+ 1e-7). One thread block per matrix.
-__global__ void frobenius_normalize(float* X, size_t len) {
+// Frobenius norm (+ 1e-7), also into Xh (bf16) unless null. One thread
+// block per matrix.
+__global__ void frobenius_normalize(float* X, __nv_bfloat16* Xh, size_t len) {
     __shared__ double sh[kWarp + 1];
     float* x = X + blockIdx.x * len;
     double s = 0.0;
     for (size_t i = threadIdx.x; i < len; i += blockDim.x) s += double(x[i]) * double(x[i]);
     s = block_reduce(s, sh, false);
     const float inv = float(1.0 / (sqrt(s) + 1e-7));
-    for (size_t i = threadIdx.x; i < len; i += blockDim.x) x[i] *= inv;
+    for (size_t i = threadIdx.x; i < len; i += blockDim.x) {
+        x[i] *= inv;
+        if (Xh) Xh[blockIdx.x * len + i] = __float2bfloat16(x[i]);
+    }
 }
 
 // out = a x + b y, elementwise; out may be x or y.
@@ -487,13 +491,17 @@ __global__ void moe_route(int* sel, float* gate, int* counts, const float* rlogi
 // Groups the N*K assignments by expert, keeping assignment order within an
 // expert (the CPU's counting sort). One block per expert scans all
 // assignments in chunks; a warp ballot plus per-warp totals give each
-// selected assignment its rank.
-__global__ void moe_order(int* order, int* row_of, const int* sel, const int* expert_start, int NK) {
+// selected assignment its rank. Expert e's rows start after the counts of
+// the experts before it.
+__global__ void moe_order(int* order, int* row_of, const int* sel, const int* counts, int NK) {
     __shared__ int warp_total[kWarp];
     __shared__ int base;
     const int e = blockIdx.x, lane = threadIdx.x % kWarp, wid = threadIdx.x / kWarp;
     const int nw = blockDim.x / kWarp;
-    if (threadIdx.x == 0) base = expert_start[e];
+    if (threadIdx.x == 0) {
+        base = 0;
+        for (int i = 0; i < e; ++i) base += counts[i];
+    }
     __syncthreads();
     for (int j0 = 0; j0 < NK; j0 += blockDim.x) {
         const int j = j0 + threadIdx.x;
@@ -689,6 +697,7 @@ struct GpuTrainer::Impl {
     float muon_mu = 0.95f;
     int muon_ns = 5;
     DevBuf<float> ns_x, ns_y, ns_a, ns_b;
+    DevBuf<__nv_bfloat16> ns_xh, ns_ah;  // with bf16 products: X and A as their inputs
     bool weights_dirty = true;
 
     // Ternary tensors, one segment per (tensor, expert copy).
@@ -784,11 +793,14 @@ struct GpuTrainer::Impl {
     DevBuf<float> x0, lnf_out, rstdf, logits, losses, xq, out_tmp;
     DevBuf<float> dresid, dC, dqkv, datty, dfc, dsw, dey, dxg, drl, dS, dsum, dgate, dw_partial;
     DevBuf<__nv_bfloat16> lnfh, dfch, deyh, dlogitsh;
-    DevBuf<int> tokens, targets, counts, expert_start_d;
+    DevBuf<int> tokens, targets, counts;
     int B_ = 0, T_ = 0, B_cur = 0, T_cur = 0, n_valid = 0;
     bool has_targets = false;
     std::vector<float> losses_h;
-    std::vector<int> counts_h;
+    // The experts' row counts, copied back to the host (pinned memory, so
+    // the copy can run behind other work) once counts_ready has passed.
+    int* counts_h = nullptr;
+    cudaEvent_t counts_ready = nullptr;
 
     Impl(const Config& c, const std::vector<ParamInfo>& in, Matmul matmul, bool fused)
         : cfg(c), infos(in), fused_attn(fused) {
@@ -799,8 +811,8 @@ struct GpuTrainer::Impl {
               err == cudaSuccess ? "no devices" : cudaGetErrorString(err));
         for (const auto& p : infos) n_params = std::max(n_params, p.offset + p.size);
         CUBLAS_CHECK(cublasCreate(&blas));
-        // With bf16 products, the products left in fp32 (Muon's, cuBLAS
-        // attention's) use TF32.
+        // With bf16 products, the products left in fp32 (cuBLAS attention's)
+        // use TF32.
         compute = matmul == Matmul::fp32 ? CUBLAS_COMPUTE_32F : CUBLAS_COMPUTE_32F_FAST_TF32;
         bf16_ops = matmul == Matmul::bf16;
         CHECK(!bf16_ops || !cfg.ternary,
@@ -892,11 +904,14 @@ struct GpuTrainer::Impl {
         router_bias.zero();
         expert_load.assign(cfg.n_layers, std::vector<double>(E, 0.0));
         counts.resize(E);
-        expert_start_d.resize(E + 1);
+        CUDA_CHECK(cudaMallocHost(&counts_h, E * sizeof(int)));
+        CUDA_CHECK(cudaEventCreateWithFlags(&counts_ready, cudaEventDisableTiming));
         CUDA_CHECK(cudaDeviceSynchronize());
     }
 
     ~Impl() {
+        if (counts_h) cudaFreeHost(counts_h);
+        if (counts_ready) cudaEventDestroy(counts_ready);
         if (blas) cublasDestroy(blas);
         for (const auto& mk : marks) {
             cudaEventDestroy(mk.start);
@@ -934,6 +949,15 @@ struct GpuTrainer::Impl {
         CUBLAS_CHECK(cublasGemmStridedBatchedEx(blas, tb ? CUBLAS_OP_T : CUBLAS_OP_N, ta ? CUBLAS_OP_T : CUBLAS_OP_N,
                                                 N, M, K, &one, B, CUDA_R_32F, ldb, sb, A, CUDA_R_32F, lda, sa, &beta,
                                                 C, CUDA_R_32F, ldc, sc, batch, compute, CUBLAS_GEMM_DEFAULT));
+    }
+    // C = alpha op(A) op(B) + beta C, batched, from bf16 inputs (fp32 sums).
+    void gemm_batched_bf16(bool ta, bool tb, int M, int N, int K, const __nv_bfloat16* A, int lda, long long sa,
+                           const __nv_bfloat16* B, int ldb, long long sb, float* C, int ldc, long long sc,
+                           float alpha, float beta, int batch) {
+        CUBLAS_CHECK(cublasGemmStridedBatchedEx(blas, tb ? CUBLAS_OP_T : CUBLAS_OP_N, ta ? CUBLAS_OP_T : CUBLAS_OP_N,
+                                                N, M, K, &alpha, B, CUDA_R_16BF, ldb, sb, A, CUDA_R_16BF, lda, sa,
+                                                &beta, C, CUDA_R_32F, ldc, sc, batch, CUBLAS_COMPUTE_32F,
+                                                CUBLAS_GEMM_DEFAULT));
     }
 
     // With bf16 products: the bf16 copy of weights w (a pointer into params).
@@ -1228,20 +1252,23 @@ struct GpuTrainer::Impl {
         moe_route<<<blocks_for(N), kBlock>>>(a.sel.p, a.gate.p, counts.p, a.rlogits.p,
                                              router_bias.p + size_t(l) * E, N, E, K);
         LAUNCH_CHECK();
-        counts_h.resize(E);
-        to_host(counts_h.data(), counts.p, E);  // waits for the routing
-        if (training)
-            for (int e = 0; e < E; ++e) expert_load[l][e] += counts_h[e];
-        a.expert_start.assign(E + 1, 0);
-        for (int e = 0; e < E; ++e) a.expert_start[e + 1] = a.expert_start[e] + counts_h[e];
-        to_device(expert_start_d.p, a.expert_start.data(), E + 1);
-        moe_order<<<E, 1024>>>(a.order.p, a.row_of.p, a.sel.p, expert_start_d.p, NK);
+        // The host needs the counts to size the experts' products. The copy
+        // goes first and the grouping of rows behind it, so the GPU groups
+        // while the host waits for the copy.
+        CUDA_CHECK(cudaMemcpyAsync(counts_h, counts.p, E * sizeof(int), cudaMemcpyDeviceToHost));
+        CUDA_CHECK(cudaEventRecord(counts_ready));
+        moe_order<<<E, 1024>>>(a.order.p, a.row_of.p, a.sel.p, counts.p, NK);
         LAUNCH_CHECK();
         if (bf16_ops)
             moe_gather<<<blocks_for(size_t(NK) * C), kBlock>>>(a.xgh.p, a.ln2h.p, a.order.p, NK, C, K);
         else
             moe_gather<<<blocks_for(size_t(NK) * C), kBlock>>>(a.xg.p, a.ln2.p, a.order.p, NK, C, K);
         LAUNCH_CHECK();
+        CUDA_CHECK(cudaEventSynchronize(counts_ready));
+        if (training)
+            for (int e = 0; e < E; ++e) expert_load[l][e] += counts_h[e];
+        a.expert_start.assign(E + 1, 0);
+        for (int e = 0; e < E; ++e) a.expert_start[e + 1] = a.expert_start[e] + counts_h[e];
         routing.reset();
         const size_t efc_per = size_t(2) * Fe * C, eproj_per = size_t(C) * Fe;
         const Operand xg = pick(a.xg, a.xgh), esw = pick(a.esw, a.eswh);
@@ -1444,27 +1471,45 @@ struct GpuTrainer::Impl {
             const MuonShape sh = muon_shape(info);
             const size_t mm = size_t(sh.mrows()) * sh.mrows();
             ns_x.resize(info.size);
-            ns_y.resize(info.size);
             ns_a.resize(mm * sh.batch);
-            ns_b.resize(mm * sh.batch);
+            if (bf16_ops) {
+                ns_xh.resize(info.size);
+                ns_ah.resize(mm * sh.batch);
+            } else {
+                ns_y.resize(info.size);
+                ns_b.resize(mm * sh.batch);
+            }
         }
     }
 
     // AdamW::muon_update for one tensor, all its blocks batched through
-    // cuBLAS; newton_schulz (train.h) step for step.
+    // cuBLAS; newton_schulz (train.h) step for step. With bf16 products the
+    // products take bf16 copies of X and A (fp32 sums, X itself stays fp32),
+    // and cuBLAS adds the b A and a X terms in.
     void muon_step(const ParamInfo& info, float lr, float wd, float gscale) {
         Region r(*this, "muon");
         const MuonShape sh = muon_shape(info);
         const int mr = sh.mrows(), nc = sh.ncols(), batch = sh.batch;
         const long long mn = (long long)mr * nc, mm = (long long)mr * mr;
         const int grid = std::min(blocks_for(info.size), 4096);
+        const int grid_a = std::min(blocks_for(size_t(mm) * batch), 4096);
         float *X = ns_x.p, *Y = ns_y.p, *A = ns_a.p, *B = ns_b.p;
+        __nv_bfloat16 *Xh = ns_xh.p, *Ah = ns_ah.p;
         muon_momentum<<<grid, kBlock>>>(X, m.p + info.offset, grads.p + info.offset, batch, sh.r, sh.c, muon_mu,
                                         gscale);
-        frobenius_normalize<<<batch, kBlock>>>(X, size_t(mn));
+        frobenius_normalize<<<batch, kBlock>>>(X, bf16_ops ? Xh : nullptr, size_t(mn));
         LAUNCH_CHECK();
         const float a = 3.4445f, b = -4.7750f, c = 2.0315f;
-        for (int s = 0; s < muon_ns; ++s) {
+        for (int s = 0; bf16_ops && s < muon_ns; ++s) {
+            gemm_batched_bf16(false, true, mr, mr, nc, Xh, nc, mn, Xh, nc, mn, A, mr, mm, 1.0f, 0.0f, batch);  // A = X Xᵀ
+            to_bf16<<<grid_a, kBlock>>>(Ah, A, size_t(mm) * batch);
+            gemm_batched_bf16(false, false, mr, mr, mr, Ah, mr, mm, Ah, mr, mm, A, mr, mm, c, b, batch);  // A = b A + c A²
+            to_bf16<<<grid_a, kBlock>>>(Ah, A, size_t(mm) * batch);
+            gemm_batched_bf16(false, false, mr, nc, mr, Ah, mr, mm, Xh, nc, mn, X, nc, mn, 1.0f, a, batch);  // X = a X + A X
+            if (s + 1 < muon_ns) to_bf16<<<grid, kBlock>>>(Xh, X, info.size);
+            LAUNCH_CHECK();
+        }
+        for (int s = 0; !bf16_ops && s < muon_ns; ++s) {
             gemm_batched(false, true, mr, mr, nc, X, nc, mn, X, nc, mn, A, mr, mm, 0.0f, batch);   // A = X Xᵀ
             gemm_batched(false, false, mr, mr, mr, A, mr, mm, A, mr, mm, B, mr, mm, 0.0f, batch);  // B = A²
             axpby<<<std::min(blocks_for(size_t(mm) * batch), 4096), kBlock>>>(B, b, A, c, B, size_t(mm) * batch);

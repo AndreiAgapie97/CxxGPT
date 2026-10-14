@@ -463,7 +463,7 @@ vocabulary that layer is under 1 MB.
   (`gen-reasoning --expr-rewrite`).
 - Faster GPU training: fused attention on the tensor cores is the default
   (1.18x); bf16 inputs to the products (`--matmul bf16`) give another
-  1.37x but are opt-in. On the laptop two GPU checks still miss, both on
+  1.45x but are opt-in. On the laptop two GPU checks still miss, both on
   a norm weight's gradient (docs/LAPTOP.md, "GPU options"),
   and `--profile` says what to speed up next (docs/research-plan.md,
   "Speed").
