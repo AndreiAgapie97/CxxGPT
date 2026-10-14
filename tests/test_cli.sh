@@ -31,6 +31,27 @@ done
 printf 'CLI: single-window train/validation and twelve invalid configurations passed\n'
 
 ./test_training_cli generate "$TEST_DIR"
+# A2/C10: the final save precedes reasoning; SIGINT saves without another eval.
+"$CXXGPT" train "${COMMON[@]}" --init "$TEST_DIR/audit.ckpt" --out "$TEST_DIR/save-first.ckpt" \
+    --reason-test "$TEST_DIR/audit.txt" > "$TEST_DIR/save-first.log"
+awk '/^saved / {saved=NR} /^reasoning eval/ {if (!saved || saved>=NR) exit 1; seen=1} END {if (!seen) exit 1}' "$TEST_DIR/save-first.log"
+"$CXXGPT" train "${COMMON[@]}" --init "$TEST_DIR/audit.ckpt" --out "$TEST_DIR/signal.ckpt" \
+    --steps 1000000 --save-every 1 --log-every 1 --eval-every 0 --reason-test "$TEST_DIR/audit.txt" \
+    > "$TEST_DIR/signal.log" 2>&1 &
+trainer=$!
+for ((poll=0; poll<1000; ++poll)); do
+    [[ -f "$TEST_DIR/signal.ckpt" ]] && break
+    if ! kill -0 "$trainer" 2>/dev/null; then wait "$trainer"; exit 1; fi
+    sleep 0.01
+done
+if [[ ! -f "$TEST_DIR/signal.ckpt" ]]; then kill -TERM "$trainer"; wait "$trainer"; exit 1; fi
+kill -INT "$trainer"
+wait "$trainer"
+grep -q 'saved .* (interrupted)' "$TEST_DIR/signal.log"
+! grep -q '^reasoning eval' "$TEST_DIR/signal.log"
+# Loading/resuming the interrupted checkpoint proves it is complete and usable.
+"$CXXGPT" train "${COMMON[@]}" --out "$TEST_DIR/signal.ckpt" --steps 0 --resume > "$TEST_DIR/signal-resume.log"
+printf 'CLI: save-before-reasoning and actual SIGINT save/resume passed\n'
 for variant in dense ternary moe ternary-moe hybrid hybrid-moe nope nope-ternary-moe; do
     ARCH=()
     if [[ "$variant" == *ternary* ]]; then ARCH+=(--ternary); fi

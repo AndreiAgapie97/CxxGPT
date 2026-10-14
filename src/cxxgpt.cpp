@@ -834,10 +834,10 @@ int cmd_train(Args& a) {
         if (log) std::fclose(log);
         return 1;
     }
-    reason_eval(step);
     be.sync();
     save_checkpoint(out, model, opt, data_rng);
     std::printf("saved %s at step %ld%s\n", out.c_str(), opt.step, g_stop ? " (interrupted)" : "");
+    if (!g_stop) reason_eval(step);
     if (log) std::fclose(log);
     return 0;
 }
