@@ -354,8 +354,10 @@ inline std::string unescape_field(const std::string& s) {
     return o;
 }
 
+// Written in binary, so the file has the same bytes on Windows as on Linux
+// (scripts record its sha256); load_problems accepts "\r\n" too.
 inline void save_problems(const std::string& path, const std::vector<Problem>& ps) {
-    FILE* f = create_file(path, "w");
+    FILE* f = create_file(path, "wb");
     CHECK(f, "cannot write %s", path.c_str());
     for (const auto& p : ps)
         std::fprintf(f, "%s\t%d\t%s\t%s\t%s\n", escape_field(p.task).c_str(), p.difficulty,

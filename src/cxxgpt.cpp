@@ -364,7 +364,9 @@ int cmd_gen_word(Args& a) {
     const auto problems = make_word_problems(uint64_t(seed), count, options);
     save_problems(out + ".txt", problems);
     const std::string text_path = out + ".text";
-    FILE* text = create_file(text_path, "w");
+    // Binary: text2tok reads the file as bytes, so a Windows "\r\n" would
+    // become extra tokens and change the stream for the same seed.
+    FILE* text = create_file(text_path, "wb");
     CHECK(text, "cannot write %s", text_path.c_str());
     for (const auto& p : problems)
         CHECK(std::fprintf(text, "%s%s<|endoftext|>\n", p.prompt().c_str(), p.completion().c_str()) >= 0,
