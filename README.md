@@ -275,6 +275,7 @@ scripts/probe.sh                     # GPU speed and memory per model size, and 
                                      #   night.sh command for each
 TOKS=... MODEL=... scripts/night.sh  # one night of training, checked on GSM8K
 scripts/report.sh night1             # the night on one screen
+scripts/ledger.sh night1 "note"      # its row in docs/runs.md, the ledger of runs
 ```
 
 `prepare_data.sh` fetches GSM8K, TinyStories, FineWeb-Edu,

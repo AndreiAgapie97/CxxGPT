@@ -172,7 +172,11 @@ runs on the CPU as before. Its settings
 Run the same command again to resume after an interruption. The log is
 `runs/night1.log`; in the morning, `scripts/report.sh night1` sums it up on
 one screen (validation loss and exact answers over the night, speed, how
-it ended, and one answer the model got wrong).
+it ended, and one answer the model got wrong). Then `scripts/ledger.sh
+night1 "note"` adds the night's row to [runs.md](runs.md), the ledger of
+every run (tokens, hours, energy, scores), and you commit it: `runs/` stays
+on the laptop, the ledger goes to GitHub. Run it again after scoring the
+full test set (`eval-reasoning --labels runs/night1.labels.jsonl`).
 
 For MoE models, `night.sh` also writes `runs/night1.load.csv` (or
 `runs/$RUN.load.csv`): `step,layer,expert_0,...,max_load_ratio`. You can

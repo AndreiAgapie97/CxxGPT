@@ -153,6 +153,55 @@ grep -Fq 'layer 0: final shares [0.4000 0.6000]; first under 1%: step 20' "$TEST
 grep -Fq 'layer 1: final shares [0.3000 0.7000]; first under 1%: step 10' "$TEST_DIR/report.txt"
 grep -Fq 'layer 2: final shares [0.6000 0.4000]; first under 1%: never' "$TEST_DIR/report.txt"
 printf 'CLI: expert load intervals, dead-expert warnings, resume and report passed\n'
+
+# The run ledger, on two made-up runs: the second starts from the first's
+# weights and was resumed once; its GPU log has a glitched first reading.
+mkdir -p "$TEST_DIR/ledger/scripts" "$TEST_DIR/ledger/runs" "$TEST_DIR/ledger/docs"
+cp scripts/ledger.sh "$TEST_DIR/ledger/scripts/ledger.sh"
+printf '# Runs\n\n| Run | Note |\n|---|---|\n' > "$TEST_DIR/ledger/docs/runs.md"
+cat > "$TEST_DIR/ledger/runs/a.log" <<'LOG'
+a: 300 steps of 1000 tokens; stops after 60 minutes at the latest
+model: vocab 256, seq 8, dim 32, layers 1, heads 2, MoE 4 experts (top-2, hidden 64, 0 shared)
+params: 1.200 M total, 0.700 M active per token
+data: 5000 train tokens, 100 val tokens; 4 x 8 x 4 = 1000000 tokens per step
+overall 2.0% (5 / 250) (greedy)
+overall 4.0% (10 / 250) (greedy)
+overall 3.2% (8 / 250) (greedy)
+saved runs/a.ckpt at step 210
+LOG
+printf 'step,loss,val_loss,lr,grad_norm,ms_per_step,load_ratio\n100,3,-1,1e-3,1,3600,1\n200,2,1.5,2e-3,1,7200,1\n' \
+    > "$TEST_DIR/ledger/runs/a.csv"
+cat > "$TEST_DIR/ledger/runs/b.log" <<'LOG'
+b: 500 steps of 2000 tokens; stops after 60 minutes at the latest
+starting from the weights in runs/a.ckpt
+model: vocab 256, seq 8, dim 32, layers 1, heads 2, MoE 4 experts (top-2, hidden 64, 0 shared), ternary BitLinear FFN, full-precision attention
+params: 1.200 M total, 0.700 M active per token
+gpu: Fake GPU (1 GB, compute 8.9), bf16 matmuls, fused tensor-core attention
+sampler: qa (12 question-answer documents that fit in a window start their windows)
+unlikelihood: alpha 0.5 on tokens that would repeat a run of 8 trained tokens (validation stays cross-entropy only)
+data: 5000 train tokens, 100 val tokens; 4 x 8 x 8 = 2000000 tokens per step
+resumed runs/b.ckpt at step 100
+overall 6.0% (15 / 250) (greedy)
+LOG
+printf 'step,loss,val_loss,lr,grad_norm,ms_per_step,load_ratio\n100,3,1.4,5e-4,1,3600,1\n150,3,-1,5e-4,1,3600,1\n# resumed at step 100\n200,2,1.25,4e-4,1,3600,1\n' \
+    > "$TEST_DIR/ledger/runs/b.csv"
+printf 't, 1, 50, 900 W, 0 %%\nt, 1, 70, 100 W, 98 %%\nt, 1, 70, 100 W, 98 %%\nt, 1, 70, 100 W, 98 %%\n' \
+    > "$TEST_DIR/ledger/runs/b.gpu.csv"
+printf '{"settings":1}\n{"problem":0,"label":"correct"}\n{"problem":1,"label":"other"}\n{"problem":2,"label":"correct"}\n{"problem":3,"label":"unfinished"}\n' \
+    > "$TEST_DIR/ledger/runs/b.labels.jsonl"
+status=0
+bash "$TEST_DIR/ledger/scripts/ledger.sh" b > "$TEST_DIR/ledger.out" 2>&1 || status=$?
+[[ "$status" == 1 ]]
+grep -q 'has no row for a, which b started from' "$TEST_DIR/ledger.out"
+bash "$TEST_DIR/ledger/scripts/ledger.sh" a "first" > /dev/null
+bash "$TEST_DIR/ledger/scripts/ledger.sh" b "second" > /dev/null
+bash "$TEST_DIR/ledger/scripts/ledger.sh" a > /dev/null
+a_row="| a | $(date -r "$TEST_DIR/ledger/runs/a.log" +%F) | new | 1M (1M active), MoE 4 x top-2 | lr 2.00e-03, CPU | 210 of 300 | 0.210 | 0.210 | 0.30 | - | - | 1.5000 | 8 (best 10) | - | first |"
+b_row="| b | $(date -r "$TEST_DIR/ledger/runs/b.log" +%F) | a, resumed 1 x | 1M (1M active), MoE 4 x top-2, ternary FFN | lr 5.00e-04, bf16, fused tensor-core attention, sampler qa, unlikelihood 0.5 (n 8) | 200 of 500 | 0.400 | 0.610 | 0.25 | 0.01 | 0.00 | 1.2500 | 15 (best 15) | 2 / 4 (50.0%) | second |"
+[[ $(sed -n 5p "$TEST_DIR/ledger/docs/runs.md") == "$a_row" ]]
+[[ $(sed -n 6p "$TEST_DIR/ledger/docs/runs.md") == "$b_row" ]]
+[[ $(wc -l < "$TEST_DIR/ledger/docs/runs.md") == 6 ]]
+printf 'CLI: run ledger passed\n'
 "$CXXGPT" train "${COMMON[@]}" --data "$TEST_DIR/data.tok*3" --val '' --val-frac 0.5 --steps 0 \
     --out "$TEST_DIR/repeated-val.ckpt" > "$TEST_DIR/repeated-val.log" 2>&1
 grep -q 'validation slices repeated data' "$TEST_DIR/repeated-val.log"

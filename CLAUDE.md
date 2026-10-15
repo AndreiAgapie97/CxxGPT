@@ -169,8 +169,10 @@ Reasoning is the first capability we go after.
   night.sh command for each), `scripts/prepare_data.sh` (downloads, our
   tokenizer, token files) and `scripts/night.sh` (one night of training,
   validated on the GSM8K test set; `INIT=` starts from an earlier night's
-  weights); `scripts/report.sh` sums up a night's log. `docs/LAPTOP.md`
-  is the runbook.
+  weights); `scripts/report.sh` sums up a night's log, and
+  `scripts/ledger.sh RUN "note"` writes its row in `docs/runs.md`, the
+  committed ledger of runs (tokens, hours, energy, scores; `runs/` is
+  git-ignored). `docs/LAPTOP.md` is the runbook.
 - `train --init FILE --ternary` turns a full-precision model ternary for
   the rest of its training (same weights, used differently).
 - Overnight safety: a step with a non-finite gradient is skipped, ten in a
