@@ -154,19 +154,21 @@ inline void test_vote_report() {
     Rng rng(5);
     vote.rng = &rng;
     const EvalResult r = eval_reasoning(fake, ps, Tokenizer{}, 4, 40, 8, false, vote);
-    EXPECT(r.total == 5 && r.tries == 4, "the vote report scored %d problems at %d tries", r.total, r.tries);
-    EXPECT(r.single_correct == 2, "single-try accuracy %d, hand-computed 2", r.single_correct);
-    EXPECT(r.vote_correct == 2, "vote accuracy %d, hand-computed 2", r.vote_correct);
-    EXPECT(r.any_correct == 5, "any-try accuracy %d, hand-computed 5", r.any_correct);
-    EXPECT(r.correct == r.vote_correct, "the headline score must be the vote's");
-    EXPECT(r.distinct_answers == 9.0, "distinct answers %.1f, hand-computed 9", r.distinct_answers);
-    const VoteCell& add1 = r.vote_by_task.at({"add", 1});
-    EXPECT(add1.vote_correct == 1 && add1.single_correct == 2 && add1.any_correct == 2,
-           "add d1 cell: single %d vote %d any %d", add1.single_correct, add1.vote_correct, add1.any_correct);
-    const VoteCell& add2 = r.vote_by_task.at({"add", 2});
+    const LevelScore all = r.overall();
+    EXPECT(r.total == 5 && all.total == 5 && r.tries == 4, "the vote report scored %d problems at %d tries",
+           r.total, r.tries);
+    EXPECT(all.first_correct == 2, "first-try accuracy %d, hand-computed 2", all.first_correct);
+    EXPECT(all.vote_correct == 2, "vote accuracy %d, hand-computed 2", all.vote_correct);
+    EXPECT(all.any_correct == 5, "any-try accuracy %d, hand-computed 5", all.any_correct);
+    EXPECT(r.correct == all.vote_correct, "the headline score must be the vote's");
+    EXPECT(all.distinct_answers == 9, "distinct answers %d, hand-computed 9", all.distinct_answers);
+    const LevelScore& add1 = r.by_task.at({"add", 1});
+    EXPECT(add1.total == 2 && add1.vote_correct == 1 && add1.first_correct == 2 && add1.any_correct == 2,
+           "add d1 level: first %d vote %d any %d", add1.first_correct, add1.vote_correct, add1.any_correct);
+    const LevelScore& add2 = r.by_task.at({"add", 2});
     EXPECT(add2.vote_correct == 0 && add2.any_correct == 1, "add d2 (the tie) must lose the vote but pass on some try");
-    const VoteCell& mul2 = r.vote_by_task.at({"mul", 2});
-    EXPECT(mul2.vote_correct == 1 && mul2.single_correct == 0,
+    const LevelScore& mul2 = r.by_task.at({"mul", 2});
+    EXPECT(mul2.vote_correct == 1 && mul2.first_correct == 0 && mul2.distinct_answers == 1,
            "mul d2 (the missing answer line) must win the vote but not the first try");
     EXPECT(r.failures.size() == 3, "%zu failures shown, but 3 problems lost the vote", r.failures.size());
     if (r.failures.size() == 3) {
@@ -193,8 +195,9 @@ inline void test_vote_report() {
     VoteOpts same = vote;
     same.rng = &rng2;
     const EvalResult r2 = eval_reasoning(again, ps, Tokenizer{}, 4, 40, 8, false, same);
-    EXPECT(r2.single_correct == r.single_correct && r2.vote_correct == r.vote_correct &&
-               r2.any_correct == r.any_correct && r2.distinct_answers == r.distinct_answers,
+    const LevelScore all2 = r2.overall();
+    EXPECT(all2.first_correct == all.first_correct && all2.vote_correct == all.vote_correct &&
+               all2.any_correct == all.any_correct && all2.distinct_answers == all.distinct_answers,
            "the same seed gave a different report");
 }
 
@@ -213,13 +216,13 @@ inline void test_vote_empty_answer() {
     Rng rng(6);
     vote.rng = &rng;
     const EvalResult r = eval_reasoning(finished, ps, Tokenizer{}, 4, 40, 8, false, vote);
-    EXPECT(r.vote_correct == 1, "a finished empty answer line must match an empty gold (vote %d)", r.vote_correct);
+    EXPECT(r.correct == 1, "a finished empty answer line must match an empty gold (vote %d)", r.correct);
     // The same problem, but no try ever finishes: still wrong.
     ScriptedModel unfinished;
     unfinished.queue = {"no answer\n", "no answer\n", "no answer\n", "no answer\n"};
     unfinished.prompt_len = finished.prompt_len;
     const EvalResult u = eval_reasoning(unfinished, ps, Tokenizer{}, 4, 40, 8, false, vote);
-    EXPECT(u.vote_correct == 0, "an unfinished try must not give the empty answer (vote %d)", u.vote_correct);
+    EXPECT(u.correct == 0, "an unfinished try must not give the empty answer (vote %d)", u.correct);
 }
 
 inline void test_vote_single_try_matches_greedy() {
@@ -237,8 +240,9 @@ inline void test_vote_single_try_matches_greedy() {
     for (int i = 0; i < 5; ++i) ps.push_back(make_problem(i % 2 ? "add" : "chain", 1 + i % 2, rng));
     const int max_new = 30;
     const EvalResult r = eval_reasoning(m, ps, tok, 2, max_new, 8, true);
-    EXPECT(r.tries == 1 && r.single_correct == r.vote_correct && r.vote_correct == r.any_correct &&
-               r.correct == r.vote_correct,
+    const LevelScore all = r.overall();
+    EXPECT(r.tries == 1 && all.first_correct == all.vote_correct && all.vote_correct == all.any_correct &&
+               r.correct == all.vote_correct,
            "with one try all four accuracies must agree");
     for (size_t i = 0; i < ps.size(); ++i) {
         // Independent reference: a fresh greedy decode, one problem at a time.

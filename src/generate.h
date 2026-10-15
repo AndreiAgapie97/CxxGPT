@@ -85,8 +85,6 @@ inline bool completion_done(const std::string& text) {
     return !text.empty() && text.back() == '\n' && text.find("#### ") != std::string::npos;
 }
 
-struct EvalResult;
-
 // The answer the model gave, normalized the way scoring normalizes it:
 // the text after "#### " up to the end of the line, trimmed, with digit-
 // grouping commas removed.
@@ -103,14 +101,6 @@ struct VoteOpts {
     int tries = 1;
     double temperature = 0.0;
     Rng* rng = nullptr;
-};
-
-// One (task, difficulty) cell of the vote report: how many of the problems
-// the first try got right, the vote got right, any try got right, and the
-// summed number of distinct answers (divide by the cell's total for the mean).
-struct VoteCell {
-    int single_correct = 0, vote_correct = 0, any_correct = 0;
-    double distinct_answers = 0.0;
 };
 
 // The most common answer; on a tie, the one that appeared first.
@@ -169,21 +159,49 @@ inline TryScore score_tries(const std::vector<std::string>& texts, const std::st
     return s;
 }
 
+// The scores of a group of problems (one level, or all of them): how many
+// there are, how many the first try, the vote (maj@N) and any try (pass@N)
+// got right, and the distinct answers summed over the problems (divide by
+// total for the mean). With one try the three counts are equal.
+struct LevelScore {
+    int total = 0;
+    int first_correct = 0, vote_correct = 0, any_correct = 0;
+    int distinct_answers = 0;
+
+    void add(const TryScore& s) {
+        total += 1;
+        first_correct += s.first_ok;
+        vote_correct += s.vote_ok;
+        any_correct += s.any_ok;
+        distinct_answers += s.distinct;
+    }
+    void add(const LevelScore& o) {
+        total += o.total;
+        first_correct += o.first_correct;
+        vote_correct += o.vote_correct;
+        any_correct += o.any_correct;
+        distinct_answers += o.distinct_answers;
+    }
+};
+
 struct EvalResult {
-    // (task, difficulty) -> (correct, total); with votes, correctness is the
-    // vote's (maj@N), which is also what `correct` below holds.
-    std::map<std::pair<std::string, int>, std::pair<int, int>> by_task;
+    // (task, difficulty) -> that level's scores.
+    std::map<std::pair<std::string, int>, LevelScore> by_task;
+    // The headline: problems the vote got right (maj@N; with one try, the
+    // plain score), out of all of them.
     int correct = 0, total = 0;
+    int tries = 1;
     int max_new = 200;
     size_t gold_over_cap = 0;
     std::vector<std::pair<Problem, std::string>> failures;  // a few, for inspection
-    std::vector<std::string> completions;  // optional, in input order for trace audits
-    // The effort report. With tries == 1, single, vote and any all equal the
-    // plain counts above.
-    int tries = 1;
-    int single_correct = 0, vote_correct = 0, any_correct = 0;
-    double distinct_answers = 0.0;  // summed over problems; divide by total
-    std::map<std::pair<std::string, int>, VoteCell> vote_by_task;
+    std::vector<std::string> completions;  // optional, the first tries in input order, for trace audits
+
+    // All levels together.
+    LevelScore overall() const {
+        LevelScore all;
+        for (const auto& entry : by_task) all.add(entry.second);
+        return all;
+    }
 };
 
 // The tokens a problem's prompt is fed as: BOS, then "Q: ...\nA: ". The
@@ -244,11 +262,10 @@ EvalResult eval_reasoning(M& model, const std::vector<Problem>& problems, const 
         const auto outs = generate(model, group, max_new,
                                    [&](const std::vector<int>& gen) { return completion_done(text_of(gen)); },
                                    vote.temperature, vote.temperature > 0 ? vote.rng : nullptr);
-        for (size_t k = k0; k < k1; ++k) {
-            auto& mine = texts[order[k]];
-            mine.assign(vote.tries, "");
-            for (int t = 0; t < vote.tries; ++t) mine[size_t(t)] = text_of(outs[(k - k0) * vote.tries + t]);
-        }
+        // Problem order[k]'s tries sit together in the group, in try order.
+        for (size_t k = k0; k < k1; ++k)
+            for (int t = 0; t < vote.tries; ++t)
+                texts[order[k]][size_t(t)] = text_of(outs[(k - k0) * size_t(vote.tries) + size_t(t)]);
     }
     EvalResult r;
     r.max_new = max_new;
@@ -257,20 +274,9 @@ EvalResult eval_reasoning(M& model, const std::vector<Problem>& problems, const 
         const Problem& p = problems[i];
         r.gold_over_cap += tok.encode(p.completion()).size() > size_t(max_new);
         const TryScore s = score_tries(texts[i], p.answer);
-        auto& cell = r.by_task[{p.task, p.difficulty}];
-        cell.first += s.vote_ok;  // the headline number is the vote's (maj@N)
-        cell.second += 1;
-        r.correct += s.vote_ok;
+        r.by_task[{p.task, p.difficulty}].add(s);
+        r.correct += s.vote_ok;  // the headline number is the vote's (maj@N)
         r.total += 1;
-        r.single_correct += s.first_ok;
-        r.vote_correct += s.vote_ok;
-        r.any_correct += s.any_ok;
-        r.distinct_answers += s.distinct;
-        auto& vcell = r.vote_by_task[{p.task, p.difficulty}];
-        vcell.single_correct += s.first_ok;
-        vcell.vote_correct += s.vote_ok;
-        vcell.any_correct += s.any_ok;
-        vcell.distinct_answers += s.distinct;
         if (!s.vote_ok && r.failures.size() < keep_failures) r.failures.push_back({p, texts[i][s.shown]});
     }
     if (keep_completions) {

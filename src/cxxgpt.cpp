@@ -507,10 +507,10 @@ int cmd_prep_qa(Args& a) {
 // The table of accuracy per task and difficulty, then up to show_failures
 // of the wrong answers.
 void print_eval(const EvalResult& r, size_t show_failures) {
-    std::map<std::string, std::map<int, std::pair<int, int>>> table;
+    std::map<std::string, std::map<int, LevelScore>> table;
     int min_d = 1 << 30, max_d = -(1 << 30);
-    for (const auto& [key, cell] : r.by_task) {
-        table[key.first][key.second] = cell;
+    for (const auto& [key, score] : r.by_task) {
+        table[key.first][key.second] = score;
         min_d = std::min(min_d, key.second);
         max_d = std::max(max_d, key.second);
     }
@@ -526,9 +526,9 @@ void print_eval(const EvalResult& r, size_t show_failures) {
                 std::printf("      -");
                 continue;
             }
-            std::printf(" %5.1f%%", 100.0 * it->second.first / it->second.second);
-            c += it->second.first;
-            n += it->second.second;
+            std::printf(" %5.1f%%", 100.0 * it->second.vote_correct / it->second.total);
+            c += it->second.vote_correct;
+            n += it->second.total;
         }
         std::printf(" %5.1f%%\n", 100.0 * c / std::max(1, n));
     }
@@ -565,7 +565,7 @@ int cmd_eval_reasoning(Args& a) {
     vote.temperature = a.real("temp", 0.0);
     CHECK(vote.tries == 1 || vote.temperature > 0, "--temp must be above 0 when sampling more than one try");
     const long seed = a.integer("seed", 1);
-    Rng vote_rng(seed);
+    Rng vote_rng(uint64_t(seed));
     vote.rng = &vote_rng;
     // As TernaryEngine runs it: the embedding (and --fp-attn attention) in
     // int8 rows.
@@ -592,21 +592,17 @@ int cmd_eval_reasoning(Args& a) {
         // the mean number of distinct answers per problem.
         std::printf("effort: tries %d, temperature %g, seed %ld\n", vote.tries, vote.temperature, seed);
         std::printf("task   d    n   single   vote    any   distinct\n");
-        for (const auto& [key, cell] : r.vote_by_task) {
-            const auto it = r.by_task.find(key);
-            const int cnt = it == r.by_task.end() ? 0 : it->second.second;
-            std::printf("%-6s %2d %4d %7.1f%% %6.1f%% %6.1f%% %8.2f\n", key.first.c_str(), key.second, cnt,
-                        100.0 * cell.single_correct / std::max(1, cnt),
-                        100.0 * cell.vote_correct / std::max(1, cnt),
-                        100.0 * cell.any_correct / std::max(1, cnt),
-                        cnt ? cell.distinct_answers / cnt : 0.0);
-        }
+        auto pct = [](int part, int whole) { return 100.0 * part / std::max(1, whole); };
+        for (const auto& [key, s] : r.by_task)
+            std::printf("%-6s %2d %4d %7.1f%% %6.1f%% %6.1f%% %8.2f\n", key.first.c_str(), key.second, s.total,
+                        pct(s.first_correct, s.total), pct(s.vote_correct, s.total), pct(s.any_correct, s.total),
+                        double(s.distinct_answers) / std::max(1, s.total));
+        const LevelScore all = r.overall();
         std::printf("overall %4d %7.1f%% %6.1f%% %6.1f%% %8.2f (single-try / vote maj@%d / any-try pass@%d / "
                     "mean distinct answers)\n",
-                    r.total, 100.0 * r.single_correct / std::max(1, r.total),
-                    100.0 * r.vote_correct / std::max(1, r.total),
-                    100.0 * r.any_correct / std::max(1, r.total),
-                    r.total ? r.distinct_answers / r.total : 0.0, vote.tries, vote.tries);
+                    all.total, pct(all.first_correct, all.total), pct(all.vote_correct, all.total),
+                    pct(all.any_correct, all.total), double(all.distinct_answers) / std::max(1, all.total),
+                    vote.tries, vote.tries);
     }
     std::printf("(%.1f s)\n", now_seconds() - t0);
     return 0;
