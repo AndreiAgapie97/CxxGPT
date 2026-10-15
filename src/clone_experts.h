@@ -2,29 +2,101 @@
 #pragma once
 
 #include <algorithm>
+#include <cerrno>
 #include <cmath>
+#include <cstdlib>
+#include <fstream>
+#include <string>
 #include <vector>
 
+#include "load_log.h"
 #include "train.h"
 
 struct ExpertClone {
     int layer, from, to;
 };
 
-// Bias records the balancing nudges, not actual token counts. With only
-// that history available, repair the largest-bias expert(s) from the
-// smallest-bias one. Equal biases give no evidence for a repair.
-inline std::vector<ExpertClone> automatic_expert_clones(const Model<float>& model) {
-    CHECK(model.cfg.moe(), "clone-experts needs an MoE checkpoint");
+// Each layer's expert shares, averaged over its last `window` rows of a load
+// log (`train --load-log`, night.sh's runs/$RUN.load.csv). The router biases
+// cannot say whether an expert is dead: they only record past nudges, and
+// they differ in every layer, healthy or not. The log counts tokens.
+// After a "# resumed at step N" line, the steps past N were trained again,
+// so the earlier rows past step N are dropped first (docs/LAPTOP.md).
+inline std::vector<std::vector<double>> recent_expert_shares(const std::string& path, const Config& cfg,
+                                                             int window) {
+    CHECK(cfg.moe(), "clone-experts needs an MoE checkpoint");
+    CHECK(window > 0, "--window must be positive");
+    std::ifstream in(path);
+    CHECK(in, "cannot open load log %s", path.c_str());
+    std::string line;
+    const auto next_line = [&] {
+        if (!std::getline(in, line)) return false;
+        if (!line.empty() && line.back() == '\r') line.pop_back();  // a file copied from Windows
+        return true;
+    };
+    CHECK(next_line(), "%s is empty", path.c_str());
+    CHECK(line == ExpertLoadLog::header(cfg.n_experts),
+          "%s's header does not match this checkpoint's %d experts", path.c_str(), cfg.n_experts);
+    struct Row { long step; int layer; std::vector<double> shares; };
+    std::vector<Row> rows;
+    for (int number = 2; next_line(); ++number) {
+        if (line.empty()) continue;
+        const char* p = line.c_str();
+        char* end = nullptr;
+        errno = 0;
+        if (line.rfind("# resumed at step ", 0) == 0) {
+            p += 18;
+            const long resumed = std::strtol(p, &end, 10);
+            CHECK(errno == 0 && end != p && *end == 0, "%s line %d: bad resume line", path.c_str(), number);
+            std::erase_if(rows, [&](const Row& r) { return r.step > resumed; });
+            continue;
+        }
+        Row row;
+        row.step = std::strtol(p, &end, 10);
+        CHECK(errno == 0 && end != p && *end == ',', "%s line %d: bad step", path.c_str(), number);
+        p = end + 1;
+        const long layer = std::strtol(p, &end, 10);
+        CHECK(errno == 0 && end != p && *end == ',' && layer >= 0 && layer < cfg.n_layers,
+              "%s line %d: bad layer for this checkpoint", path.c_str(), number);
+        row.layer = int(layer);
+        for (int e = 0; e <= cfg.n_experts; ++e) {  // the shares, then max_load_ratio
+            p = end + 1;
+            const double value = std::strtod(p, &end);
+            CHECK(errno == 0 && end != p && *end == (e < cfg.n_experts ? ',' : '\0') && std::isfinite(value),
+                  "%s line %d: expected %d shares and a ratio", path.c_str(), number, cfg.n_experts);
+            if (e < cfg.n_experts) {
+                CHECK(value >= 0 && value <= 1, "%s line %d: a share outside 0-1", path.c_str(), number);
+                row.shares.push_back(value);
+            }
+        }
+        rows.push_back(std::move(row));
+    }
+    std::vector<std::vector<double>> shares(cfg.n_layers, std::vector<double>(cfg.n_experts, 0.0));
+    for (int l = 0; l < cfg.n_layers; ++l) {
+        int used = 0;
+        for (auto r = rows.rbegin(); r != rows.rend() && used < window; ++r) {
+            if (r->layer != l) continue;
+            for (int e = 0; e < cfg.n_experts; ++e) shares[l][e] += r->shares[e];
+            ++used;
+        }
+        CHECK(used > 0, "%s has no rows for layer %d", path.c_str(), l);
+        for (double& s : shares[l]) s /= used;
+    }
+    return shares;
+}
+
+// In each layer, every expert with a share under `below` (a fraction: 0.01
+// is 1%, as in the load log's warning line) gets a copy of the layer's
+// busiest expert (on a tie, the smaller index). Exactly `below` is not
+// starved, as in the warning. A layer with no starved expert is left alone.
+inline std::vector<ExpertClone> starved_expert_clones(const std::vector<std::vector<double>>& shares,
+                                                      double below) {
     std::vector<ExpertClone> edits;
-    for (int l = 0; l < model.cfg.n_layers; ++l) {
-        const auto& bias = model.router_bias[l];
-        for (float b : bias) CHECK(std::isfinite(b), "non-finite router bias");
-        const auto [low, high] = std::minmax_element(bias.begin(), bias.end());
-        if (*low == *high) continue;
-        const int from = int(low - bias.begin());
-        for (int e = 0; e < model.cfg.n_experts; ++e)
-            if (bias[e] == *high) edits.push_back({l, from, e});
+    for (int l = 0; l < int(shares.size()); ++l) {
+        const auto& s = shares[l];
+        const int from = int(std::max_element(s.begin(), s.end()) - s.begin());
+        for (int e = 0; e < int(s.size()); ++e)
+            if (s[e] < below && e != from) edits.push_back({l, from, e});
     }
     return edits;
 }

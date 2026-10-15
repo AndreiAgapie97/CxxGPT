@@ -590,18 +590,18 @@ budget. A gain here must still pass the dev-set funnel before a laptop night.
   MoE experts from copies of a dense layer, but not as a repair during
   training.
 - **Test:** the 50-minute runs of the night-1 model from "Expert balance",
-  with and without cloning. Read the biases afterwards.
+  with and without cloning. Compare their load logs afterwards.
 
 The offline CPU command is now available; it does not run training:
 
 ```sh
-./cxxgpt clone-experts --ckpt runs/night1.ckpt --out runs/night1-repaired.ckpt \
+./cxxgpt clone-experts --ckpt runs/night2.ckpt --out runs/night2-repaired.ckpt \
     --layer 4 --from 0 --to 2 --noise 0.01 --seed 1
-# Or use the saved bias rankings in every layer:
-./cxxgpt clone-experts --ckpt runs/night1.ckpt --out runs/night1-repaired.ckpt \
-    --auto --noise 0.01 --seed 1
+# Or clone into every expert the night's load log shows under 1%:
+./cxxgpt clone-experts --ckpt runs/night2.ckpt --out runs/night2-repaired.ckpt \
+    --auto --load-log runs/night2.load.csv --noise 0.01 --seed 1
 # The owner runs the later GPU experiment on the laptop:
-INIT=runs/night1-repaired.ckpt RUN=night2 bash scripts/night.sh
+INIT=runs/night2-repaired.ckpt RUN=night3 bash scripts/night.sh
 ```
 
 Expert and layer indices start at zero. Choose either all three explicit
@@ -612,14 +612,23 @@ with standard deviation `S` times the RMS of each source slice; the default
 `--noise 0` makes an exact copy. The seed controls only this noise, leaving
 the checkpoint's data-sampling RNG unchanged.
 
-`--auto` selects the lowest-bias expert as the source and every expert tied
-at the largest bias as a target, independently in each layer. Source ties
-use the smallest expert index; equal biases throughout a layer mean no
-clone. This is a ranking heuristic, with no starvation threshold: biases
-record past balancing nudges, not measured token counts. Inspect the printed
-choices before using a repaired checkpoint; an unequal but healthy layer
-also receives a clone. Explicit indices allow repairing only known bad
-layers from the load log.
+`--auto` reads the run's load log (`--load-log`, which `night.sh` writes as
+`runs/$RUN.load.csv`) and averages each layer's shares over its last
+`--window` rows (default 10, i.e. 500 steps at night.sh's `--log-every 50`;
+rows a resume replaced are dropped first). Every expert under `--below`
+percent (default 1, the log's warning line) becomes a copy of its layer's
+busiest expert (ties: the smaller index); layers with no expert under it
+are left alone, and it prints each layer's smallest and busiest shares.
+The router biases cannot decide this: they differ in every layer, healthy
+or not. A first version picked from them and would have overwritten an
+expert in all 12 layers of night 1's model, whose smallest share in a short
+run on its weights was 3.8%: no expert was dead.
+
+Our models route each token to two experts. Right after cloning, a token
+that picked the source may pick both near-identical copies, and they get
+almost the same updates; only the noise separates them. Whether they split
+the work quickly is what the experiment has to show (the tests only check
+that two copies diverge with one expert per token).
 
 For each copied pair, both biases become the layer's original mean, and
 both experts' optimizer `m` and `v` slices (including router rows) become

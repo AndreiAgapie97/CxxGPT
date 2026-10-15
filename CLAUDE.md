@@ -108,7 +108,11 @@ Reasoning is the first capability we go after.
   files. Night 1's weights have already seen the dev questions.
 - `train --load-log FILE`: each layer's share per expert over every log
   interval, with a warning for an expert under 1%; `night.sh` writes
-  `runs/$RUN.load.csv` and `report.sh` sums it up.
+  `runs/$RUN.load.csv` and `report.sh` sums it up. `cxxgpt clone-experts`
+  (`src/clone_experts.h`) repairs a checkpoint offline: it copies a busy
+  expert into a starved one (`--layer --from --to`, or `--auto --load-log`
+  for every expert under 1% in the log's last rows) and resets both
+  experts' biases and optimizer state. Night 1 had no expert under 1%.
 - `CMakeLists.txt`: the native Windows build of the CPU engine (clang-cl;
   `cxxgpt.exe`, `ternary_moe.exe`, `test_engine.exe`), run in CI. The
   vector kernels are picked at run time from what the CPU and Windows

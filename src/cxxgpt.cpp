@@ -98,29 +98,45 @@ void print_config(const Config& c, const Model<float>& m) {
 
 int cmd_clone_experts(Args& a) {
     const std::string in = a.str("ckpt"), out = a.str("out");
+    // --auto: clone into every expert under --below percent of its layer,
+    // averaged over the last --window rows of the run's --load-log.
     const bool automatic = a.flag("auto");
+    const std::string load_log = a.str("load-log");
+    const bool has_below = a.has("below"), has_window = a.has("window");
+    const double below = a.real("below", 1.0);
+    const int window = a.integer_int("window", 10);
     const bool has_layer = a.has("layer"), has_from = a.has("from"), has_to = a.has("to");
     const int layer = a.integer_int("layer", -1), from = a.integer_int("from", -1), to = a.integer_int("to", -1);
     const double noise = a.real("noise", 0.01);
     const long seed = a.integer("seed", 1);
     a.done();
-    CHECK(!in.empty() && !out.empty(), "usage: cxxgpt clone-experts --ckpt IN --out OUT --auto | --layer L --from A --to B");
+    CHECK(!in.empty() && !out.empty(),
+          "usage: cxxgpt clone-experts --ckpt IN --out OUT --auto --load-log RUN.load.csv | --layer L --from A --to B");
     CHECK(automatic ? !(has_layer || has_from || has_to) : has_layer && has_from && has_to,
           "choose either --auto or all of --layer, --from, --to");
+    CHECK(automatic == !load_log.empty(), "--auto needs --load-log (and --load-log needs --auto)");
+    CHECK(automatic || !(has_below || has_window), "--below and --window go with --auto");
+    CHECK(below > 0 && below < 100, "--below is a percentage between 0 and 100");
     CHECK(noise >= 0 && seed >= 0, "--noise and --seed must be nonnegative");
     Model<float> model(peek_checkpoint_config(in));
     CHECK(model.cfg.moe(), "clone-experts needs an MoE checkpoint");
     AdamW opt; Rng data_rng;
     load_checkpoint(in, model, &opt, &data_rng, true);
-    const auto edits = automatic ? automatic_expert_clones(model) : std::vector<ExpertClone>{{layer, from, to}};
+    std::vector<ExpertClone> edits{{layer, from, to}};
     if (automatic) {
+        const auto shares = recent_expert_shares(load_log, model.cfg, window);
+        edits = starved_expert_clones(shares, below / 100);
+        std::printf("expert shares averaged over each layer's last %d rows of %s\n", window, load_log.c_str());
         for (int l = 0; l < model.cfg.n_layers; ++l) {
-            const bool changed = std::any_of(edits.begin(), edits.end(), [&](const ExpertClone& e) { return e.layer == l; });
-            if (!changed) std::printf("layer %d: no clone; router biases are equal\n", l);
+            const auto& s = shares[l];
+            const int low = int(std::min_element(s.begin(), s.end()) - s.begin());
+            const int high = int(std::max_element(s.begin(), s.end()) - s.begin());
+            std::printf("layer %d: smallest expert %d (%.2f%%), busiest expert %d (%.1f%%)%s\n", l, low,
+                        s[low] * 100, high, s[high] * 100, s[low] * 100 < below ? "" : ": no clone");
         }
     }
     repair_experts(model, opt, edits, noise, uint64_t(seed), true);
-    if (edits.empty()) std::printf("no experts cloned: each layer's router biases are equal\n");
+    if (edits.empty()) std::printf("no experts cloned: none is under %g%% of its layer\n", below);
     save_checkpoint(out, model, opt, data_rng);
     std::printf("%zu expert(s) cloned -> %s (optimizer step %ld preserved)\n", edits.size(), out.c_str(), opt.step);
     return 0;

@@ -23,6 +23,27 @@ inline void clone_test_fixture(Model<float>& model, AdamW& opt) {
     }
 }
 
+inline void clone_write_text(const std::string& path, const std::string& text) {
+    std::ofstream out(path, std::ios::binary);
+    out << text;
+    CHECK(out, "cannot write %s", path.c_str());
+}
+
+// A load log for clone_test_config() whose last rows starve layer 0's
+// expert 2 and layer 1's experts 1 and 3 (expert 0 busiest in both). The
+// rows before the resume line that it replaces would hide both if kept.
+inline void clone_test_load_log(const std::string& path) {
+    clone_write_text(path,
+        "step,layer,expert_0,expert_1,expert_2,expert_3,max_load_ratio\n"
+        "100,0,0.5,0.3,0.005,0.195,2\n"
+        "100,1,0.6,0.004,0.39,0.006,2.4\n"
+        "150,0,0.1,0.1,0.1,0.7,2.8\n"
+        "150,1,0.1,0.1,0.7,0.1,2.8\n"
+        "# resumed at step 100\n"
+        "150,0,0.5,0.3,0.005,0.195,2\n"
+        "150,1,0.6,0.004,0.39,0.006,2.4\n");
+}
+
 inline bool clone_same_bits(float a, float b) {
     return std::memcmp(&a, &b, sizeof(float)) == 0;
 }
@@ -121,8 +142,14 @@ inline void test_clone_experts() {
     }
     Model<float> model(clone_test_config()); AdamW opt;
     clone_test_fixture(model, opt);
-    const auto edits = automatic_expert_clones(model);
-    EXPECT(edits.size() == 3, "auto did not select the tied highest biases");
+    // --auto reads the load log: the rows a resume replaced are dropped.
+    const std::string log = test_path("clone.load.csv");
+    clone_test_load_log(log);
+    const auto shares = recent_expert_shares(log, model.cfg, 10);
+    EXPECT(shares.size() == 2 && shares[0] == std::vector<double>({0.5, 0.3, 0.005, 0.195}) &&
+           shares[1] == std::vector<double>({0.6, 0.004, 0.39, 0.006}), "wrong averaged shares");
+    const auto edits = starved_expert_clones(shares, 0.01);
+    EXPECT(edits.size() == 3, "auto did not select the starved experts");
     if (edits.size() == 3) {
         EXPECT(edits[0].layer == 0 && edits[0].from == 0 && edits[0].to == 2 &&
                edits[1].layer == 1 && edits[1].from == 0 && edits[1].to == 1 &&
@@ -132,11 +159,25 @@ inline void test_clone_experts() {
         repair_experts(model, opt, edits, 0.01, 13);
         clone_reference(before, old, model, opt, edits, 0.01, 13);
     }
-    for (auto& bias : model.router_bias) std::fill(bias.begin(), bias.end(), 0.25f);
-    EXPECT(automatic_expert_clones(model).empty(), "balanced layer was edited");
-    model.router_bias[0] = {-1, -1, 2, 0};
-    const auto tied = automatic_expert_clones(model);
-    EXPECT(tied.size() == 1 && tied[0].from == 0 && tied[0].to == 2, "source ties must use lowest expert index");
+    // A healthy but unequal model gets no clone, unlike with the biases:
+    // night 1's smallest share was 3.8%.
+    EXPECT(starved_expert_clones({{0.5, 0.3, 0.162, 0.038}}, 0.01).empty(), "a healthy layer was edited");
+    // Exactly 1% is not starved, as in the load log's warning; source ties
+    // use the smaller index; the threshold is a parameter.
+    EXPECT(starved_expert_clones({{0.4, 0.4, 0.19, 0.01}}, 0.01).empty(), "exactly 1%% was edited");
+    const auto tied = starved_expert_clones({{0.4, 0.4, 0.195, 0.005}}, 0.01);
+    EXPECT(tied.size() == 1 && tied[0].from == 0 && tied[0].to == 3, "source ties must use lowest expert index");
+    EXPECT(starved_expert_clones({{0.4, 0.4, 0.15, 0.05}}, 0.1).size() == 1, "--below was ignored");
+    // The window averages the newest rows only: starved in the last two,
+    // not over the last three.
+    clone_write_text(log,
+        "step,layer,expert_0,expert_1,expert_2,expert_3,max_load_ratio\n"
+        "50,0,0.4,0.3,0.15,0.15,1.6\n50,1,0.25,0.25,0.25,0.25,1\n"
+        "100,0,0.7,0,0.15,0.15,2.8\n100,1,0.25,0.25,0.25,0.25,1\n"
+        "150,0,0.7,0,0.15,0.15,2.8\n150,1,0.25,0.25,0.25,0.25,1\n");
+    const auto two = starved_expert_clones(recent_expert_shares(log, model.cfg, 2), 0.01);
+    EXPECT(two.size() == 1 && two[0].layer == 0 && two[0].from == 0 && two[0].to == 1, "window 2 missed the starved expert");
+    EXPECT(starved_expert_clones(recent_expert_shares(log, model.cfg, 3), 0.01).empty(), "window 3 used too few rows");
 
     // Clone with no noise: the CPU's deterministic top-1 tie choice
     // breaks the equality during a real backward/optimizer step.

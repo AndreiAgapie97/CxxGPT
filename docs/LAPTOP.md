@@ -195,6 +195,12 @@ with a share below 1%. Resuming appends rows to the same file, after a
 are run again and their rows appear twice: the rows after the `# resumed`
 line are the ones the model kept. Nothing is written for dense models: they have
 no experts, so `--load-log` creates no file.
+If an expert stays under 1% for a night, `cxxgpt clone-experts --ckpt
+runs/night2.ckpt --out runs/night2-repaired.ckpt --auto --load-log
+runs/night2.load.csv` copies its layer's busiest expert into it (and
+prints every layer's shares; nothing changes where no expert is under
+1%). Start the next night from the repaired file with `INIT=`
+(docs/research-plan.md, "Reviving dead experts").
 
 To ask the model a question
 yourself (`--temp 0`: its most likely answer; `--answer`: stop after the

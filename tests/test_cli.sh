@@ -21,7 +21,7 @@ trap 'rm -rf -- "$TEST_DIR"' EXIT
 for kind in adam muon weights; do
     for mode in explicit auto; do
         CLONE_OPTIONS=(--layer 0 --from 0 --to 2)
-        if [[ "$mode" == auto ]]; then CLONE_OPTIONS=(--auto); fi
+        if [[ "$mode" == auto ]]; then CLONE_OPTIONS=(--auto --load-log "$TEST_DIR/clone.load.csv"); fi
         "$CXXGPT" clone-experts --ckpt "$TEST_DIR/clone-$kind.ckpt" --out "$TEST_DIR/repaired.ckpt" \
             "${CLONE_OPTIONS[@]}" --noise 0.01 --seed 31 > "$TEST_DIR/clone.log"
         "$CXXGPT_TRAINING_CLI" clone-reference "$TEST_DIR/clone-$kind.ckpt" "$TEST_DIR/repaired.ckpt" "$mode" 0.01
@@ -30,9 +30,29 @@ done
 "$CXXGPT" clone-experts --ckpt "$TEST_DIR/clone-adam.ckpt" --out "$TEST_DIR/exact.ckpt" \
     --layer 0 --from 0 --to 2 --noise 0 --seed 31 > "$TEST_DIR/clone.log"
 "$CXXGPT_TRAINING_CLI" clone-reference "$TEST_DIR/clone-adam.ckpt" "$TEST_DIR/exact.ckpt" explicit 0
+# --auto on a healthy but unequal load log (smallest share 3.8%, as in
+# night 1) clones nothing: the output keeps every value.
+HEADER=step,layer,expert_0,expert_1,expert_2,expert_3,max_load_ratio
+printf '%s\n50,0,0.5,0.3,0.162,0.038,2\n50,1,0.25,0.25,0.25,0.25,1\n' "$HEADER" > "$TEST_DIR/healthy.load.csv"
+"$CXXGPT" clone-experts --ckpt "$TEST_DIR/clone-adam.ckpt" --out "$TEST_DIR/same.ckpt" \
+    --auto --load-log "$TEST_DIR/healthy.load.csv" > "$TEST_DIR/clone.log"
+grep -q 'no experts cloned' "$TEST_DIR/clone.log"
+"$CXXGPT_TRAINING_CLI" clone-reference "$TEST_DIR/clone-adam.ckpt" "$TEST_DIR/same.ckpt" none 0
+# Load logs that do not fit the checkpoint, or are malformed.
+printf 'step,layer,expert_0,expert_1,expert_2,max_load_ratio\n50,0,0.5,0.3,0.2,1.5\n' > "$TEST_DIR/three.load.csv"
+printf '%s\n50,0,0.5,0.3,0.162,0.038,2\n' "$HEADER" > "$TEST_DIR/one-layer.load.csv"
+printf '%s\n50,2,0.5,0.3,0.162,0.038,2\n' "$HEADER" > "$TEST_DIR/deep.load.csv"
+printf '%s\n50,0,0.5,0.3,0.162,2\n50,1,0.25,0.25,0.25,0.25,1\n' "$HEADER" > "$TEST_DIR/short.load.csv"
+printf '%s\n50,0,0.5,0.3,1.5,0.038,2\n50,1,0.25,0.25,0.25,0.25,1\n' "$HEADER" > "$TEST_DIR/share.load.csv"
+L="--load-log $TEST_DIR"
 for options in '--auto --layer 0' '--layer 0 --from 0' '--layer -1 --from 0 --to 2' \
                '--layer 2 --from 0 --to 2' '--layer 0 --from 0 --to 0' '--layer 0 --from 4 --to 2' \
-               '--auto --noise -1' '--auto --noise nan' '--auto --seed -1'; do
+               "--auto $L/healthy.load.csv --noise -1" "--auto $L/healthy.load.csv --noise nan" \
+               "--auto $L/healthy.load.csv --seed -1" '--auto' "$L/healthy.load.csv --layer 0 --from 0 --to 2" \
+               "--layer 0 --from 0 --to 2 --window 3" "--auto $L/healthy.load.csv --below 0" \
+               "--auto $L/healthy.load.csv --below 100" "--auto $L/healthy.load.csv --window 0" \
+               "--auto $L/missing.load.csv" "--auto $L/three.load.csv" "--auto $L/one-layer.load.csv" \
+               "--auto $L/deep.load.csv" "--auto $L/short.load.csv" "--auto $L/share.load.csv"; do
     status=0
     # Fixed literal cases, no user-supplied option splitting.
     # shellcheck disable=SC2086

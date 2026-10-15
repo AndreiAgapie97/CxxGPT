@@ -47,6 +47,7 @@ int main(int argc, char** argv) {
         save_checkpoint(dir + "/clone-muon.ckpt", model, opt, rng);
         opt.m.clear(); opt.v.clear();
         save_checkpoint(dir + "/clone-weights.ckpt", model, opt, rng);
+        clone_test_load_log(dir + "/clone.load.csv");
         return 0;
     }
     if (argc == 6 && std::string(argv[1]) == "clone-reference") {
@@ -54,9 +55,11 @@ int main(int argc, char** argv) {
         AdamW old, now; Rng a, b;
         load_checkpoint(argv[2], before, &old, &a, true);
         load_checkpoint(argv[3], after, &now, &b, true);
-        const bool automatic = std::string(argv[4]) == "auto";
-        const std::vector<ExpertClone> edits = automatic ?
-            std::vector<ExpertClone>{{0, 0, 2}, {1, 0, 1}, {1, 0, 3}} : std::vector<ExpertClone>{{0, 0, 2}};
+        // auto: what --auto must pick from clone_test_load_log; none: nothing.
+        const std::string mode = argv[4];
+        const std::vector<ExpertClone> edits = mode == "auto" ?
+            std::vector<ExpertClone>{{0, 0, 2}, {1, 0, 1}, {1, 0, 3}} :
+            mode == "none" ? std::vector<ExpertClone>{} : std::vector<ExpertClone>{{0, 0, 2}};
         clone_reference(before, old, after, now, edits, std::stod(argv[5]), 31);
         for (int i = 0; i < 4; ++i) EXPECT(a.state()[i] == b.state()[i], "CLI clone changed sampler state");
         return g_failures ? 1 : 0;
