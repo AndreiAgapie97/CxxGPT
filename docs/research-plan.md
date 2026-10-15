@@ -54,11 +54,17 @@ benchmaxxing by selection, with nothing dishonest intended.
    and one try are not the same test.
 
 **The dev set.**
-- `scripts/get_data.py gsm8k` holds out exactly 500 GSM8K train problems
-  using Python's local random generator with seed `20261014`. It keeps the
-  upstream file in `data/gsm8k/raw/train.jsonl`, writes the remaining problems
-  to `train.jsonl`, and writes the held-out problems to `dev.jsonl`. Repeating
-  preparation selects the same problems; the official test file is unchanged.
+- `scripts/get_data.py gsm8k` holds out exactly 500 GSM8K train problems:
+  the 500 whose question (with runs of whitespace made single spaces) has the
+  smallest sha256 digest. A question's digest depends only on its own text,
+  so the choice depends neither on Python's random module nor on the order
+  of the upstream file. It keeps the upstream file in
+  `data/gsm8k/raw/train.jsonl`, writes the remaining problems to
+  `train.jsonl` (in upstream order), and writes the held-out problems to
+  `dev.jsonl`. Repeating preparation selects the same problems; the official
+  test file is unchanged. (The first version of PR 5 picked the 500 with
+  `random.sample` and seed `20261014`; that split was never used, and this
+  one replaces it.)
 - `scripts/prepare_data.sh` also writes `gsm8k/dev.txt` and `dev.tok`.
   `DEV=1 scripts/night.sh` uses those files for both `--val` and
   `--reason-test`. The default remains `DEV=0`, using the test files so the
@@ -741,11 +747,11 @@ What this says:
    only 20,800 and 7.4 GB. Not for ternary models yet (their quantized
    values are not exact in bf16; int8 tensor cores are the way there).
 3. **Muon in bf16** (16% of the step after item 2). **Done** with
-   `--matmul bf16` (2026-10-14): Newton–Schulz's products take bf16 copies
+   `--matmul bf16` (2026-10-14): Newtonï¿½Schulz's products take bf16 copies
    of X and A, with fp32 sums, X kept in fp32, and cuBLAS adding the b A and
    a X terms in. Muon went from 434 to 288 ms a step; with item 5's first
    step, the night-1 model trains at 25,600 tokens/s (2.55 s a step, steady
-   over a 200-step run). Reference Muon runs Newton–Schulz all in bf16.
+   over a 200-step run). Reference Muon runs Newtonï¿½Schulz all in bf16.
 4. **Exams on the GPU.** Each one runs on the CPU while the GPU waits: about
    5 minutes for 250 problems, about 15 minutes per night with the final
    exam. Run them on the GPU, or less often.

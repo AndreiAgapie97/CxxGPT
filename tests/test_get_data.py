@@ -96,9 +96,18 @@ class DatasetTest(unittest.TestCase):
         self.split()
         self.assertEqual(first, (self.root / "gsm8k/dev.jsonl").read_bytes())
         self.assertEqual(timestamp, (self.root / "gsm8k/dev.jsonl").stat().st_mtime_ns)
-        # Lock the fixed seed and ordered source split across future changes.
-        self.assertEqual(hashlib.sha256(first).hexdigest(), "4cf88629674a4bef92cec5f4525d92f0791171cba92edac4c1d27284290ae988")
+        # Lock the choice (the 500 questions with the smallest sha256) and the
+        # file layout (upstream order) across future changes.
+        self.assertEqual(hashlib.sha256(first).hexdigest(), "2a9b35bfc43d286e8a47108cfc16ec12f5d3300c56544a97501e9a014c7caf49")
         self.assertEqual((self.root / "gsm8k/test.jsonl").read_bytes(), self.files["/gsm8k/test.jsonl"])
+        # The choice depends on the question texts only, not on the row order.
+        self.files["/gsm8k/train.jsonl"] = self.jsonl(self.rows[::-1])
+        os.remove(self.root / "gsm8k/raw/train.jsonl")
+        self.split()
+        self.assertEqual({r["question"] for r in self.read("gsm8k/dev.jsonl")}, dq)
+        # The rule itself, checked against a direct reading of it.
+        digests = sorted(hashlib.sha256(q.encode()).hexdigest() for q in tq | dq)
+        self.assertEqual({hashlib.sha256(q.encode()).hexdigest() for q in dq}, set(digests[:500]))
 
     def test_filters_exactly_planted_rows(self):
         self.split()

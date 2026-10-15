@@ -25,11 +25,11 @@ HF_TOKEN to a Hugging Face access token.
 """
 import argparse
 import filecmp
+import hashlib
 import http.client
 import io
 import json
 import os
-import random
 import sys
 import time
 import urllib.error
@@ -38,7 +38,6 @@ import urllib.request
 HF = os.environ.get("HF_ENDPOINT", "https://huggingface.co").rstrip("/")  # or a mirror
 DOC_SEP = "<|endoftext|>"
 DEV_SIZE = 500
-DEV_SEED = 20261014
 
 
 def log(msg):
@@ -291,6 +290,20 @@ def normalize_question(question):
     return " ".join(question.split())
 
 
+def dev_rows(questions):
+    """The row numbers of the dev problems: the DEV_SIZE questions whose
+    sha256 digest is smallest.
+
+    Each question's digest depends only on its own (whitespace-normalized)
+    text, so the choice does not depend on Python's random module or on the
+    order of the rows in the upstream file. Equal digests would need equal
+    questions, which get_gsm8k rejects; the row number only makes the sort
+    key complete."""
+    def key(i):
+        return hashlib.sha256(questions[i].encode("utf-8")).digest(), i
+    return set(sorted(range(len(questions)), key=key)[:DEV_SIZE])
+
+
 def get_gsm8k(out, args):
     base = os.environ.get("GSM8K_ENDPOINT",
                           "https://raw.githubusercontent.com/openai/grade-school-math/master/grade_school_math/data")
@@ -306,7 +319,7 @@ def get_gsm8k(out, args):
     questions = [normalize_question(row["question"]) for row in rows]
     if len(set(questions)) != len(questions) or len(rows) <= DEV_SIZE:
         sys.exit("GSM8K train must contain more than 500 distinct questions")
-    held_out = set(random.Random(DEV_SEED).sample(range(len(rows)), DEV_SIZE))
+    held_out = dev_rows(questions)
     for split in ("train", "dev"):
         dest = os.path.join(out, f"{split}.jsonl")
         text = "".join(json.dumps(row, ensure_ascii=False) + "\n" for i, row in enumerate(rows)
@@ -314,7 +327,7 @@ def get_gsm8k(out, args):
         with open(dest + ".part", "w", encoding="utf-8") as f:
             f.write(text)
         replace_if_changed(dest + ".part", dest)
-    log(f"  GSM8K: {len(rows) - DEV_SIZE} train, {DEV_SIZE} dev (seed {DEV_SEED})")
+    log(f"  GSM8K: {len(rows) - DEV_SIZE} train, {DEV_SIZE} dev (smallest sha256 of the question)")
     download(f"{base}/test.jsonl", os.path.join(out, "test.jsonl"))
 
 
