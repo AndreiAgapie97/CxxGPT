@@ -493,12 +493,14 @@ borrow, or use a wrong operator; corrections use several short phrasings.
 
 The reserved text markers `[[no-loss]]` and `[[/no-loss]]` surround exactly
 the wrong statement, excluding its following punctuation and correction.
-The generator and `text2tok` remove both markers before encoding and give
-every enclosed token mask 0. The wrong statement remains in the context,
+The generator, and `text2tok --loss-markers`, remove both markers before
+encoding and give every enclosed token mask 0 (without the flag, `text2tok`
+treats them as plain text, so web text is tokenized as before; re-tokenizing
+`OUT.train.text` needs the flag). The wrong statement remains in the context,
 so the next trained token begins its correction. Annotation boundaries also
 split BPE encoding: no merged token crosses from a wrong span into a trained
 span. Nested, unmatched and unclosed markers are errors, including spans
-crossing a document separator. A streaming block waits for a closing marker
+crossing a document separator (with `--loss-markers`). A streaming block waits for a closing marker
 within the existing buffer limit. The token-file layout is unchanged.
 `gen-reasoning` still masks the question; `text2tok` trains on the rest of
 its input as before (including questions), and `--doc-sep` still trims each
@@ -761,11 +763,11 @@ What this says:
    only 20,800 and 7.4 GB. Not for ternary models yet (their quantized
    values are not exact in bf16; int8 tensor cores are the way there).
 3. **Muon in bf16** (16% of the step after item 2). **Done** with
-   `--matmul bf16` (2026-10-14): Newton–Schulz's products take bf16 copies
+   `--matmul bf16` (2026-10-14): Newtonï¿½Schulz's products take bf16 copies
    of X and A, with fp32 sums, X kept in fp32, and cuBLAS adding the b A and
    a X terms in. Muon went from 434 to 288 ms a step; with item 5's first
    step, the night-1 model trains at 25,600 tokens/s (2.55 s a step, steady
-   over a 200-step run). Reference Muon runs Newton–Schulz all in bf16.
+   over a 200-step run). Reference Muon runs Newtonï¿½Schulz all in bf16.
 4. **Exams on the GPU.** Each one runs on the CPU while the GPU waits: about
    5 minutes for 250 problems, about 15 minutes per night with the final
    exam. Run them on the GPU, or less often.

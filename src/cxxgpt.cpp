@@ -136,12 +136,17 @@ Tokenizer load_tokenizer(const std::string& path) {
 // encoded in parallel, so it can be far bigger than memory. With --doc-sep S
 // the text is a series of documents separated by S (TinyStories uses
 // "<|endoftext|>"); each document is trimmed and starts with BOS.
+// With --loss-markers, text between [[no-loss]] and [[/no-loss]] (planted
+// mistakes, loss_mask.h) is kept as context but not trained on, and the
+// markers are removed. Without it, the markers are ordinary text: web text
+// may contain them by chance, and must not fail or change meaning.
 int cmd_text2tok(Args& a) {
     const std::string in = a.str("in"), out = a.str("out"), bpe = a.str("bpe"), sep = a.str("doc-sep");
+    const bool markers = a.flag("loss-markers");
     const int threads = threads_arg(a);
     a.done();
     CHECK(!in.empty() && !out.empty(),
-          "usage: cxxgpt text2tok --in text.txt --out data.tok [--bpe tok.bpe] [--doc-sep STR]");
+          "usage: cxxgpt text2tok --in text.txt --out data.tok [--bpe tok.bpe] [--doc-sep STR] [--loss-markers]");
     const Tokenizer tok = load_tokenizer(bpe);
     std::vector<Tokenizer> toks(threads, tok);  // encode() caches chunks, so one per thread
     std::ifstream f(in, std::ios::binary);
@@ -152,12 +157,18 @@ int cmd_text2tok(Args& a) {
     // right after a separator, or else at Tokenizer::next_safe_split.
     constexpr size_t kBlock = 8 << 20;
     constexpr size_t npos = std::string::npos;
+    // Without markers the mask stays empty, so the file has no mask, as before.
+    auto encode_text = [&](std::string_view text, const Tokenizer& t, std::vector<uint16_t>& o,
+                           std::vector<uint8_t>& mask) {
+        if (markers) encode_loss_marked(text, t, o, mask);
+        else for (int id : t.encode(text)) o.push_back(uint16_t(id));
+    };
     auto encode_block = [&](std::string_view blk, const Tokenizer& t, std::vector<uint16_t>& o,
                             std::vector<uint8_t>& mask, long& docs) {
         o.clear();
         mask.clear();
         if (sep.empty()) {
-            encode_loss_marked(blk, t, o, mask);
+            encode_text(blk, t, o, mask);
             return;
         }
         for (size_t p = 0; p <= blk.size();) {
@@ -166,8 +177,8 @@ int cmd_text2tok(Args& a) {
             const std::string doc = trim(std::string(blk.substr(p, q - p)));
             if (!doc.empty()) {
                 o.push_back(uint16_t(kBos));
-                mask.push_back(1);
-                encode_loss_marked(doc, t, o, mask);
+                if (markers) mask.push_back(1);
+                encode_text(doc, t, o, mask);
                 ++docs;
             }
             p = q + sep.size();
@@ -213,8 +224,10 @@ int cmd_text2tok(Args& a) {
                 end = all.find(sep, target);
                 end = end != npos ? end + sep.size() : eof ? all.size() : npos;
             }
-            if (end != npos) end = loss_marker_safe_split(all, end, pos);
-            CHECK(!eof || end != npos, "unclosed no-loss marker");
+            if (markers && end != npos) {
+                end = loss_marker_safe_split(all, end, pos);  // never cut a marked span
+                CHECK(!eof || end != npos, "unclosed no-loss marker");
+            }
             if (end == npos) break;
             blocks.push_back(all.substr(pos, end - pos));
             pos = end;

@@ -110,7 +110,7 @@ with tempfile.TemporaryDirectory() as directory:
         for threads in [1, 2]:
             path = root / f"stream-{bpe}-{threads}.tok"
             options = ["--bpe", root / "mask.bpe"] if bpe else []
-            run("text2tok", "--in", source, "--out", path, "--threads", threads, *options)
+            run("text2tok", "--in", source, "--out", path, "--threads", threads, "--loss-markers", *options)
             _, ids, mask, masked = load(path)
             assert masked == 1
             decoded = b"".join(vocab[i] for i in ids)
@@ -121,7 +121,7 @@ with tempfile.TemporaryDirectory() as directory:
         assert outputs[0] == outputs[1]
     # A later wrong span also covers TokenWriter's prefix-of-ones backfill.
     source.write_text("z " * ((8 << 20) // 2 + 20) + "[[no-loss]]wrong[[/no-loss]] right\n")
-    run("text2tok", "--in", source, "--out", root / "late.tok", "--threads", 1)
+    run("text2tok", "--in", source, "--out", root / "late.tok", "--threads", 1, "--loss-markers")
     text, mask = byte_text(root / "late.tok")
     assert bytes(value for value, keep in zip(text, mask) if not keep) == b"wrong"
     for malformed in ["[[no-loss]]unfinished", "[[/no-loss]]",
@@ -129,5 +129,15 @@ with tempfile.TemporaryDirectory() as directory:
                       "[[no-loss]]a<|endoftext|>b[[/no-loss]]"]:
         source.write_text(malformed)
         run("text2tok", "--in", source, "--out", root / "bad.tok",
-            "--doc-sep", "<|endoftext|>", succeeds=False)
+            "--doc-sep", "<|endoftext|>", "--loss-markers", succeeds=False)
+        # Without --loss-markers the markers are plain text, as on main: web
+        # text that happens to contain them must neither fail nor be masked.
+        run("text2tok", "--in", source, "--out", root / "plain.tok", "--doc-sep", "<|endoftext|>")
+        _, ids, mask, masked = load(root / "plain.tok")
+        expected = b"".join(b"\x01" + doc.encode() for doc in malformed.split("<|endoftext|>"))
+        assert masked == 0 and bytes(ids) == expected
+    source.write_text(annotated)
+    run("text2tok", "--in", source, "--out", root / "plain.tok", "--threads", 2)
+    _, ids, mask, masked = load(root / "plain.tok")
+    assert masked == 0 and bytes(ids) == annotated.encode()
 print("CLI: planted mistakes, clean holdouts, repeatability and streamed byte/BPE loss masks passed")

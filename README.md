@@ -295,9 +295,11 @@ Ternary MoE, otherwise the same runs:
 masked wrong step followed by a correct step; validation and test stay clean.
 The default 0 preserves previous output byte for byte. Nonzero runs also
 write `OUT.train.text` for inspection. `[[no-loss]]...[[/no-loss]]` marks the
-wrong statement: both the generator and `text2tok` remove these annotations
-and set its token loss mask to zero, while keeping the statement as context.
-Use the generator's `.train.tok` to retain its question mask. The [experiment
+wrong statement: the generator removes these annotations and sets its token
+loss mask to zero, while keeping the statement as context. `text2tok` does
+the same only with `--loss-markers` (otherwise the markers are plain text,
+so stray ones in web text change nothing). Use the generator's `.train.tok`
+to retain its question mask. The [experiment
 plan](docs/research-plan.md#b-planted-mistakes-and-corrections) documents the
 marker and paired 0%, 10%, 30% laptop commands.
 
