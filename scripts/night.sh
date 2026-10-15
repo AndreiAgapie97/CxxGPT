@@ -60,7 +60,7 @@ esac
 GPU=${GPU---gpu}
 if [ -z "${MIX:-}" ]; then
   CLEAN=${CLEAN:-$DATA/clean-20261015}
-  MIX="$CLEAN/textbooks.tok*2,$CLEAN/wiki.tok,$CLEAN/doab-part.tok,$CLEAN/arxiv-part.tok,$CLEAN/word-train.tok,$CLEAN/gsm8k-train.tok*8"
+  MIX="$CLEAN/textbooks-train.tok*2,$CLEAN/wiki-train.tok,$CLEAN/doab-part.tok,$CLEAN/arxiv-part.tok,$CLEAN/word-train.tok,$CLEAN/gsm8k-train.tok*8"
   IFS=, read -ra files <<< "$MIX"
   for f in "${files[@]}"; do
     [ -f "${f%%\**}" ] || { echo "no ${f%%\**}: run scripts/prepare_clean.sh first"; exit 1; }

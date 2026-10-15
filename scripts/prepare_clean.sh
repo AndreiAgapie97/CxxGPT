@@ -10,6 +10,8 @@
 #     document boundary to about 900M and 400M tokens, so that research
 #     books and papers do not crowd out the rest of the mix (the full
 #     files stay);
+#   textbooks-train, wiki-train and textbooks-val, wiki-val, doab-val,
+#     arxiv-val: the mix's text and the held-out text it never trains on;
 #   word-train, word-dev: exact word problems (cxxgpt gen-word, no
 #     calculator notes; dev uses the held-out sentence patterns), as masked
 #     token files (prep-qa: the question is not trained on, as GSM8K's);
@@ -54,8 +56,45 @@ EOF
 [ -f "$OUT/doab-part.txt" ] || cut_docs "$OUT/doab.txt" "$OUT/doab-part.txt" "$(awk 'BEGIN { print 900 / 1511.5 }')"
 [ -f "$OUT/arxiv-part.txt" ] || cut_docs "$OUT/arxiv.txt" "$OUT/arxiv-part.txt" "$(awk 'BEGIN { print 400 / 946.0 }')"
 
+echo "== held-out text"
+# Text the model never trains on, for a general-language check besides
+# GSM8K: every 100th document of textbooks and wiki (the rest is
+# NAME-train), and about 8 MB of the DOAB and arXiv documents that follow
+# the cut (never read by the mix).
+split_every() {  # SRC TRAIN VAL N
+  "$PY" - "$@" << 'EOF'
+import sys
+src, train, val, n = sys.argv[1], sys.argv[2], sys.argv[3], int(sys.argv[4])
+sep = "\n<|endoftext|>\n"
+docs = open(src, encoding="utf-8", newline="").read().split(sep)
+open(train, "w", encoding="utf-8", newline="").write(sep.join(d for i, d in enumerate(docs) if i % n != n - 1))
+open(val, "w", encoding="utf-8", newline="").write(sep.join(d for i, d in enumerate(docs) if i % n == n - 1))
+print(f"{src}: {len(docs) - len(docs) // n} documents -> {train}, {len(docs) // n} -> {val}")
+EOF
+}
+after_cut() {  # FULL PART VAL BYTES: whole documents of FULL after PART, about BYTES
+  "$PY" - "$@" << 'EOF'
+import os, sys
+full, part, val, size = sys.argv[1], sys.argv[2], sys.argv[3], int(sys.argv[4])
+sep = b"\n<|endoftext|>\n"
+start = os.path.getsize(part) + len(sep)
+with open(full, "rb") as f:
+    f.seek(start - len(sep))
+    assert f.read(len(sep)) == sep, "the part does not end at a document boundary"
+    data = f.read(size + 10_000_000)
+end = data.find(sep, size)
+open(val, "wb").write(data[:end])
+print(f"{val}: {data[:end].count(sep) + 1} documents of {full} after {part}, {end} bytes")
+EOF
+}
+for name in textbooks wiki; do
+  [ -f "$OUT/$name-val.txt" ] || split_every "$OUT/$name.txt" "$OUT/$name-train.txt" "$OUT/$name-val.txt" 100
+done
+[ -f "$OUT/doab-val.txt" ] || after_cut "$OUT/doab.txt" "$OUT/doab-part.txt" "$OUT/doab-val.txt" 8000000
+[ -f "$OUT/arxiv-val.txt" ] || after_cut "$OUT/arxiv.txt" "$OUT/arxiv-part.txt" "$OUT/arxiv-val.txt" 8000000
+
 echo "== tokens"
-for name in textbooks wiki doab arxiv doab-part arxiv-part; do
+for name in doab-part arxiv-part textbooks-train wiki-train textbooks-val wiki-val doab-val arxiv-val; do
   [ -f "$OUT/$name.tok" ] || "$CX" text2tok --in "$OUT/$name.txt" --out "$OUT/$name.tok" --bpe "$tok" --doc-sep '<|endoftext|>'
 done
 
@@ -138,9 +177,9 @@ EOF
 fi
 
 echo "== leak check"
-train="$OUT/textbooks.txt,$OUT/wiki.txt,$OUT/doab-part.txt,$OUT/arxiv-part.txt,$OUT/word-train.txt,$OUT/gsm8k-train.txt"
+train="$OUT/textbooks-train.txt,$OUT/wiki-train.txt,$OUT/doab-part.txt,$OUT/arxiv-part.txt,$OUT/word-train.txt,$OUT/gsm8k-train.txt"
 for q in data/gsm8k/test.txt "$OUT/gsm8k-dev.txt" "$PILOT/svamp-dev.txt"; do
   echo "-- $q"
   "$CX" leak-check --questions "$q" --train "$train"
 done
-echo "MIX=$OUT/textbooks.tok*2,$OUT/wiki.tok,$OUT/doab-part.tok,$OUT/arxiv-part.tok,$OUT/word-train.tok,$OUT/gsm8k-train.tok*8"
+echo "MIX=$OUT/textbooks-train.tok*2,$OUT/wiki-train.tok,$OUT/doab-part.tok,$OUT/arxiv-part.tok,$OUT/word-train.tok,$OUT/gsm8k-train.tok*8"

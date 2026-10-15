@@ -310,14 +310,17 @@ Common Pile downloads in `data/public-20261015/` (never changed) with
 
 | File | What | Tokens | In the mix |
 |---|---|---|---|
-| `textbooks` | LibreTexts and Pressbooks open textbooks | 240M | x2 |
-| `wiki` | Wikipedia, Wikibooks, Wikisource, Wikinews articles (one shard of 35) | 342M | x1 |
+| `textbooks-train` | LibreTexts and Pressbooks open textbooks | 238M | x2 |
+| `wiki-train` | Wikipedia, Wikibooks, Wikisource, Wikinews articles (one shard of 35) | 338M | x1 |
 | `doab-part` | academic books (DOAB), cut from 2 of 5 shards | 901M | x1 |
 | `arxiv-part` | openly licensed arXiv papers, cut from 1 of 8 shards | 405M | x1 |
 | `word-train` | 1M exact word problems (`gen-word`, no calculator notes) | 189M | x1 |
 | `gsm8k-train` | 6,966 human-written GSM8K train problems (7 near-copies of a test or dev question dropped) | 1.2M | x8 |
 
-That is 2.33B tokens in the mix, about 3.7 nights. Empty, short and
+That is 2.32B tokens in the mix, about 3.7 nights. Held out of it, for a
+general-language check: every 100th textbook and wiki document
+(`textbooks-val`, `wiki-val`, 2.4M and 3.4M tokens) and about 8 MB of the
+DOAB and arXiv documents after the cut (`doab-val`, `arxiv-val`). Empty, short and
 wrongly decoded records, non-article wiki pages, Wikiquote and repeated
 texts are dropped; DOAB and arXiv are cut at a document boundary, so that
 academic books and papers are a little over half of the mix instead of

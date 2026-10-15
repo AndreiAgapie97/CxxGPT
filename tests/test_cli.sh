@@ -864,7 +864,7 @@ printf 'CLI: leak-check scans questions across lines; DEV selects both validatio
 # when one of its files is missing.
 clean="$TEST_DIR/night-data/clean-20261015"
 mkdir -p "$clean"
-for f in textbooks wiki doab-part arxiv-part word-train; do : > "$clean/$f.tok"; done
+for f in textbooks-train wiki-train doab-part arxiv-part word-train; do : > "$clean/$f.tok"; done
 run="mix-check-${BASHPID}"
 status=0
 MOCK_ARGS="$TEST_DIR/night.args" DATA="$TEST_DIR/night-data" RUN="$run" TOKS=100 \
@@ -875,6 +875,6 @@ grep -q "no $clean/gsm8k-train.tok: run scripts/prepare_clean.sh first" "$TEST_D
 MOCK_ARGS="$TEST_DIR/night.args" DATA="$TEST_DIR/night-data" RUN="$run" TOKS=100 \
     CX="$TEST_DIR/night-mock" bash scripts/night.sh > "$TEST_DIR/night-mix.log"
 [[ $(awk '$0=="--data" {getline; print}' "$TEST_DIR/night.args") == \
-    "$clean/textbooks.tok*2,$clean/wiki.tok,$clean/doab-part.tok,$clean/arxiv-part.tok,$clean/word-train.tok,$clean/gsm8k-train.tok*8" ]]
+    "$clean/textbooks-train.tok*2,$clean/wiki-train.tok,$clean/doab-part.tok,$clean/arxiv-part.tok,$clean/word-train.tok,$clean/gsm8k-train.tok*8" ]]
 rm "runs/$run.log"
 printf 'CLI: night.sh defaults to the audited mix and names a missing file\n'
