@@ -35,16 +35,23 @@ int pick_token(const T* logits, int V, double temperature, Rng* rng) {
 // seq_len - L + 1 (the last token is never fed back, so it needs no slot).
 // done(generated) is asked after each new token; a sequence that is done
 // stops growing (its slot keeps computing until the batch finishes).
+// With temperature > 0 the tokens are sampled: from `rng`, shared by all
+// sequences in slot order, or, if rng_per_sequence is given (one generator
+// per prompt), sequence b draws only from its own (*rng_per_sequence)[b], so
+// what it samples does not depend on which other sequences share the batch.
 // The model only needs cfg (vocab, seq_len), decode_begin and decode_step,
 // so tests can pass a scripted fake instead of a real Model.
 template <class M>
 std::vector<std::vector<int>> generate(M& model, const std::vector<std::vector<int>>& prompts,
                                        int max_new,
                                        const std::function<bool(const std::vector<int>&)>& done,
-                                       double temperature = 0.0, Rng* rng = nullptr) {
+                                       double temperature = 0.0, Rng* rng = nullptr,
+                                       std::vector<Rng>* rng_per_sequence = nullptr) {
     const int B = int(prompts.size());
     std::vector<std::vector<int>> out(B);
     if (B == 0) return out;
+    CHECK(!rng_per_sequence || rng_per_sequence->size() == size_t(B), "%zu generators for %d sequences",
+          rng_per_sequence ? rng_per_sequence->size() : size_t(0), B);
     int L = 0;
     for (const auto& p : prompts) {
         CHECK(!p.empty(), "empty prompt");
@@ -70,7 +77,8 @@ std::vector<std::vector<int>> generate(M& model, const std::vector<std::vector<i
         if (pos < L - 1) continue;
         for (int b = 0; b < B; ++b) {
             if (finished[b]) continue;  // stopped slots consume no further random draws
-            const int t = pick_token(logits + size_t(b) * model.cfg.vocab, model.cfg.vocab, temperature, rng);
+            Rng* r = rng_per_sequence ? &(*rng_per_sequence)[size_t(b)] : rng;
+            const int t = pick_token(logits + size_t(b) * model.cfg.vocab, model.cfg.vocab, temperature, r);
             cur[b] = t;
             out[b].push_back(t);
             if (done(out[b])) finished[b] = 1, ++n_finished;
@@ -93,15 +101,37 @@ inline std::string normalized_answer(const std::string& completion) {
 }
 
 // How many times each problem is sampled. With tries > 1, every problem is
-// generated `tries` times at `temperature` (sampling needs a seeded Rng), and
-// the reported answer is the most common final answer among the tries that
-// finished one. With tries == 1 the
-// evaluation is exactly what it was before votes existed.
+// generated `tries` times at `temperature` (above 0), and the reported
+// answer is the most common final answer among the tries that finished one.
+// With tries == 1 and temperature 0 the evaluation is exactly what it was
+// before votes existed (greedy).
+//
+// Every try has its own random generator, seeded from (seed, the problem's
+// number, the try's number) by try_seed(). So a try samples the same text
+// whatever --batch is, whichever other problems are evaluated with it, and
+// however many tries there are: try k is the same try at every effort level.
+// A problem's number is its place in the list given to eval_reasoning, or
+// problem_ids[place] when given (the CLI passes each problem's place in the
+// test file, so --limit picks problems without changing their tries).
 struct VoteOpts {
     int tries = 1;
     double temperature = 0.0;
-    Rng* rng = nullptr;
+    uint64_t seed = 1;
+    std::vector<size_t> problem_ids;  // optional, one per problem
 };
+
+// The seed of one try: the run's seed, the problem's number and the try's
+// number mixed together (splitmix64's finalizer after each), so that nearby
+// seeds, problems or tries give unrelated random streams.
+inline uint64_t try_seed(uint64_t seed, uint64_t problem, uint64_t try_index) {
+    auto mix = [](uint64_t z) {
+        z += 0x9E3779B97F4A7C15ull;
+        z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ull;
+        z = (z ^ (z >> 27)) * 0x94D049BB133111EBull;
+        return z ^ (z >> 31);
+    };
+    return mix(mix(mix(seed) ^ problem) ^ try_index);
+}
 
 // The most common answer; on a tie, the one that appeared first.
 inline std::string vote_answer(const std::vector<std::string>& answers) {
@@ -215,10 +245,12 @@ inline std::vector<int> prompt_tokens(const Problem& p, const Tokenizer& tok) {
 
 // Decodes every problem from "A: " and checks the answer exactly. With
 // vote.tries == 1 (the default) this is the plain greedy evaluation. With
-// tries > 1, each problem is sampled `tries` times at vote.temperature (an
-// Rng must be given) and the reported answer is the most common one among
-// the tries that finished an answer line, ties going to the answer that
-// appeared first (score_tries).
+// tries > 1, each problem is sampled `tries` times at vote.temperature, each
+// try from its own seeded generator (VoteOpts), and the reported answer is
+// the most common one among the tries that finished an answer line, ties
+// going to the answer that appeared first (score_tries). A try's text does
+// not depend on the batching as long as the context leaves every batch room
+// for max_new tokens (as for greedy decoding).
 // The default Tokenizer (no merges) is byte-level.
 template <class M>
 EvalResult eval_reasoning(M& model, const std::vector<Problem>& problems, const Tokenizer& tok = {},
@@ -228,8 +260,9 @@ EvalResult eval_reasoning(M& model, const std::vector<Problem>& problems, const 
     CHECK(vote.tries > 0, "--tries must be positive");
     CHECK(vote.tries <= batch, "--tries %d is more than --batch %d: one problem's tries are generated together",
           vote.tries, batch);
-    CHECK(vote.tries == 1 || (vote.temperature > 0 && vote.rng),
-          "sampling more than one try needs --temp above 0 and a seed");
+    CHECK(vote.tries == 1 || vote.temperature > 0, "sampling more than one try needs --temp above 0");
+    CHECK(vote.problem_ids.empty() || vote.problem_ids.size() == problems.size(), "%zu problem ids for %zu problems",
+          vote.problem_ids.size(), problems.size());
     CHECK(model.cfg.vocab >= tok.vocab_size(), "model vocab %d < tokenizer vocab %d", model.cfg.vocab,
           tok.vocab_size());
     // Ids the tokenizer cannot decode (model vocab padding) end a completion.
@@ -260,11 +293,17 @@ EvalResult eval_reasoning(M& model, const std::vector<Problem>& problems, const 
     for (size_t k0 = 0; k0 < order.size(); k0 += group_problems) {
         const size_t k1 = std::min(order.size(), k0 + group_problems);
         std::vector<std::vector<int>> group;
-        for (size_t k = k0; k < k1; ++k)
-            for (int t = 0; t < vote.tries; ++t) group.push_back(prompts[order[k]]);
+        std::vector<Rng> rngs;  // each try's own generator (VoteOpts)
+        for (size_t k = k0; k < k1; ++k) {
+            const size_t problem = vote.problem_ids.empty() ? order[k] : vote.problem_ids[order[k]];
+            for (int t = 0; t < vote.tries; ++t) {
+                group.push_back(prompts[order[k]]);
+                rngs.emplace_back(try_seed(vote.seed, problem, uint64_t(t)));
+            }
+        }
         const auto outs = generate(model, group, max_new,
                                    [&](const std::vector<int>& gen) { return completion_done(text_of(gen)); },
-                                   vote.temperature, vote.temperature > 0 ? vote.rng : nullptr);
+                                   vote.temperature, nullptr, &rngs);
         // Problem order[k]'s tries sit together in the group, in try order.
         for (size_t k = k0; k < k1; ++k)
             for (int t = 0; t < vote.tries; ++t)

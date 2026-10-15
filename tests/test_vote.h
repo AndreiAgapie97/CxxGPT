@@ -5,6 +5,7 @@
 #pragma once
 
 #include <map>
+#include <set>
 
 #include "../src/generate.h"
 #include "../src/model.h"
@@ -151,8 +152,7 @@ inline void test_vote_report() {
     VoteOpts vote;
     vote.tries = 4;
     vote.temperature = 1.0;
-    Rng rng(5);
-    vote.rng = &rng;
+    vote.seed = 5;
     const EvalResult r = eval_reasoning(fake, ps, Tokenizer{}, 4, 40, 8, false, vote);
     const LevelScore all = r.overall();
     EXPECT(r.total == 5 && all.total == 5 && r.tries == 4, "the vote report scored %d problems at %d tries",
@@ -187,18 +187,8 @@ inline void test_vote_report() {
                    r.failures[f].second.c_str(), want[f].second);
         }
     }
-    // Seeded: the same seed replays the same scripts and the same report.
-    ScriptedModel again;
-    again.queue = fake.queue;
-    again.prompt_len = fake.prompt_len;
-    Rng rng2(5);
-    VoteOpts same = vote;
-    same.rng = &rng2;
-    const EvalResult r2 = eval_reasoning(again, ps, Tokenizer{}, 4, 40, 8, false, same);
-    const LevelScore all2 = r2.overall();
-    EXPECT(all2.first_correct == all.first_correct && all2.vote_correct == all.vote_correct &&
-               all2.any_correct == all.any_correct && all2.distinct_answers == all.distinct_answers,
-           "the same seed gave a different report");
+    // (The scripts ignore randomness, so seeds are tested on a real model in
+    // test_vote_seeding.)
 }
 
 // One try must reproduce exactly what eval-reasoning scored before votes
@@ -213,8 +203,7 @@ inline void test_vote_empty_answer() {
     VoteOpts vote;
     vote.tries = 4;
     vote.temperature = 1.0;
-    Rng rng(6);
-    vote.rng = &rng;
+    vote.seed = 6;
     const EvalResult r = eval_reasoning(finished, ps, Tokenizer{}, 4, 40, 8, false, vote);
     EXPECT(r.correct == 1, "a finished empty answer line must match an empty gold (vote %d)", r.correct);
     // The same problem, but no try ever finishes: still wrong.
@@ -267,12 +256,61 @@ inline void test_vote_single_try_matches_greedy() {
     }
 }
 
+// Each try is seeded from (seed, problem, try), so on a real model sampling
+// at temperature 1, a try's text does not depend on --batch, on which other
+// problems are evaluated with it (--limit), or on the number of tries; and
+// another seed gives other texts.
+inline void test_vote_seeding() {
+    Config cfg;
+    cfg.vocab = 256;
+    cfg.seq_len = 128;  // room for 20 new tokens after any of these prompts
+    cfg.d_model = 24;
+    cfg.n_layers = 2;
+    cfg.n_heads = 2;
+    Model<float> m(cfg);
+    m.init(21);
+    Rng rng(4);
+    std::vector<Problem> ps;
+    for (int i = 0; i < 6; ++i) ps.push_back(make_problem(i % 2 ? "add" : "chain", 1 + i % 2, rng));
+    // The first try's completion of every problem.
+    auto first_tries = [&](const std::vector<Problem>& list, int batch, int tries, uint64_t seed,
+                           std::vector<size_t> ids) {
+        VoteOpts v;
+        v.tries = tries;
+        v.temperature = 1.0;
+        v.seed = seed;
+        v.problem_ids = std::move(ids);
+        return eval_reasoning(m, list, Tokenizer{}, batch, 20, 0, true, v).completions;
+    };
+    const auto base = first_tries(ps, 8, 2, 1, {});  // a batch of 8 holds 4 problems x 2 tries
+    EXPECT(base.size() == ps.size(), "%zu completions for %zu problems", base.size(), ps.size());
+    EXPECT(first_tries(ps, 2, 2, 1, {}) == base, "a try's text depends on --batch");
+    EXPECT(first_tries(ps, 8, 4, 1, {}) == base, "the first try changed with the number of tries");
+    // As --limit runs it: problems 1 and 4 alone, numbered by their place in
+    // the full list, sample exactly what they sampled there.
+    const auto some = first_tries({ps[1], ps[4]}, 8, 2, 1, {1, 4});
+    EXPECT(some.size() == 2 && some[0] == base[1] && some[1] == base[4],
+           "a problem's tries changed when other problems were left out");
+    // Another seed samples other texts.
+    const auto other = first_tries(ps, 8, 2, 2, {});
+    size_t differ = 0;
+    for (size_t i = 0; i < ps.size() && i < other.size(); ++i) differ += other[i] != base[i];
+    EXPECT(differ > 0, "seeds 1 and 2 gave the same completions for all %zu problems", ps.size());
+    // The seeds of nearby (seed, problem, try) are all different.
+    std::set<uint64_t> seeds;
+    for (uint64_t s = 0; s < 3; ++s)
+        for (uint64_t p = 0; p < 3; ++p)
+            for (uint64_t t = 0; t < 3; ++t) seeds.insert(try_seed(s, p, t));
+    EXPECT(seeds.size() == 27, "only %zu distinct seeds for 27 (seed, problem, try)", seeds.size());
+}
+
 inline void test_vote() {
     test_vote_answer();
     test_score_tries();
     test_vote_report();
     test_vote_empty_answer();
     test_vote_single_try_matches_greedy();
+    test_vote_seeding();
 }
 
 }  // namespace

@@ -564,9 +564,10 @@ int cmd_eval_reasoning(Args& a) {
     CHECK(vote.tries > 0, "--tries must be positive");
     vote.temperature = a.real("temp", 0.0);
     CHECK(vote.tries == 1 || vote.temperature > 0, "--temp must be above 0 when sampling more than one try");
+    // Each try is seeded from (seed, problem, try): see VoteOpts.
     const long seed = a.integer("seed", 1);
-    Rng vote_rng(uint64_t(seed));
-    vote.rng = &vote_rng;
+    CHECK(seed >= 0, "--seed must not be negative");
+    vote.seed = uint64_t(seed);
     // As TernaryEngine runs it: the embedding (and --fp-attn attention) in
     // int8 rows.
     const bool as_engine = a.flag("as-engine");
@@ -578,9 +579,15 @@ int cmd_eval_reasoning(Args& a) {
     if (as_engine) round_to_engine_int8(model);
     std::vector<Problem> test = load_problems(test_path);
     if (limit > 0 && size_t(limit) < test.size()) {
-        // An even sample across the file, which is ordered by task.
+        // An even sample across the file, which is ordered by task. Each
+        // problem keeps its place in the file as its number, so its tries
+        // are seeded the same as without --limit.
         std::vector<Problem> sub;
-        for (int i = 0; i < limit; ++i) sub.push_back(test[size_t(i) * test.size() / limit]);
+        for (int i = 0; i < limit; ++i) {
+            const size_t line = size_t(i) * test.size() / size_t(limit);
+            sub.push_back(test[line]);
+            vote.problem_ids.push_back(line);
+        }
         test = std::move(sub);
     }
     const double t0 = now_seconds();
