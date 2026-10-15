@@ -358,4 +358,26 @@ inline void test_calc_hook() {
                "merged token \"%s\": the result replaces its rest, got \"%s\"", c.merge, bpe.decode(out[0]).c_str());
         EXPECT(std::equal(out[0].begin(), out[0].end() - 1, m.received[0].begin()), "merged token \"%s\" fed back", c.merge);
     }
+
+    // With the no-repeat block (--no-repeat 8): the second "<<48/2=" is the
+    // model's own, and new as a run of 8 ("B<<48/2=" after "A<<48/2=").
+    // The calculator's "24>>" then repeats runs of 8 but is never blocked;
+    // the model's next token, '.', would repeat "/2=24>>." and is: the
+    // fake's only other choice is token 0, so 0 comes instead.
+    {
+        const std::string text = "A<<48/2=24>>.B<<48/2=24>>.";
+        CalcFakeModel b; b.cfg.vocab = 256; b.cfg.seq_len = 60;
+        std::vector<int> wanted = tok.encode(text);
+        for (size_t at = text.find("24>>"); at != std::string::npos; at = text.find("24>>", at + 1))
+            for (size_t i = at; i < at + 4; ++i) wanted[i] = '?';
+        b.script = {wanted}; b.prediction = b.script;
+        calc::Counts block_calls;
+        const auto out = generate(b, {{kBos}}, int(text.size()), [](const auto&) { return false; }, 0, nullptr,
+                                  nullptr, calc::Mode::notes, &tok, &block_calls, 8);
+        std::vector<int> expected = tok.encode(text);
+        expected.back() = 0;
+        EXPECT(out[0] == expected && block_calls.fired == 2,
+               "calculator results pass the block, the model's next token does not: got \"%s\"",
+               tok.decode(out[0]).c_str());
+    }
 }
