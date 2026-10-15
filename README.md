@@ -139,7 +139,11 @@ An attempt is discarded if any intermediate value is negative, exceeds
 The step count and story shape stay fixed while invalid attempts are retried.
 
 These generated stories are still less varied than human-written math.
-Success on its held-out wording alone is not evidence of improvement on
+Long stories outside the running-quantity shape are repetitive: at 6-8
+steps, each of the five other shapes is one multiplication (or fraction, or
+percentage) followed by a string of additions, and on the test split, with
+only two patterns per sentence family, the same addition pattern often
+appears two or three times in one story. Success on its held-out wording alone is not evidence of improvement on
 GSM8K or SVAMP. No generated datasets are checked into the repository, and
 this command does not change the night data mix.
 

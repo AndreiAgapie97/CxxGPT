@@ -4,6 +4,7 @@
 // candidates needing finer precision are rejected, not rounded.
 #pragma once
 
+#include <algorithm>
 #include <array>
 #include <set>
 
@@ -93,8 +94,9 @@ enum Family { boxes, production, earnings, containers, receive, give, share,
               extra_cost, part_extra, family_count };
 
 // Six distinct question patterns per family: four for train, two held out
-// for test. Every question starts with a split-specific pattern, so even
-// independently generated files with different seeds cannot share questions.
+// for test. Every sentence of a question, its distractor included, comes from
+// its split's own patterns, so even independently generated files with
+// different seeds cannot share questions.
 // All variants within a family have exactly the same arithmetic meaning.
 inline constexpr std::array<std::array<const char*, 6>, family_count> patterns = {{
     {{"{name} has {a} boxes with {b} {unit} in each box.",
@@ -547,7 +549,9 @@ inline bool change_story(Story& s, int steps) {
         return false;
     if (!close_with(s, '-', in[2], true, {"The change in dollars is", s.name + " gets", "dollars in change"}))
         return false;
-    s.question = "How much change in dollars does " + s.name + " receive after all these purchases?";
+    const size_t extras = s.out.additions.size();
+    const std::string after = extras == 0 ? "" : extras == 1 ? " after both purchases" : " after all these purchases";
+    s.question = "How much change in dollars does " + s.name + " receive" + after + "?";
     return true;
 }
 

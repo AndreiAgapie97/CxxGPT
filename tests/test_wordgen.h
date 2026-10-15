@@ -309,8 +309,14 @@ inline void test_wordgen() {
             const auto p = make_word_problem(rng, options);
             for (int form : word_check::check_solution(p, true)) wordings[p.shape].insert(form);
             shapes_by_length.insert((int(test) * 7 + steps - 2) * WordProblem::shape_count + p.shape);
-            if (p.shape == WordProblem::total) (p.three_people ? saw_three_people : saw_two_people) = true;
-            if (p.shape == WordProblem::part) (p.percentage ? saw_percentage : saw_fraction) = true;
+            if (p.shape == WordProblem::total) {
+                if (p.three_people) saw_three_people = true;
+                else saw_two_people = true;
+            }
+            if (p.shape == WordProblem::part) {
+                if (p.percentage) saw_percentage = true;
+                else saw_fraction = true;
+            }
             if (p.shape == WordProblem::rate) for (const std::string unit : {"hour", "day", "week"})
                 if (p.problem.question.find(unit) != std::string::npos) rate_units.insert(unit);
             // Kept-items stories add items with "keeps" sentences only, never gifts.
