@@ -233,32 +233,50 @@ inline void replace(std::string& text, const std::string& key, const std::string
         text.replace(at, key.size(), value);
 }
 
-// One attempt. A failed operation discards the whole story, including its
-// partial solution. Randomly chosen inputs are never silently adjusted.
-inline bool candidate(Rng& rng, const WordOptions& options, int steps, WordProblem& out) {
-    static const std::array<const char*, 12> names = {
-        "Alex", "Maya", "Noah", "Lina", "Sam", "Nora", "Leo", "Asha", "Ben", "Zoe", "Omar", "Iris"};
-    static const std::array<const char*, 8> objects = {
-        "stickers", "cards", "beads", "pencils", "candles", "toy cars", "bookmarks", "paper flowers"};
-    const size_t name_index = rng.below(names.size());
-    const std::string name = names[name_index];
-    const std::string other = names[(name_index + 1) % names.size()];
-    const std::string third = names[(name_index + 2) % names.size()];
-    const std::string object = objects[rng.below(objects.size())];
-    const int start = int(rng.below(4));
-    enum class Kind { objects, money, liters, milliliters };
-    Kind kind = start == earnings ? Kind::money : start == containers ? Kind::liters : Kind::objects;
-    auto unit = [&]() -> std::string {
+enum class Kind { objects, money, liters, milliliters };
+
+// Everything one story attempt shares: the random source, the people and
+// objects, the current unit, and the plan, sentences and question being built.
+struct Story {
+    Rng& rng;
+    const WordOptions& options;
+    WordProblem& out;
+    std::string name, other, third, object, time;
+    int start = boxes;  // the chain's opening family: boxes, production, earnings or containers
+    Kind kind = Kind::objects;
+    std::vector<std::string> sentences;
+    std::string question;
+
+    // These draws happen for every shape, in this order, even when a shape
+    // does not use them, so the random sequence stays the same.
+    Story(Rng& random, const WordOptions& opts, WordProblem& problem) : rng(random), options(opts), out(problem) {
+        static const std::array<const char*, 12> names = {
+            "Alex", "Maya", "Noah", "Lina", "Sam", "Nora", "Leo", "Asha", "Ben", "Zoe", "Omar", "Iris"};
+        static const std::array<const char*, 8> objects = {
+            "stickers", "cards", "beads", "pencils", "candles", "toy cars", "bookmarks", "paper flowers"};
+        static const std::array<const char*, 3> times = {"hour", "day", "week"};
+        const size_t name_index = rng.below(names.size());
+        name = names[name_index];
+        other = names[(name_index + 1) % names.size()];
+        third = names[(name_index + 2) % names.size()];
+        object = objects[rng.below(objects.size())];
+        start = int(rng.below(4));
+        kind = start == earnings ? Kind::money : start == containers ? Kind::liters : Kind::objects;
+        time = times[rng.below(times.size())];
+    }
+
+    std::string unit() const {
         if (kind == Kind::money) return "dollars";
         if (kind == Kind::liters) return "liters of juice";
         if (kind == Kind::milliliters) return "milliliters of juice";
         return object;
-    };
-    auto draw = [&](int lo, int hi) { return int64_t(lo + int(rng.below(uint64_t(hi - lo + 1)))); };
-    static const std::array<const char*, 3> times = {"hour", "day", "week"};
-    const std::string time = times[rng.below(times.size())];
-    std::vector<std::string> sentences;
-    auto sentence = [&](int family, int64_t a, int64_t b = 0, int64_t c = 0, int64_t d = 0) {
+    }
+
+    int64_t draw(int lo, int hi) { return int64_t(lo + int(rng.below(uint64_t(hi - lo + 1)))); }
+
+    // Fills one sentence pattern of `family` (a split-specific variant) with
+    // the story's people, unit and the numbers a..d.
+    void sentence(int family, int64_t a, int64_t b = 0, int64_t c = 0, int64_t d = 0) {
         const int variant = options.test ? 4 + int(rng.below(2)) : int(rng.below(4));
         std::string s = patterns[family][variant];
         replace(s, "{name}", name);
@@ -277,167 +295,254 @@ inline bool candidate(Rng& rng, const WordOptions& options, int steps, WordProbl
         replace(s, "{d}", number(d));
         sentences.push_back(s);
         out.patterns.push_back(family * 6 + variant);
-    };
-    auto literal = [&](int64_t value) {
+    }
+
+    // Adds an input number to the plan and returns its index.
+    size_t literal(int64_t value) {
         const size_t index = out.plan.size();
         out.plan.push_back({0, value, 0, 0, false, ""});
         out.values.push_back(value);
         return index;
-    };
-    auto operation = [&](char op, size_t left, size_t right, bool whole, const std::string& label) {
+    }
+
+    // Adds `left op right` to the plan; false if the result is not allowed.
+    bool operation(char op, size_t left, size_t right, bool whole, const std::string& label) {
         int64_t value = 0;
         if (!calculate(op, out.values[left], out.values[right], whole, value)) return false;
         out.plan.push_back({op, 0, left, right, whole, label});
         out.values.push_back(value);
         return true;
-    };
-    std::string question;
-    if (out.shape != WordProblem::chain) {
-        kind = out.shape == WordProblem::change ? Kind::money : Kind::objects;
-        int64_t a = draw(2, 20) * scale, b = draw(2, 12) * scale;
-        int64_t c = draw(2, 30) * scale, d = draw(2, 30) * scale;
-        int family = compare_people;
-        if (out.shape == WordProblem::total) {
-            out.three_people = steps >= 3 && rng.below(2);
-            family = out.three_people ? total_three : total_two;
-        }
-        if (out.shape == WordProblem::rate) family = time_rate;
-        if (out.shape == WordProblem::part) {
-            out.percentage = steps >= 3 && rng.below(2);
-            a = draw(3, 30) * 4 * scale;
-            b = out.percentage ? draw(1, 3) * 25 * scale : draw(2, 4) * scale;
-            family = out.percentage ? part_percent : part_fraction;
-        }
-        if (out.shape == WordProblem::change) {
-            b = draw(1, 32) * 25;
-            c = draw(5, 20) * 20 * scale;
-            family = shopping;
-        }
-        out.inputs = {a, b, c, d};
-        sentence(family, a, b, c, d);
-        const size_t left = literal(a), right = literal(b);
-        const char op = out.shape == WordProblem::part && !out.percentage ? '/' : '*';
-        std::string label = "The first collection contains";
-        if (out.shape == WordProblem::rate) label = "The work produces";
-        if (out.shape == WordProblem::part) label = out.percentage ? "Multiplying by the percentage gives" : "The red items kept number";
-        if (out.shape == WordProblem::change) label = "The items cost this many dollars";
-        if (!operation(op, left, right, kind == Kind::objects, label)) return false;
-        int done = 1;
-        if (out.percentage) {
-            const size_t product = out.values.size() - 1, hundred = literal(100 * scale);
-            if (!operation('/', product, hundred, true, "The red items kept number")) return false;
-            ++done;
-        }
-        const int closing_steps = out.three_people ? 2 : 1;
-        while (done < steps - closing_steps) {
-            const int64_t extra = out.shape == WordProblem::change ? draw(1, 32) * 25 : draw(1, 24) * scale;
-            out.additions.push_back(extra);
-            sentence(out.shape == WordProblem::change ? extra_cost : receive, extra);
-            const size_t previous = out.values.size() - 1, operand = literal(extra);
-            if (!operation('+', previous, operand, kind == Kind::objects,
-                           out.shape == WordProblem::change ? "The bill now totals" : "Including the extra items gives")) return false;
-            ++done;
-        }
-        const size_t current = out.values.size() - 1, separate = literal(c);
-        if (out.shape == WordProblem::comparison) {
-            if (!operation('-', current, separate, true, "The difference between the collections is")) return false;
-            question = "How many more " + object + " does " + name + " have than " + other + "?";
-        } else if (out.shape == WordProblem::change) {
-            if (!operation('-', separate, current, false, "The change in dollars is")) return false;
-            question = "How much change in dollars does " + name + " receive after all these purchases?";
-        } else {
-            if (!operation('+', current, separate, true, "Combining the two amounts gives")) return false;
-            if (out.three_people) {
-                const size_t subtotal = out.values.size() - 1, last = literal(d);
-                if (!operation('+', subtotal, last, true, "Adding the third collection gives")) return false;
-            }
-            if (out.shape == WordProblem::part) question = "How many " + object + " does " + name + " keep in all?";
-            else question = "How many " + object + " do " + name + (out.three_people ? ", " : " and ") + other +
-                (out.three_people ? ", and " + third : "") + " have altogether?";
-        }
-    } else {
-        int64_t a = draw(2, 20) * scale, b = draw(2, 12) * scale;
-        if (kind == Kind::money) a += draw(0, 3) * 25;
-        if (kind == Kind::liters) b = draw(1, 16) * 25;
-        sentence(start, a, b);
-        const size_t left = literal(a), right = literal(b);
-        if (!operation('*', left, right, kind == Kind::objects, "The starting amount is")) return false;
-        int done = 1;
-        while (done < steps) {
-            std::vector<int> choices = {receive, give, share, fraction};
-            if (steps - done >= 2) choices.push_back(percent);
-            if (kind == Kind::objects) choices.push_back(sell);
-            if (kind == Kind::money) choices.push_back(buy);
-            if (kind == Kind::liters) choices.push_back(convert);
-            const int family = choices[rng.below(choices.size())];
-            a = draw(1, 24) * scale;
-            if (family == share || family == fraction) a = draw(2, 5) * scale;
-            if (family == percent) a = draw(1, 3) * 25 * scale;
-            if (family == sell || family == buy) a = draw(1, 32) * 25;
-            if (family == convert) a = 1000 * scale;
-            if ((family == receive || family == give) && kind != Kind::objects) {
-                a += draw(0, 3) * 25;
-                // Draw in liters first, then express the amount in the current unit.
-                if (kind == Kind::milliliters) a *= 1000;
-            }
-            sentence(family, a);
-            const size_t previous = out.values.size() - 1, operand = literal(a);
-            char op = '+';
-            std::string label = "After receiving more, the amount is";
-            if (family == give) { op = '-'; label = "After giving some away, the amount is"; }
-            if (family == share) { op = '/'; label = "One equal share is"; }
-            if (family == fraction) { op = '/'; label = "The fraction kept is"; }
-            if (family == percent) { op = '*'; label = "Multiplying by the percentage gives"; }
-            if (family == sell) { op = '*'; label = "The sale brings in this many dollars"; kind = Kind::money; }
-            if (family == buy) { op = '/'; label = "The number of items bought is"; kind = Kind::objects; }
-            if (family == convert) { op = '*'; label = "The volume in milliliters is"; kind = Kind::milliliters; }
-            if (!operation(op, previous, operand, kind == Kind::objects, label)) return false;
-            ++done;
-            if (family == percent) {
-                const size_t product = out.values.size() - 1, hundred = literal(100 * scale);
-                if (!operation('/', product, hundred, kind == Kind::objects, "Dividing by 100 gives the amount kept"))
-                    return false;
-                ++done;
-            }
-        }
-        question = "How many " + unit() + " does " + name + " have now?";
     }
-    // Draw even when disabled, so toggling distractors does not change the math.
-    const int extra = int(rng.below(12)) + (options.test ? 12 : 0);
-    int64_t irrelevant = draw(2, 30) * scale;
+};
+
+// The chain: one running quantity, changed step by step.
+inline bool chain_story(Story& s, int steps) {
+    int64_t a = s.draw(2, 20) * scale, b = s.draw(2, 12) * scale;
+    if (s.kind == Kind::money) a += s.draw(0, 3) * 25;
+    if (s.kind == Kind::liters) b = s.draw(1, 16) * 25;
+    s.sentence(s.start, a, b);
+    const size_t left = s.literal(a), right = s.literal(b);
+    if (!s.operation('*', left, right, s.kind == Kind::objects, "The starting amount is")) return false;
+    int done = 1;
+    while (done < steps) {
+        std::vector<int> choices = {receive, give, share, fraction};
+        if (steps - done >= 2) choices.push_back(percent);
+        if (s.kind == Kind::objects) choices.push_back(sell);
+        if (s.kind == Kind::money) choices.push_back(buy);
+        if (s.kind == Kind::liters) choices.push_back(convert);
+        const int family = choices[s.rng.below(choices.size())];
+        a = s.draw(1, 24) * scale;
+        if (family == share || family == fraction) a = s.draw(2, 5) * scale;
+        if (family == percent) a = s.draw(1, 3) * 25 * scale;
+        if (family == sell || family == buy) a = s.draw(1, 32) * 25;
+        if (family == convert) a = 1000 * scale;
+        if ((family == receive || family == give) && s.kind != Kind::objects) {
+            a += s.draw(0, 3) * 25;
+            // Draw in liters first, then express the amount in the current unit.
+            if (s.kind == Kind::milliliters) a *= 1000;
+        }
+        s.sentence(family, a);
+        const size_t previous = s.out.values.size() - 1, operand = s.literal(a);
+        char op = '+';
+        std::string label = "After receiving more, the amount is";
+        // Selling, buying and converting change the unit from this step on.
+        if (family == give) { op = '-'; label = "After giving some away, the amount is"; }
+        if (family == share) { op = '/'; label = "One equal share is"; }
+        if (family == fraction) { op = '/'; label = "The fraction kept is"; }
+        if (family == percent) { op = '*'; label = "Multiplying by the percentage gives"; }
+        if (family == sell) { op = '*'; label = "The sale brings in this many dollars"; s.kind = Kind::money; }
+        if (family == buy) { op = '/'; label = "The number of items bought is"; s.kind = Kind::objects; }
+        if (family == convert) { op = '*'; label = "The volume in milliliters is"; s.kind = Kind::milliliters; }
+        if (!s.operation(op, previous, operand, s.kind == Kind::objects, label)) return false;
+        ++done;
+        if (family == percent) {
+            const size_t product = s.out.values.size() - 1, hundred = s.literal(100 * scale);
+            if (!s.operation('/', product, hundred, s.kind == Kind::objects, "Dividing by 100 gives the amount kept"))
+                return false;
+            ++done;
+        }
+    }
+    s.question = "How many " + s.unit() + " does " + s.name + " have now?";
+    return true;
+}
+
+// The other five shapes keep their story's numbers in out.inputs, so tests
+// can solve them a second way. What inputs[0..3] (a, b, c, d) mean:
+//
+//   shape       a                  b                      c                    d
+//   comparison  packs {name} has   items per pack         {other}'s items      unused
+//   total       boxes {name} has   items per box          {other}'s items      {third}'s items (three people only)
+//   rate        items per {time}   number of {time}s      {other}'s items      unused
+//   part        red items          keeps 1/b, or b%       blue items, all kept unused
+//   change      items bought       price of one, dollars  payment, dollars     unused
+//
+// Chain stories leave inputs at zero: their numbers are only in the plan.
+// Each of these shapes first draws all four numbers, then may redraw some.
+inline std::array<int64_t, 4> draw_inputs(Story& s) {
+    const int64_t a = s.draw(2, 20) * scale, b = s.draw(2, 12) * scale;
+    const int64_t c = s.draw(2, 30) * scale, d = s.draw(2, 30) * scale;
+    return {a, b, c, d};
+}
+
+// The opening sentence and its first operation, a op b.
+inline bool opening(Story& s, int family, const std::array<int64_t, 4>& inputs, char op, const std::string& label) {
+    s.out.inputs = inputs;
+    s.sentence(family, inputs[0], inputs[1], inputs[2], inputs[3]);
+    const size_t left = s.literal(inputs[0]), right = s.literal(inputs[1]);
+    return s.operation(op, left, right, s.kind == Kind::objects, label);
+}
+
+// Longer stories add `count` extra amounts (items, or purchases on the
+// bill), one sentence and one addition each.
+inline bool add_extras(Story& s, int count, int family, const std::string& label) {
+    for (int i = 0; i < count; ++i) {
+        const int64_t extra = s.out.shape == WordProblem::change ? s.draw(1, 32) * 25 : s.draw(1, 24) * scale;
+        s.out.additions.push_back(extra);
+        s.sentence(family, extra);
+        const size_t previous = s.out.values.size() - 1, operand = s.literal(extra);
+        if (!s.operation('+', previous, operand, s.kind == Kind::objects, label)) return false;
+    }
+    return true;
+}
+
+// The last value so far plus (or minus) a new input number.
+inline bool close_with(Story& s, char op, int64_t value, bool number_first, const std::string& label) {
+    const size_t current = s.out.values.size() - 1, separate = s.literal(value);
+    return number_first ? s.operation(op, separate, current, s.kind == Kind::objects, label)
+                        : s.operation(op, current, separate, s.kind == Kind::objects, label);
+}
+
+// How many more items one person has than another.
+inline bool comparison_story(Story& s, int steps) {
+    s.kind = Kind::objects;
+    const auto in = draw_inputs(s);
+    if (!opening(s, compare_people, in, '*', "The first collection contains")) return false;
+    if (!add_extras(s, steps - 2, receive, "Including the extra items gives")) return false;
+    if (!close_with(s, '-', in[2], false, "The difference between the collections is")) return false;
+    s.question = "How many more " + s.object + " does " + s.name + " have than " + s.other + "?";
+    return true;
+}
+
+// Two or three people's items added up.
+inline bool total_story(Story& s, int steps) {
+    s.kind = Kind::objects;
+    const auto in = draw_inputs(s);
+    const bool three = s.out.three_people = steps >= 3 && s.rng.below(2);
+    if (!opening(s, three ? total_three : total_two, in, '*', "The first collection contains")) return false;
+    if (!add_extras(s, steps - 1 - (three ? 2 : 1), receive, "Including the extra items gives")) return false;
+    if (!close_with(s, '+', in[2], false, "Combining the two amounts gives")) return false;
+    if (three && !close_with(s, '+', in[3], false, "Adding the third collection gives")) return false;
+    s.question = "How many " + s.object + " do " + s.name + (three ? ", " : " and ") + s.other +
+                 (three ? ", and " + s.third : "") + " have altogether?";
+    return true;
+}
+
+// Items made at a rate for some hours, days or weeks, plus another person's.
+inline bool rate_story(Story& s, int steps) {
+    s.kind = Kind::objects;
+    const auto in = draw_inputs(s);
+    if (!opening(s, time_rate, in, '*', "The work produces")) return false;
+    if (!add_extras(s, steps - 2, receive, "Including the extra items gives")) return false;
+    if (!close_with(s, '+', in[2], false, "Combining the two amounts gives")) return false;
+    s.question = "How many " + s.object + " do " + s.name + " and " + s.other + " have altogether?";
+    return true;
+}
+
+// A fraction or percentage of the red items, plus all the blue ones.
+inline bool part_story(Story& s, int steps) {
+    s.kind = Kind::objects;
+    auto in = draw_inputs(s);
+    const bool percentage = s.out.percentage = steps >= 3 && s.rng.below(2);
+    in[0] = s.draw(3, 30) * 4 * scale;
+    in[1] = percentage ? s.draw(1, 3) * 25 * scale : s.draw(2, 4) * scale;
+    if (percentage) {
+        if (!opening(s, part_percent, in, '*', "Multiplying by the percentage gives")) return false;
+        const size_t product = s.out.values.size() - 1, hundred = s.literal(100 * scale);
+        if (!s.operation('/', product, hundred, true, "The red items kept number")) return false;
+    } else if (!opening(s, part_fraction, in, '/', "The red items kept number")) return false;
+    if (!add_extras(s, steps - 1 - (percentage ? 2 : 1), receive, "Including the extra items gives")) return false;
+    if (!close_with(s, '+', in[2], false, "Combining the two amounts gives")) return false;
+    s.question = "How many " + s.object + " does " + s.name + " keep in all?";
+    return true;
+}
+
+// A purchase (and maybe extra items on the bill), then change from a payment.
+inline bool change_story(Story& s, int steps) {
+    s.kind = Kind::money;
+    auto in = draw_inputs(s);
+    in[1] = s.draw(1, 32) * 25;
+    in[2] = s.draw(5, 20) * 20 * scale;
+    if (!opening(s, shopping, in, '*', "The items cost this many dollars")) return false;
+    if (!add_extras(s, steps - 2, extra_cost, "The bill now totals")) return false;
+    if (!close_with(s, '-', in[2], true, "The change in dollars is")) return false;
+    s.question = "How much change in dollars does " + s.name + " receive after all these purchases?";
+    return true;
+}
+
+// One irrelevant sentence, placed anywhere in the story. Drawn even when
+// disabled, so toggling distractors does not change the math.
+inline void add_distractor(Story& s) {
+    WordProblem& out = s.out;
+    const int extra = int(s.rng.below(12)) + (s.options.test ? 12 : 0);
+    int64_t irrelevant = s.draw(2, 30) * scale;
     // Avoid even accidental reuse of a distractor number in the solution.
     while (std::find(out.values.begin(), out.values.end(), irrelevant) != out.values.end()) irrelevant += scale;
-    const size_t position = rng.below(sentences.size() + 1);
-    if (options.distractors) {
-        std::string s = distractors[extra];
+    const size_t position = s.rng.below(s.sentences.size() + 1);
+    if (s.options.distractors) {
+        std::string text = distractors[extra];
         out.distractor = extra;
         out.distractor_position = int(position);
-        if (s.find("{a}") != std::string::npos) out.distractor_number = irrelevant;
-        replace(s, "{a}", number(irrelevant));
-        sentences.insert(sentences.begin() + position, s);
+        if (text.find("{a}") != std::string::npos) out.distractor_number = irrelevant;
+        replace(text, "{a}", number(irrelevant));
+        s.sentences.insert(s.sentences.begin() + position, text);
     }
-    for (const auto& s : sentences) out.problem.question += s + ' ';
-    out.problem.question += question;
-    out.problem.task = "word";
-    out.problem.difficulty = steps;
+}
+
+// The worked solution: one line per operation, in a varied wording.
+inline void write_solution(Story& s) {
+    WordProblem& out = s.out;
     for (size_t i = 0; i < out.plan.size(); ++i) {
         const WordNode& node = out.plan[i];
         if (!node.op) continue;
         const std::string expression = number(out.values[node.left]) + node.op + number(out.values[node.right]);
         const std::string result = number(out.values[i]);
-        if (!out.problem.steps.empty()) out.problem.steps += '\n';
-        const int wording = int(rng.below(4));
-        if (wording == 0) out.problem.steps += node.label + ": ";
-        if (wording == 1) out.problem.steps += node.label + ' ';
-        if (wording == 2) out.problem.steps += "We calculate ";
-        if (wording == 3) out.problem.steps += "This gives ";
-        out.problem.steps += expression + " = ";
-        if (options.notes) out.problem.steps += "<<" + expression + "=" + result + ">>";
-        out.problem.steps += result;
-        if (wording == 2) out.problem.steps += " for this step";
-        if (wording == 3) out.problem.steps += " as the result";
-        out.problem.steps += ".";
+        std::string& steps = out.problem.steps;
+        if (!steps.empty()) steps += '\n';
+        const int wording = int(s.rng.below(4));
+        if (wording == 0) steps += node.label + ": ";
+        if (wording == 1) steps += node.label + ' ';
+        if (wording == 2) steps += "We calculate ";
+        if (wording == 3) steps += "This gives ";
+        steps += expression + " = ";
+        if (s.options.notes) steps += "<<" + expression + "=" + result + ">>";
+        steps += result;
+        if (wording == 2) steps += " for this step";
+        if (wording == 3) steps += " as the result";
+        steps += ".";
     }
+}
+
+// One attempt. A failed operation discards the whole story, including its
+// partial solution. Randomly chosen inputs are never silently adjusted.
+inline bool candidate(Rng& rng, const WordOptions& options, int steps, WordProblem& out) {
+    Story s(rng, options, out);
+    bool made = false;
+    switch (out.shape) {
+        case WordProblem::chain: made = chain_story(s, steps); break;
+        case WordProblem::comparison: made = comparison_story(s, steps); break;
+        case WordProblem::total: made = total_story(s, steps); break;
+        case WordProblem::rate: made = rate_story(s, steps); break;
+        case WordProblem::part: made = part_story(s, steps); break;
+        case WordProblem::change: made = change_story(s, steps); break;
+        case WordProblem::shape_count: break;
+    }
+    if (!made) return false;
+    add_distractor(s);
+    for (const auto& sentence : s.sentences) out.problem.question += sentence + ' ';
+    out.problem.question += s.question;
+    out.problem.task = "word";
+    out.problem.difficulty = steps;
+    write_solution(s);
     out.problem.answer = number(out.values.back());
     return true;
 }
