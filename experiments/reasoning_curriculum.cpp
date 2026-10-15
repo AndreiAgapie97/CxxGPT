@@ -86,7 +86,7 @@ int main(int argc, char** argv) {
             for (int i = 0; i < 4; ++i) CHECK(actual.state()[i] == rng.state()[i], "checkpoint sampler budget mismatch");
         }
         std::printf("steps,sampled_tokens,valid_targets,min_valid_per_step\n%lld,%zu,%zu,%zu\n",
-                    (long long)steps,size_t(steps) * inputs.size(), valid, minimum);
+                    (long long)steps, size_t(steps) * inputs.size(), valid, minimum);
         return 0;
     }
     CHECK(mode == "prepare", "unknown curriculum mode");

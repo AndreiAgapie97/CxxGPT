@@ -281,7 +281,7 @@ inline WordProblem make_word_problem(Rng& rng, const WordOptions& options = {}) 
     return {};
 }
 
-inline std::vector<Problem> make_word_problems(uint64_t seed, int64_t count,const WordOptions& options = {}) {
+inline std::vector<Problem> make_word_problems(uint64_t seed, int64_t count, const WordOptions& options = {}) {
     CHECK(count >= 0, "word problem count must be nonnegative");
     Rng rng(seed);
     std::vector<Problem> problems;

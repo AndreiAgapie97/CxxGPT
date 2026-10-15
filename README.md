@@ -88,9 +88,9 @@ One kernel differs from WSL in the default build. It compiles B6 (int8 VNNI
 256-bit) for AVX-VNNI, the encoding of Intel's newer CPUs, so on a CPU that
 has AVX512-VNNI but not AVX-VNNI, such as the laptop's Zen 4, it leaves B6
 out. WSL's `-march=native` build, like the native Windows build, has B6
-there, in its AVX-512 encoding. The MoE layer
-uses B6b (512-bit) on Zen 4 either way. `ternary_moe --tests` prints the CPU
-features it found and the kernels it tested.
+there, in its AVX-512 encoding. The MoE layer uses B6b (512-bit) on Zen 4
+either way. `ternary_moe --tests` prints the kernels it tested, and the
+default build also prints the CPU features it found.
 
 ## Quick start
 
