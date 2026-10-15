@@ -149,27 +149,46 @@ Options (see `gen-word --help`):
 - `--min-steps 2 --max-steps 8`: inclusive range of arithmetic operations.
   Set both to the same number for a fixed length. A percentage takes two
   operations: multiply by the percentage, then divide by 100.
-- `--distractors on|off`: include or omit a sentence with an irrelevant
-  number (default on).
+- `--distractors on|off`: include or omit an irrelevant sentence (default
+  on). Twenty-four patterns, some with numbers, can appear before, between,
+  or after the story's arithmetic sentences. The splits use different
+  distractor wording; a distractor number never appears in the calculation.
 - `--notes on|off`: include or omit GSM8K calculator notes such as
   `<<48/2=24>>24` (default on). This changes only the worked solution.
-- `--split train|test`: 48 training sentence patterns or 24 held-out test
-  patterns, grouped into 12 arithmetic situations. The opening patterns
+- `--split train|test`: 84 training sentence patterns or 42 held-out test
+  patterns, grouped into 21 arithmetic situations. The opening patterns
   differ too, so the splits cannot share a complete question, even with
   different seeds. Each file also omits duplicate questions.
 
-The situations include boxes of objects, hourly production and wages,
-liquid volumes, gifts, donations, equal shares, fractions, percentages,
-selling, buying, and liters converted to milliliters. Names, objects,
-prices, and quantities vary. Objects must remain whole; money and volume
-may use exact hundredths. No floating-point arithmetic or rounding is used.
+Stories include a running quantity, comparisons between two people, totals
+over two or three people, production per hour/day/week combined with another
+person's contribution, a fraction or percentage of one part combined with
+the rest, and unit prices times quantities followed by change from a payment.
+In the fraction-or-percentage stories, which ask how many items are kept,
+extra items are always described as kept, never as gifts.
+Each shape has both training and held-out sentence patterns. Longer stories
+add more contributions or purchases before the final comparison or total.
+The running-quantity stories still include wages, liquid volumes, gifts,
+donations, equal shares, selling, buying, and liters converted to milliliters.
+Names, objects, prices, quantities, and solution phrasing vary. About a third
+of the solution steps are written the GSM8K way, as a sentence that names the
+person and the unit and carries the note inline (`Maya now has 84+4 =
+<<84+4=88>>88 toy cars.`). Objects must remain whole; money and
+volume may use exact hundredths. Questions print fractional money with two
+decimal places (`$7.50`, `2.50 dollars`), and whole amounts as `$7`; notes
+and answers keep the shortest exact spelling. Follow-up volumes use the
+current unit, so a gift of 2.25 liters becomes 2250 milliliters after a
+conversion. No floating-point arithmetic or rounding is used.
 An attempt is discarded if any intermediate value is negative, exceeds
 1,000,000, needs more than two decimal places, or gives fractional objects.
-The step count stays fixed while invalid attempts are retried.
+The step count and story shape stay fixed while invalid attempts are retried.
 
-This first version uses short, sequential stories and unit fractions
-(`1/2`, `1/3`, `1/4`, `1/5`). It is less varied than human-written math.
-Success on its held-out wording alone is not evidence of improvement on
+These generated stories are still less varied than human-written math.
+Long stories outside the running-quantity shape are repetitive: at 6-8
+steps, each of the five other shapes is one multiplication (or fraction, or
+percentage) followed by a string of additions, and on the test split, with
+only two patterns per sentence family, the same addition pattern often
+appears two or three times in one story. Success on its held-out wording alone is not evidence of improvement on
 GSM8K or SVAMP. No generated datasets are checked into the repository, and
 this command does not change the night data mix.
 

@@ -10,8 +10,8 @@
 //   cxxgpt bench-infer [--ckpt model.ckpt | model options]  ternary engine vs fp32 decode
 //
 // Run a subcommand with --help for its options.
-#include <cmath>
 #include <charconv>
+#include <cmath>
 #include <csignal>
 #include <cstdio>
 #include <filesystem>
@@ -33,11 +33,11 @@
 #include "leak_check.h"
 #include "load_log.h"
 #include "model.h"
-#include "reasoning.h"
-#include "wordgen.h"
 #include "profile.h"
+#include "reasoning.h"
 #include "tokenizer.h"
 #include "train.h"
+#include "wordgen.h"
 
 namespace {
 
