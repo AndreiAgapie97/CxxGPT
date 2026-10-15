@@ -121,13 +121,8 @@ during training).
 | `text2tok` | encodes text into a token file (parallel, streaming; `--doc-sep` splits documents) |
 | `prep-qa` | turns question/answer JSONL (GSM8K and the like) into token files with a loss mask and a test set |
 | `train` | trains or resumes a model (CPU, or GPU with `cxxgpt-gpu --gpu`) |
-<<<<<<< HEAD
-| `eval-reasoning` | exact-answer accuracy per task and difficulty; `--tools calc-notes` or `calc-plain` also scores the same problems with an exact calculator filling in the model's arithmetic ([docs/calculator.md](docs/calculator.md)) |
+| `eval-reasoning` | exact-answer accuracy per task and difficulty; greedy by default, or a vote over several sampled tries (below); `--tools calc-notes` or `calc-plain` also scores the same problems with an exact calculator filling in the model's arithmetic ([docs/calculator.md](docs/calculator.md)) |
 | `sample` | generates text from a prompt (`--tools` as for `eval-reasoning`) |
-=======
-| `eval-reasoning` | exact-answer accuracy per task and difficulty; greedy by default, or a vote over several sampled tries (below) |
-| `sample` | generates text from a prompt |
->>>>>>> origin/vote
 | `bench-infer` | times the ternary inference engine against an fp32 baseline |
 | `leak-check` | finds questions (such as the GSM8K dev set) that share a run of 13 words with training files |
 
