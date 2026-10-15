@@ -173,6 +173,19 @@ inline std::optional<std::string> evaluate(std::string_view expression) {
 enum class Mode { none, notes, plain };
 struct Counts { size_t fired = 0, malformed = 0; };
 
+inline bool is_digit(char c) { return c >= '0' && c <= '9'; }
+
+// In plain mode "x" means times only as in "16 x 7": a space on each side,
+// and beyond the spaces a digit on each side. In "3x + 2" or "2 x3" it is
+// a variable: algebra, not arithmetic.
+inline bool times_sign(std::string_view text, size_t i) {
+    if (i == 0 || i + 1 >= text.size() || text[i - 1] != ' ' || text[i + 1] != ' ') return false;
+    size_t left = i - 1, right = i + 1;
+    while (left > 0 && text[left - 1] == ' ') --left;
+    while (right < text.size() && text[right] == ' ') ++right;
+    return left > 0 && is_digit(text[left - 1]) && right < text.size() && is_digit(text[right]);
+}
+
 // Called only after a model token, never after our own result tokens.
 // nullopt means no call, an empty string means a malformed call.
 inline std::optional<std::string> response(std::string_view text, Mode mode) {
@@ -193,10 +206,11 @@ inline std::optional<std::string> response(std::string_view text, Mode mode) {
         size_t begin = end;
         // Only arithmetic bytes, spaces and multiplication aliases belong
         // to the suffix. Never rescue part of an unsupported expression.
+        // An "x" that is not a times sign ends the suffix like any letter.
         while (begin > 0) {
             const unsigned char c = text[begin - 1];
-            if ((c >= '0' && c <= '9') || std::string_view(".+-*/() x\t").find(char(c)) != std::string_view::npos ||
-                c == 0xc3 || c == 0x97) --begin;
+            if (is_digit(char(c)) || std::string_view(".+-*/() \t").find(char(c)) != std::string_view::npos ||
+                c == 0xc3 || c == 0x97 || (c == 'x' && times_sign(text, begin - 1))) --begin;
             else break;
         }
         if (begin == end) return {};
@@ -223,7 +237,7 @@ inline std::optional<std::string> response(std::string_view text, Mode mode) {
         expr = text.substr(begin, end - begin);
         const size_t first = expr.find_first_not_of(" \t");
         if (first == std::string::npos) return {};
-        if (std::string_view("*/x").find(expr[first]) != std::string_view::npos) return std::string{};
+        if (expr[first] == '*' || expr[first] == '/') return std::string{};
         if (expr[first] == '+' || expr[first] == '-') {
             if (first + 1 == expr.size() || expr[first + 1] == ' ' || expr[first + 1] == '\t') return std::string{};
             // "a -3*2" may be subtraction from a named value. Accept a
@@ -232,9 +246,17 @@ inline std::optional<std::string> response(std::string_view text, Mode mode) {
                 return std::string{};
         }
         for (size_t i = 0; (i = expr.find("×", i)) != std::string::npos;) expr.replace(i, 2, "*");
-        for (char& c : expr) if (c == 'x') c = '*';
+        for (char& c : expr) if (c == 'x') c = '*';  // every "x" left is a times sign
         // A bare number or a named assignment is not a calculator call.
         if (expr.find_first_of("+-*/") == std::string::npos) return {};
+        // No sign right after an operator: "3* + 2" (from algebra such as
+        // "3x + 2") would read as 3 * (+2). In brackets, "3 * (-2)", it is fine.
+        for (size_t i = 0; i < expr.size(); ++i) {
+            if (expr[i] != '+' && expr[i] != '-') continue;
+            size_t j = i;
+            while (j > 0 && (expr[j - 1] == ' ' || expr[j - 1] == '\t')) --j;
+            if (j > 0 && std::string_view("+-*/").find(expr[j - 1]) != std::string_view::npos) return std::string{};
+        }
     }
     auto result = evaluate(expr);
     if (!result) return std::string{};

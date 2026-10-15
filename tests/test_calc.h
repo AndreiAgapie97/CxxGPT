@@ -201,6 +201,16 @@ inline void test_calc() {
         const auto r = calc::response(expr, calc::Mode::plain);
         EXPECT(r && r->empty(), "malformed plain expression must not be partially computed: %s", expr);
     }
+    // Algebra is not arithmetic: an "x" next to a number, or a sign right
+    // after an operator, must never give a result (3x + 2 once gave 6).
+    for (const char* expr : {"If 3x + 2 = ", "2x - 4 = ", "3x = ", "4 + 2x = ", "x + 5 = ", "3 * x + 2 = ",
+                             "3 x -2 = ", "2 x3 + 4 = ", "3 * -2 = ", "5 - -3 = ", "2 * + 3 = "}) {
+        const auto r = calc::response(expr, calc::Mode::plain);
+        EXPECT(!r || r->empty(), "algebra must not fire: %s", expr);
+    }
+    EXPECT(calc::response("3 x 4 = ", calc::Mode::plain) == std::optional<std::string>("12"), "spaced x between numbers");
+    EXPECT(calc::response("2 x 3 x 4 = ", calc::Mode::plain) == std::optional<std::string>("24"), "two x signs");
+    EXPECT(calc::response("3 * (-2) = ", calc::Mode::plain) == std::optional<std::string>("-6"), "sign in brackets");
     EXPECT(!calc::response("The answer = ", calc::Mode::plain), "prose is not a call");
     EXPECT(!calc::response("16 * 7 =", calc::Mode::plain), "plain waits for trailing space");
     EXPECT(calc::response("<<48/2=", calc::Mode::notes) == std::optional<std::string>("24>>"), "notes result");
