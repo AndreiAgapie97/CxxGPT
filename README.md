@@ -641,6 +641,14 @@ vocabulary that layer is under 1 MB.
 - **Weights: two bitplanes.** Each row is stored as two bitmasks, `pos`
   (weight +1) and `neg` (weight −1), 32 weights per `uint32_t`, plus one
   scale per matrix.
+- **The same codes as training.** The engine packs each weight with the
+  training forward's own quantizer (`ternary_quantize`: scale = mean |w|
+  per matrix or expert, code = round(w / scale) clamped to ±1, ties to
+  even) on the fp32 weights the checkpoint keeps. So every weight gets the
+  code training used, also exactly at ±scale/2 (`tests/test_ternary_codes.h`,
+  issue #40). Nothing on that path rounds to bf16: a bf16 copy would change
+  0.02% of a random model's codes, and a weight that a fine-tuning step
+  moved just past a threshold would fall back.
 - **Activations: int8,** quantized symmetrically to [−127, 127] with one
   scale per token.
 - **Dot products.** The masks select `x`, `−x` or `0` per byte, then a sum:

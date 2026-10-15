@@ -26,6 +26,7 @@
 #include "test_no_repeat.h"
 #include "test_qa_context.h"
 #include "test_unlikelihood.h"
+#include "test_ternary_codes.h"
 
 int main(int argc, char** argv) {
     int threads = int(std::thread::hardware_concurrency());
@@ -58,6 +59,7 @@ int main(int argc, char** argv) {
         {"no-repeat block", test_no_repeat},
         {"qa context", test_qa_context},
         {"unlikelihood", test_unlikelihood},
+        {"ternary codes", test_ternary_codes},
         {"attention", test_attention},
     };
     for (auto& s : suites) {

@@ -27,7 +27,9 @@ Reasoning is the first capability we go after.
   (AVX2, AVX-512, VNNI). A trained ternary checkpoint runs on them. The
   embedding/output layer, and attention with `--fp-attn`, are int8 rows
   (one scale per row); `eval-reasoning --as-engine` rounds a model the
-  same way.
+  same way. Training, the packer and checkpoints give every weight the
+  same -1/0/+1 code, at the rounding thresholds too, with no bf16 cast on
+  the way (#40, `tests/test_ternary_codes.h`).
 - `--ternary --fp-attn` (ternary FFN, full-precision attention) gave the
   best MoE run on the curriculum (71.9%, against 64.2% all full precision
   and 62.4% all ternary), but chain accuracy "clicks" at a different step

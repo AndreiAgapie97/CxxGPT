@@ -82,6 +82,23 @@ inline Model<float> make_fp32_decode_baseline(Model<float>& source) {
     return out;
 }
 
+// Copy `index` of a (possibly stacked) ternary tensor into bitplanes, with
+// the codes and absmean scale of the training forward pass: the same
+// ternary_quantize on the same fp32 weights (checkpoints keep them in fp32),
+// each code the sign of its quantized weight (test_ternary_codes checks this
+// code for code).
+inline TernaryMatrixBitplane pack_ternary(const Model<float>& m, const ParamInfo& p, int index) {
+    const size_t per = p.size / p.count;
+    const float* w = &m.params[p.offset + index * per];
+    std::vector<float> wq(per);
+    const float gamma = ternary_quantize(wq.data(), w, long(per));
+    std::vector<int8_t> t(per);
+    for (size_t i = 0; i < per; ++i) t[i] = int8_t((wq[i] > 0) - (wq[i] < 0));
+    TernaryMatrixBitplane W(p.rows, p.cols, gamma);
+    pack_bitplane(t, W);
+    return W;
+}
+
 class TernaryEngine {
 public:
     explicit TernaryEngine(const Model<float>& m) : cfg_(m.cfg), kernel_(default_int8_kernel()) {
@@ -111,19 +128,19 @@ public:
                 L.wqkv8 = int8_rows(m, tensor(p + "wqkv"));
                 L.wo8 = int8_rows(m, tensor(p + "wo"));
             } else {
-                L.wqkv = pack(m, tensor(p + "wqkv"), 0);
-                L.wo = pack(m, tensor(p + "wo"), 0);
+                L.wqkv = pack_ternary(m, tensor(p + "wqkv"), 0);
+                L.wo = pack_ternary(m, tensor(p + "wo"), 0);
             }
             if (F > 0) {
-                L.wfc = pack(m, tensor(p + "wfc"), 0);
-                L.wproj = pack(m, tensor(p + "wproj"), 0);
+                L.wfc = pack_ternary(m, tensor(p + "wfc"), 0);
+                L.wproj = pack_ternary(m, tensor(p + "wproj"), 0);
             }
             if (cfg_.moe()) {
                 L.router = copy(tensor(p + "router"));
                 L.bias = m.router_bias[l];
                 for (int e = 0; e < cfg_.n_experts; ++e) {
-                    L.efc.push_back(pack(m, tensor(p + "efc"), e));
-                    L.eproj.push_back(pack(m, tensor(p + "eproj"), e));
+                    L.efc.push_back(pack_ternary(m, tensor(p + "efc"), e));
+                    L.eproj.push_back(pack_ternary(m, tensor(p + "eproj"), e));
                 }
             }
         }
@@ -240,20 +257,6 @@ private:
         Int8Rows wqkv8, wo8;  // attention instead of wqkv, wo with --fp-attn
         std::vector<TernaryMatrixBitplane> efc, eproj;
     };
-
-    // Copy `index` of a (possibly stacked) ternary tensor into bitplanes,
-    // with the same absmean scale the training forward pass used.
-    static TernaryMatrixBitplane pack(const Model<float>& m, const ParamInfo& p, int index) {
-        const size_t per = p.size / p.count;
-        const float* w = &m.params[p.offset + index * per];
-        std::vector<float> wq(per);
-        const float gamma = ternary_quantize(wq.data(), w, long(per));
-        std::vector<int8_t> t(per);
-        for (size_t i = 0; i < per; ++i) t[i] = int8_t(std::lround(wq[i] / gamma));
-        TernaryMatrixBitplane W(p.rows, p.cols, gamma);
-        pack_bitplane(t, W);
-        return W;
-    }
 
     static Int8Rows int8_rows(const Model<float>& m, const ParamInfo& p) {
         CHECK(p.count == 1, "%s: one matrix expected", p.name.c_str());
