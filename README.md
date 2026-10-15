@@ -125,8 +125,10 @@ Each shape has both training and held-out sentence patterns. Longer stories
 add more contributions or purchases before the final comparison or total.
 The running-quantity stories still include wages, liquid volumes, gifts,
 donations, equal shares, selling, buying, and liters converted to milliliters.
-Names, objects, prices, quantities, and solution phrasing vary, with some
-calculator notes inside sentences. Objects must remain whole; money and
+Names, objects, prices, quantities, and solution phrasing vary. About a third
+of the solution steps are written the GSM8K way, as a sentence that names the
+person and the unit and carries the note inline (`Maya now has 84+4 =
+<<84+4=88>>88 toy cars.`). Objects must remain whole; money and
 volume may use exact hundredths. Questions print fractional money with two
 decimal places (`$7.50`, `2.50 dollars`), and whole amounts as `$7`; notes
 and answers keep the shortest exact spelling. Follow-up volumes use the

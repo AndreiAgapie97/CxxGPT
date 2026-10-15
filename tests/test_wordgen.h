@@ -114,7 +114,33 @@ inline void check_money(const std::string& question) {
     }
 }
 
-inline void check_solution(const WordProblem& generated, bool notes) {
+// A GSM8K-style step ("Maya now has 84+4 = <<84+4=88>>88 toy cars.") must
+// name the story's person, and the words after the result must start with a
+// unit of this story. Counted items must be whole; the last step's unit must
+// be the one the question asks about.
+inline void check_sentence(const WordProblem& generated, const WordNode& step, const std::string& before,
+                           const std::string& after, bool last) {
+    EXPECT(before.find(generated.name) != std::string::npos, "solution sentence does not name %s: %s",
+           generated.name.c_str(), before.c_str());
+    const std::string& object = generated.object;
+    std::string unit;
+    for (const std::string& candidate : {object, "red " + object, "more " + object, std::string("dollars"),
+                                        std::string("liters of juice"), std::string("milliliters of juice")})
+        if (after.starts_with(" " + candidate + " ") || after == " " + candidate + ".") unit = candidate;
+    EXPECT(!unit.empty(), "solution sentence has no unit after the result: %s", after.c_str());
+    if (unit.ends_with(object)) EXPECT(step.whole, "a count of %s is not checked to be whole", object.c_str());
+    if (last) {
+        const size_t question = generated.problem.question.rfind(". ");
+        CHECK(question != std::string::npos, "story has no sentence before the question");
+        EXPECT(generated.problem.question.find(unit, question) != std::string::npos,
+               "last step's unit (%s) is not the one asked about", unit.c_str());
+    }
+}
+
+// Checks the plan, the answer, and every solution line; returns which of
+// the five wordings (see write_solution) the lines used.
+inline std::set<int> check_solution(const WordProblem& generated, bool notes) {
+    std::set<int> forms;
     const auto reference = solve(generated.plan);
     const auto& p = generated.problem;
     EXPECT(reference.size() == generated.values.size(), "missing computed values");
@@ -169,11 +195,26 @@ inline void check_solution(const WordProblem& generated, bool notes) {
         } else EXPECT(tail.find("<<") == std::string::npos, "notes present while disabled");
         const size_t result_end = tail.find_first_not_of("0123456789.");
         EXPECT(decimal(tail.substr(0, result_end)) == reference[node], "written step result is wrong");
+        // The words around the step must be one of the five wordings, and
+        // only the last step may say "as the result".
+        const std::string before = line.substr(0, begin);
+        const std::string after = (result_end == std::string::npos ? "" : tail.substr(result_end)) + ".";
+        const bool last = node + 1 == generated.plan.size();
+        int form = -1;
+        if (before == plan.label + ": " && after == ".") form = 0;
+        else if (before == plan.label + " " && after == ".") form = 1;
+        else if (before == "We calculate " && after == " for this step.") form = 2;
+        else if (before == "This gives " && after == (last ? " as the result." : ".")) form = 3;
+        else if (!plan.before.empty() && before == plan.before + " " && after == " " + plan.after + ".") form = 4;
+        EXPECT(form >= 0, "unexpected solution wording: %s", line.c_str());
+        if (form == 4) check_sentence(generated, plan, before, after, last);
+        forms.insert(form);
         ++node;
         ++operations;
     }
     EXPECT(operations == p.difficulty && node == generated.plan.size(), "wrong number of solution operations");
     EXPECT(p.question.find('{') == std::string::npos, "unfilled sentence placeholder");
+    return forms;
 }
 
 inline void arithmetic() {
@@ -221,14 +262,15 @@ inline void test_wordgen() {
     std::set<int> shapes_by_length;
     std::set<std::string> rate_units;
     bool saw_two_people = false, saw_three_people = false, saw_fraction = false, saw_percentage = false;
-    int inline_steps = 0, converted_stories = 0;
+    std::array<std::set<int>, WordProblem::shape_count> wordings;  // solution wordings used per shape
+    int converted_stories = 0;
     int checked = 0;
     for (bool test : {false, true}) for (int steps = 2; steps <= 8; ++steps) {
         Rng rng(123 + uint64_t(steps));  // deliberately the same seeds for both splits
         const WordOptions options{steps, steps, true, true, test};
         for (int i = 0; i < 600; ++i) {
             const auto p = make_word_problem(rng, options);
-            word_check::check_solution(p, true);
+            for (int form : word_check::check_solution(p, true)) wordings[p.shape].insert(form);
             shapes_by_length.insert((int(test) * 7 + steps - 2) * WordProblem::shape_count + p.shape);
             if (p.shape == WordProblem::total) (p.three_people ? saw_three_people : saw_two_people) = true;
             if (p.shape == WordProblem::part) (p.percentage ? saw_percentage : saw_fraction) = true;
@@ -238,7 +280,6 @@ inline void test_wordgen() {
             if (p.shape == WordProblem::part)
                 for (size_t k = 1; k < p.patterns.size(); ++k)
                     EXPECT(p.patterns[k] / 6 == word_detail::part_extra, "part story adds items without keeping them");
-            if (p.problem.steps.find(" as the result.") != std::string::npos) ++inline_steps;
             seen_distractors.insert(p.distractor);
             distractor_positions.insert(p.distractor_position);
             EXPECT((p.distractor >= 12) == test, "distractor wording leaked across splits");
@@ -271,7 +312,8 @@ inline void test_wordgen() {
     EXPECT(shapes_by_length.size() == 2 * 7 * WordProblem::shape_count, "a shape is missing at a requested length/split");
     EXPECT(saw_two_people && saw_three_people && saw_fraction && saw_percentage && rate_units.size() == 3,
            "missing a story subtype or time unit");
-    EXPECT(inline_steps > 0 && converted_stories > 0, "inline wording or converted units not exercised");
+    for (const auto& used : wordings) EXPECT(used.size() == 5, "a shape never used one of the five solution wordings");
+    EXPECT(converted_stories > 0, "converted units not exercised");
     for (int shape = 0; shape < WordProblem::shape_count; ++shape) {
         EXPECT(!shape_patterns[0][shape].empty() && !shape_patterns[1][shape].empty(), "missing story shape");
         for (int id : shape_patterns[1][shape])
