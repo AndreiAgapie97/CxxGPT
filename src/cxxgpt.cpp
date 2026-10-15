@@ -93,13 +93,15 @@ void print_config(const Config& c, const Model<float>& m) {
 int cmd_bpe_train(Args& a) {
     const std::string in = a.str("in"), out = a.str("out");
     const int vocab = a.integer_int("vocab", 4096);
-    const long max_bytes = a.integer("max-bytes", 200L << 20);
+    const int64_t max_bytes = a.integer("max-bytes", int64_t(200) << 20);
     a.done();
     CHECK(!in.empty() && !out.empty(), "usage: cxxgpt bpe-train --in text.txt --vocab N --out tok.bpe");
     CHECK(vocab >= 256 && vocab <= 65536, "--vocab must be in [256, 65536] (tokens are stored as uint16)");
+    CHECK(max_bytes > 0, "--max-bytes must be positive");
     std::string text = read_file(in);
-    if (long(text.size()) > max_bytes) {
-        std::printf("learning from the first %ld of %zu bytes (--max-bytes)\n", max_bytes, text.size());
+    // Compared as sizes: a file over 2 GB must not wrap to a negative number.
+    if (text.size() > size_t(max_bytes)) {
+        std::printf("learning from the first %lld of %zu bytes (--max-bytes)\n", (long long)max_bytes, text.size());
         text.resize(size_t(max_bytes));
     }
     const double t0 = now_seconds();
@@ -279,7 +281,7 @@ TokenData load_token_list(const std::string& spec, bool* repeats = nullptr) {
 // and a held-out test set that the training data never contains.
 int cmd_gen_reasoning(Args& a) {
     const std::string out = a.str("out", "data/reason");
-    const long n_train = a.integer("train", 200000), n_val = a.integer("val", 2000);
+    const int64_t n_train = a.integer("train", 200000), n_val = a.integer("val", 2000);
     const int per_cell = a.integer_int("test-per-cell", 40);
     const int min_d = a.integer_int("min-diff", 1), max_d = a.integer_int("max-diff", 3);
     const int test_max_d = a.integer_int("test-max-diff", max_d < 5 ? max_d+1 : 5);
@@ -313,12 +315,12 @@ int cmd_gen_reasoning(Args& a) {
         }
     save_problems(out + ".test.txt", test);
 
-    auto make_tokens = [&](long n, const std::string& path) {
+    auto make_tokens = [&](int64_t n, const std::string& path) {
         TokenData d;
         d.vocab = uint32_t(tok.vocab_size());
         long skipped = 0;
         int tries = 0;
-        for (long i = 0; i < n;) {
+        for (int64_t i = 0; i < n;) {
             CHECK(++tries <= 1000000, "question domain exhausted while preparing training/validation");
             const std::string& t = tasks[rng.below(tasks.size())];
             const Problem p =
@@ -332,7 +334,7 @@ int cmd_gen_reasoning(Args& a) {
             tries = 0;
         }
         d.save(path);
-        std::printf("%s: %ld problems, %zu tokens (%ld test duplicates skipped)\n", path.c_str(), n,
+        std::printf("%s: %lld problems, %zu tokens (%ld test duplicates skipped)\n", path.c_str(), (long long)n,
                     d.tokens.size(), skipped);
     };
     make_tokens(n_train, out + ".train.tok");
@@ -346,8 +348,8 @@ int cmd_gen_reasoning(Args& a) {
 // for evaluation, and Q/A documents for text2tok --doc-sep '<|endoftext|>'.
 int cmd_gen_word(Args& a) {
     const std::string out = a.str("out", "data/word");
-    const long count = a.integer("count", 1000), seed = a.integer("seed", 1);
-    const long min_steps = a.integer("min-steps", 2), max_steps = a.integer("max-steps", 8);
+    const int64_t count = a.integer("count", 1000), seed = a.integer("seed", 1);
+    const int64_t min_steps = a.integer("min-steps", 2), max_steps = a.integer("max-steps", 8);
     const std::string split = a.str("split", "train");
     const std::string distractors = a.str("distractors", "on"), notes = a.str("notes", "on");
     a.done();
@@ -368,8 +370,8 @@ int cmd_gen_word(Args& a) {
         CHECK(std::fprintf(text, "%s%s<|endoftext|>\n", p.prompt().c_str(), p.completion().c_str()) >= 0,
               "error writing %s", text_path.c_str());
     CHECK(std::fclose(text) == 0, "error writing %s", text_path.c_str());
-    std::printf("%s.txt and %s.text: %zu %s word problems, %ld..%ld steps\n", out.c_str(), out.c_str(),
-                problems.size(), split.c_str(), min_steps, max_steps);
+    std::printf("%s.txt and %s.text: %zu %s word problems, %lld..%lld steps\n", out.c_str(), out.c_str(),
+                problems.size(), split.c_str(), (long long)min_steps, (long long)max_steps);
     return 0;
 }
 
@@ -738,10 +740,10 @@ int cmd_train(Args& a) {
     }
     const int B = a.integer_int("batch", 16), accum = a.integer_int("accum", 1);
     const int Tn = std::min(cfg.seq_len, a.integer_int("seq", cfg.seq_len));
-    const long steps = a.integer("steps", 2000), warmup = a.integer("warmup", 100);
+    const int64_t steps = a.integer("steps", 2000), warmup = a.integer("warmup", 100);
     const double lr = a.real("lr", 1e-3), min_frac = a.real("min-lr-frac", 0.1);
     const double clip = a.real("clip", 1.0), bias_rate = a.real("bias-rate", 1e-3);
-    const long seed = a.integer("seed", 1);
+    const int64_t seed = a.integer("seed", 1);
     const int log_every = a.integer_int("log-every", 10), eval_every = a.integer_int("eval-every", 200);
     const int eval_batches = a.integer_int("eval-batches", 20), save_every = a.integer_int("save-every", 500);
     const double time_limit = a.real("time-limit", 0) * 60.0;

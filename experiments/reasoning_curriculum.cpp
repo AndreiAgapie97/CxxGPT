@@ -45,7 +45,7 @@ int main(int argc, char** argv) {
     const std::string mode = a.str("mode", "prepare");
     if (mode == "budget") {
         const auto path = a.str("data"), ckpt = a.str("ckpt"), log_path = a.str("log");
-        const long steps = a.integer("steps", 1000), seed = a.integer("seed", 101);
+        const int64_t steps = a.integer("steps", 1000), seed = a.integer("seed", 101);
         const int batch = a.integer_int("batch", 2), seq = a.integer_int("seq", 128);
         a.done(); CHECK(steps > 0 && batch > 0 && seq > 0 && batch <= INT32_MAX / seq, "invalid budget");
         const auto data = TokenData::load(path); Rng rng(uint64_t(seed) + 1);
@@ -69,7 +69,7 @@ int main(int argc, char** argv) {
         }
         std::vector<int> inputs(size_t(batch) * seq), targets(inputs.size());
         size_t valid = 0, minimum = inputs.size();
-        for (long i = 0; i < steps; ++i) {
+        for (int64_t i = 0; i < steps; ++i) {
             data.sample_batch(rng, batch, seq, 0, hi, inputs.data(), targets.data());
             const size_t n = count_targets(targets.data(), targets.size());
             valid += n; minimum = std::min(minimum, n);
@@ -85,8 +85,8 @@ int main(int argc, char** argv) {
             std::fclose(f);
             for (int i = 0; i < 4; ++i) CHECK(actual.state()[i] == rng.state()[i], "checkpoint sampler budget mismatch");
         }
-        std::printf("steps,sampled_tokens,valid_targets,min_valid_per_step\n%ld,%zu,%zu,%zu\n",
-                    steps, size_t(steps) * inputs.size(), valid, minimum);
+        std::printf("steps,sampled_tokens,valid_targets,min_valid_per_step\n%lld,%zu,%zu,%zu\n",
+                    (long long)steps,size_t(steps) * inputs.size(), valid, minimum);
         return 0;
     }
     CHECK(mode == "prepare", "unknown curriculum mode");

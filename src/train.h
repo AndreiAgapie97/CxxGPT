@@ -189,10 +189,10 @@ inline double clip_grad_norm(Model<float>& model, double max_norm) {
 }
 
 // Linear warmup, then cosine decay to min_frac * max_lr at total_steps.
-inline double lr_at(long step, long warmup, long total_steps, double max_lr, double min_frac) {
+inline double lr_at(int64_t step, int64_t warmup, int64_t total_steps, double max_lr, double min_frac) {
     if (step < warmup) return max_lr * double(step + 1) / double(warmup);
     if (step >= total_steps) return max_lr * min_frac;
-    const double t = double(step - warmup) / double(std::max(1L, total_steps - warmup));
+    const double t = double(step - warmup) / double(std::max<int64_t>(1, total_steps - warmup));
     return max_lr * (min_frac + (1 - min_frac) * 0.5 * (1 + std::cos(3.141592653589793 * t)));
 }
 

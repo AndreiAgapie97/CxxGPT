@@ -5,6 +5,7 @@
 #include <cstdio>
 #include <cerrno>
 #include <cmath>
+#include <cstdint>
 #include <limits>
 #include <cstdlib>
 #include <map>
@@ -44,18 +45,20 @@ public:
         note(k, def, true);
         return given ? kv_[k] : def;
     }
-    long integer(const std::string& k, long def) {
+    // 64-bit on every platform: Windows' long is only 32-bit, which would
+    // cap sizes such as --max-bytes at 2 GB.
+    int64_t integer(const std::string& k, int64_t def) {
         const bool given = has(k);
         note(k, std::to_string(def), true);
         if (!given) return def;
         char* end = nullptr;
         errno = 0;
-        const long v = std::strtol(kv_[k].c_str(), &end, 10);
+        const long long v = std::strtoll(kv_[k].c_str(), &end, 10);
         CHECK(end != kv_[k].c_str() && *end == 0 && errno != ERANGE, "--%s expects an integer, got '%s'", k.c_str(), kv_[k].c_str());
-        return v;
+        return int64_t(v);
     }
-    int integer_int(const std::string& k, long def) {
-        const long value = integer(k, def);
+    int integer_int(const std::string& k, int64_t def) {
+        const int64_t value = integer(k, def);
         CHECK(value >= std::numeric_limits<int>::min() && value <= std::numeric_limits<int>::max(),
               "--%s is outside the int range", k.c_str());
         return int(value);
