@@ -298,6 +298,33 @@ one exact-text check that no dev question is left in training:
 [docs/LAPTOP.md](docs/LAPTOP.md) ("The dev set") gives the counts to
 expect.
 
+**The audited data (since 2026-10-15, issue #46).** A random sample of
+OpenMath2 found clear mistakes in 26 of its 40 `augmented_math` solutions,
+and night 2's answers carry the same habits (36% write `\boxed{}`; issue
+#16). From night 3 on, a new model trains from random weights on openly
+licensed text and exact math, and MetaMath, OpenMath2, FineWeb-Edu and
+TinyStories are left out. `scripts/prepare_clean.sh` builds it, from the
+Common Pile downloads in `data/public-20261015/` (never changed) with
+`scripts/prep_public.py`:
+
+| File | What | Tokens | In the mix |
+|---|---|---|---|
+| `textbooks` | LibreTexts and Pressbooks open textbooks | 240M | x2 |
+| `wiki` | Wikipedia, Wikibooks, Wikisource, Wikinews articles (one shard of 35) | 342M | x1 |
+| `doab-part` | academic books (DOAB), cut from 2 of 5 shards | 901M | x1 |
+| `arxiv-part` | openly licensed arXiv papers, cut from 1 of 8 shards | 405M | x1 |
+| `word-train` | 1M exact word problems (`gen-word`, no calculator notes) | 189M | x1 |
+| `gsm8k-train` | 6,966 human-written GSM8K train problems (7 near-copies of a test or dev question dropped) | 1.2M | x8 |
+
+That is 2.33B tokens in the mix, about 3.7 nights. Empty, short and
+wrongly decoded records, non-article wiki pages, Wikiquote and repeated
+texts are dropped; DOAB and arXiv are cut at a document boundary, so that
+academic books and papers are a little over half of the mix instead of
+nearly three quarters. No GSM8K test, GSM8K
+dev or SVAMP dev question shares a 13-word run with any of it. The 500
+held-out GSM8K problems are the dev set (`DEV=1`): the new model has never
+seen them.
+
 **Answers with their questions.** Training windows start at random
 offsets, so a window often begins in the middle of a math problem: the
 answer is trained while its question is out of view. `./cxxgpt qa-context

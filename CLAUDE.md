@@ -157,6 +157,16 @@ Reasoning is the first capability we go after.
   `cxxgpt.exe`, `ternary_moe.exe`, `test_engine.exe`), run in CI. The
   vector kernels are picked at run time from what the CPU and Windows
   support. The GPU build on Windows is the next step (the port).
+- The audited data (2026-10-15, #46): OpenMath2's `augmented_math` had
+  clear mistakes in 26 of 40 sampled solutions, so from night 3 a new model
+  trains from random weights on `scripts/prepare_clean.sh`'s mix (README,
+  "The audited data"): open textbooks, Wikimedia articles, DOAB books and
+  arXiv papers from the Common Pile (`scripts/prep_public.py`, which reads
+  `data/public-20261015/` and never changes it), 1M `gen-word` problems,
+  and GSM8K train without the 500 dev problems and 7 near-copies of test or
+  dev questions. 2.33B tokens; no test, dev or SVAMP dev question shares a
+  13-word run with it. MetaMath, OpenMath2, FineWeb-Edu and TinyStories are
+  out. The tokenizer stays `data/tok.bpe`.
 - `src/cxxgpt.cpp`: the CLI (train, sample, eval, data prep, benchmarks).
 - `scripts/get_data.py`: downloads public datasets (GSM8K, TinyStories,
   FineWeb-Edu, OpenMathInstruct-2, MetaMathQA) into `data/`, as text with

@@ -202,6 +202,54 @@ b_row="| b | $(date -r "$TEST_DIR/ledger/runs/b.log" +%F) | a, resumed 1 x | 1M 
 [[ $(sed -n 6p "$TEST_DIR/ledger/docs/runs.md") == "$b_row" ]]
 [[ $(wc -l < "$TEST_DIR/ledger/docs/runs.md") == 6 ]]
 printf 'CLI: run ledger passed\n'
+
+# prep_public.py on made-up Common Pile shards: each filter drops its record,
+# a repeated text (other case and spacing) is dropped in a later source too,
+# and --shards stops DOAB after its first shard.
+python3 - "$TEST_DIR/pile" <<'PY'
+import gzip, json, os, sys
+root = sys.argv[1]
+def shard(folder, name, records):
+    os.makedirs(f"{root}/{folder}", exist_ok=True)
+    with gzip.open(f"{root}/{folder}/{name}", "wt", encoding="utf-8") as f:
+        for text, source, meta in records:
+            f.write(json.dumps({"text": text, "source": source, "metadata": meta}) + "\n")
+book = "Line one of the book.\r\nLine two<|endoftext|> goes on."
+shard("libretexts_filtered", "libretexts-0000.json.gz", [
+    (book, "libretexts", {}),
+    ("", "libretexts", {}),
+    ("tiny", "libretexts", {}),
+    ("LINE ONE of the book.\r\n  Line two<|endoftext|> goes   on.", "libretexts", {}),
+    ("x" * 30 + "�", "libretexts", {}),
+    ("Another page of the textbook here.", "libretexts", {}),
+])
+wiki = "wiki/dump/wikipedia.com"
+shard("wikimedia_filtered", "wikimedia-0000.json.gz", [
+    ("An article about something long enough.", wiki, {"namespace": "0", "wiki": "wikipedia.com"}),
+    ("A talk page that is long enough to keep.", wiki, {"namespace": "1", "wiki": "wikipedia.com"}),
+    ("A page of quotations, long enough too.", wiki, {"namespace": "0", "wiki": "wikiquote.com"}),
+    (book, wiki, {"namespace": "0", "wiki": "wikipedia.com"}),
+])
+shard("doab_filtered", "doab-0000.json.gz", [("First book chapter, long enough to keep.", "doab", {})])
+shard("doab_filtered", "doab-0001.json.gz", [("Second book chapter, never read here.", "doab", {})])
+PY
+python3 scripts/prep_public.py --src "$TEST_DIR/pile" --out "$TEST_DIR/pile-out" --only textbooks,wiki,doab \
+    --shards doab=1 --min-chars 20 --workers 2 > /dev/null
+[[ $(cat "$TEST_DIR/pile-out/textbooks.txt") == $'Line one of the book.\nLine two goes on.\n<|endoftext|>\nAnother page of the textbook here.' ]]
+[[ $(cat "$TEST_DIR/pile-out/wiki.txt") == 'An article about something long enough.' ]]
+[[ $(cat "$TEST_DIR/pile-out/doab.txt") == 'First book chapter, long enough to keep.' ]]
+python3 - "$TEST_DIR/pile-out/manifest.json" <<'PY'
+import hashlib, json, sys
+m = json.load(open(sys.argv[1]))
+assert m["textbooks"]["counts"] == {"read": 6, "kept": 2, "duplicate": 1, "empty": 1, "short": 1, "bad_decoding": 1}, m
+assert m["wiki"]["counts"] == {"read": 4, "kept": 1, "duplicate": 1, "not_article": 1, "wikiquote": 1}, m
+assert len(m["doab"]["shards"]) == 1 and m["doab"]["counts"]["kept"] == 1, m
+out = sys.argv[1].rsplit("/", 1)[0]
+for name in ("textbooks", "wiki", "doab"):
+    data = open(f"{out}/{name}.txt", "rb").read()
+    assert m[name]["bytes"] == len(data) and m[name]["sha256"] == hashlib.sha256(data).hexdigest(), name
+PY
+printf 'CLI: prep_public filters, cross-source repeats, shard limit and manifest passed\n'
 "$CXXGPT" train "${COMMON[@]}" --data "$TEST_DIR/data.tok*3" --val '' --val-frac 0.5 --steps 0 \
     --out "$TEST_DIR/repeated-val.ckpt" > "$TEST_DIR/repeated-val.log" 2>&1
 grep -q 'validation slices repeated data' "$TEST_DIR/repeated-val.log"

@@ -233,6 +233,30 @@ can differ by a problem or two. Another program on the GPU (a training
 run, a second eval) slows it down several times: a greedy run alongside a
 training run took 447 s.
 
+### Night 3 on: a new model on the audited data
+
+The data audit of 2026-10-15 (issue #46) found too many wrong solutions in
+OpenMath2, so night 3 starts a new model from random weights on the
+audited data (README, "The audited data"). Build it once (about 10
+minutes; it needs the Common Pile downloads in `data/public-20261015/` and
+the GSM8K split in `data/math-pilot-20261015/`):
+```sh
+scripts/prepare_clean.sh
+```
+It prints the `MIX=` line and the leak check (all zero). The new model
+trains as one run over several nights: `HOURS=30` plans the learning-rate
+schedule for four nights, `--time-limit 450` stops each night after 7.5
+hours with a checkpoint, and the same command the next evening resumes it
+(`night.sh` resumes `runs/$RUN.ckpt` when it exists), schedule, optimizer
+and data order included. A new run name, no `INIT`, the dev set:
+```sh
+RUN=clean1 DEV=1 HOURS=30 MIX="..." TOKS=25900 scripts/night.sh --sampler qa --time-limit 450
+```
+Its exams mid-run come before the learning rate has come down, so they
+read lower than a one-night run's last exam would at the same step.
+
+The section below is the plan from before the audit.
+
 ### Following nights
 
 Worked math solutions take a larger share (OpenMathInstruct-2, MetaMathQA,
