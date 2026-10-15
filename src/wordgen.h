@@ -358,14 +358,14 @@ inline bool chain_story(Story& s, int steps) {
         if (family == share) { op = '/'; label = "One equal share is"; }
         if (family == fraction) { op = '/'; label = "The fraction kept is"; }
         if (family == percent) { op = '*'; label = "Multiplying by the percentage gives"; }
-        if (family == sell) { op = '*'; label = "The sale brings in this many dollars"; s.kind = Kind::money; }
+        if (family == sell) { op = '*'; label = "In dollars, the sale brings in"; s.kind = Kind::money; }
         if (family == buy) { op = '/'; label = "The number of items bought is"; s.kind = Kind::objects; }
         if (family == convert) { op = '*'; label = "The volume in milliliters is"; s.kind = Kind::milliliters; }
         if (!s.operation(op, previous, operand, s.kind == Kind::objects, label)) return false;
         ++done;
         if (family == percent) {
             const size_t product = s.out.values.size() - 1, hundred = s.literal(100 * scale);
-            if (!s.operation('/', product, hundred, s.kind == Kind::objects, "Dividing by 100 gives the amount kept"))
+            if (!s.operation('/', product, hundred, s.kind == Kind::objects, "Dividing by 100, the amount kept is"))
                 return false;
             ++done;
         }
@@ -466,8 +466,8 @@ inline bool part_story(Story& s, int steps) {
     if (percentage) {
         if (!opening(s, part_percent, in, '*', "Multiplying by the percentage gives")) return false;
         const size_t product = s.out.values.size() - 1, hundred = s.literal(100 * scale);
-        if (!s.operation('/', product, hundred, true, "The red items kept number")) return false;
-    } else if (!opening(s, part_fraction, in, '/', "The red items kept number")) return false;
+        if (!s.operation('/', product, hundred, true, "The number of red items kept is")) return false;
+    } else if (!opening(s, part_fraction, in, '/', "The number of red items kept is")) return false;
     if (!add_extras(s, steps - 1 - (percentage ? 2 : 1), part_extra, "Including the extra kept items gives"))
         return false;
     if (!close_with(s, '+', in[2], false, "Combining the two amounts gives")) return false;
@@ -481,7 +481,7 @@ inline bool change_story(Story& s, int steps) {
     auto in = draw_inputs(s);
     in[1] = s.draw(1, 32) * 25;
     in[2] = s.draw(5, 20) * 20 * scale;
-    if (!opening(s, shopping, in, '*', "The items cost this many dollars")) return false;
+    if (!opening(s, shopping, in, '*', "In dollars, the items cost")) return false;
     if (!add_extras(s, steps - 2, extra_cost, "The bill now totals")) return false;
     if (!close_with(s, '-', in[2], true, "The change in dollars is")) return false;
     s.question = "How much change in dollars does " + s.name + " receive after all these purchases?";

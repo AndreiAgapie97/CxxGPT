@@ -147,6 +147,12 @@ inline void check_solution(const WordProblem& generated, bool notes) {
         const size_t op = expr.find_first_of("+-*/");
         CHECK(op != std::string::npos, "missing solution operator");
         const WordNode& plan = generated.plan[node];
+        // A label may come straight before the expression ("The items cost
+        // 10*7.5 = 75."), so it must end in a verb.
+        bool ends_in_verb = false;
+        for (const char* verb : {" is", " gives", " contains", " produces", " totals", " cost", " brings in"})
+            ends_in_verb = ends_in_verb || plan.label.ends_with(verb);
+        EXPECT(ends_in_verb, "solution label does not end in a verb: %s", plan.label.c_str());
         EXPECT(expr[op] == plan.op && decimal(expr.substr(0, op)) == reference[plan.left] &&
                    decimal(expr.substr(op + 1)) == reference[plan.right], "solution uses wrong inputs");
         const Rational result = expression(expr);
