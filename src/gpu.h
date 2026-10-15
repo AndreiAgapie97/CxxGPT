@@ -9,10 +9,10 @@
 // products go through cuBLAS with fp32 outputs and sums; Matmul says how
 // their inputs are multiplied:
 // - fp32: exactly, which the tests use to compare against the CPU engine;
-// - tf32 (the default): on the tensor cores, each input rounded to 11
-//   significant bits, the usual trade for training speed;
-// - bf16: the model's projections take inputs stored in bf16 (8
-//   significant bits): a bf16 copy of the weights, refreshed after each
+// - tf32 (GpuTrainer's default; train --gpu's for ternary models): on the
+//   tensor cores, each input rounded to 11 significant bits;
+// - bf16 (train --gpu's default): the model's projections take inputs
+//   stored in bf16 (8 significant bits): a bf16 copy of the weights, refreshed after each
 //   step, and activations written in bf16. The tensor cores multiply those
 //   at twice the TF32 rate (1.45x the tokens/s of tf32 on the night-1
 //   model). Muon's products take bf16 inputs too; the router and

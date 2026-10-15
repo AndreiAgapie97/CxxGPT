@@ -74,6 +74,25 @@ else
   read -ra model <<< "$MODEL"
 fi
 echo "$RUN: $steps steps of $per_step tokens; stops after $minutes minutes at the latest" | tee -a "runs/$RUN.log"
+# Every 10 s, the GPU's clock, temperature, power, load, memory and slowdown
+# reasons, with the last logged step, into runs/$RUN.gpu.csv: when a stretch
+# of the night runs slow, this says what the GPU was doing then.
+# (Under WSL, nvidia-smi lives in /usr/lib/wsl/lib, not always on the PATH.)
+smi=$(command -v nvidia-smi || echo /usr/lib/wsl/lib/nvidia-smi)
+if [ -x "$smi" ]; then
+  (
+    # A failed query (or no step logged yet) must not stop the logger.
+    set +e +o pipefail
+    while sleep 10; do
+      gpu=$("$smi" --query-gpu=timestamp,clocks.sm,temperature.gpu,power.draw,utilization.gpu,memory.used,clocks_throttle_reasons.active \
+        --format=csv,noheader 2>&1 | head -1)
+      last=$(tail -n 100 "runs/$RUN.log" 2> /dev/null | grep '^step' | tail -1 | cut -d'|' -f1)
+      echo "$gpu, ${last:-start}"
+    done
+  ) >> "runs/$RUN.gpu.csv" &
+  gpu_log=$!
+  trap 'kill "$gpu_log" 2> /dev/null || true' EXIT
+fi
 # tee -i: Ctrl-C reaches only the trainer, which saves before it stops.
 # shellcheck disable=SC2086
 "$CX" train $GPU --data "$MIX" --val "$DATA/gsm8k/test.tok" --bpe "$DATA/tok.bpe" \

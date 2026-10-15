@@ -74,6 +74,12 @@ and can do everything else from there.
   the last checkpoint. The log then says which step the checkpoint holds;
   resume it with a lower `--lr` (night.sh: `LR=...`).
 - `nvidia-smi` in another terminal shows GPU load, memory and temperature.
+  `night.sh` also logs it every 10 s to `runs/$RUN.gpu.csv`: time, clock
+  (MHz), temperature, power, load, memory, the slowdown reasons (0x1: idle;
+  0x4: power cap; 0x8: hardware slowdown; 0x20/0x40: too hot) and the last logged step. When a stretch of the
+  night runs slow, those rows say whether the GPU slowed itself down (clock
+  and power drop, a thermal reason) or sat idle waiting (load drops, clock
+  stays up: Windows, WSL or the CPU side).
 
 ## The plan
 
@@ -162,22 +168,23 @@ both against the CPU engine:
 - fused attention, on by default since 2026-10-14 (`--no-fused-attn`
   turns it off; `--fused-attn` insists on it). Its kernels never store the
   attention weights, which saves about 1.2 GB of GPU memory at the night-1
-  size and leaves room for a larger batch or model. With TF32 (the
-  default) or bf16 matmuls they multiply on the tensor cores
+  size and leaves room for a larger batch or model. With bf16 (the
+  default) or TF32 matmuls they multiply on the tensor cores
   (`src/attention_tc.cuh`): on the night-1 model, attention takes 380 ms
   of a step instead of 930 ms, and training runs at 16,900 tokens/s at
   4 x 32 (cuBLAS: 15,000) and 17,800 at 8 x 16, which only fits with them.
   With `--matmul fp32` they run the exact fp32 kernels
   (`src/attention.cuh`). Heads larger than 128 use the cuBLAS attention;
-- `--matmul bf16`, off by default: the model's matrix products take
+- `--matmul bf16`, the default since 2026-10-14 (`--matmul tf32` goes
+  back; ternary models default to TF32): the model's matrix products take
   inputs stored in bf16 (8 significant bits against TF32's 11), which the
   tensor cores multiply at twice the TF32 rate. Weights, gradients and the
   optimizer stay fp32 (the products use a bf16 copy of the weights), and
   so do the router and attention; Muon's products take bf16 inputs too.
   On the night-1 model at 8 x 16: 25,600 tokens/s against 17,600, with
   7.0 GB of GPU memory against 6.7.
-  Not for ternary models yet. `GPU="--gpu --matmul bf16" scripts/probe.sh`
-  measures it for each size.
+  Not for ternary models yet, so `probe.sh` measures the ternary row in
+  TF32 and the others in bf16 (`GPU="--gpu --matmul tf32"` for TF32).
 
 Two `test_gpu` checks have failed since the first run on the laptop's
 RTX 4070 (2026-10-14), so `test_gpu` ends without `all passed` and

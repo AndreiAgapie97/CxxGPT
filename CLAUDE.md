@@ -41,11 +41,12 @@ Reasoning is the first capability we go after.
   variables up first, which more than doubles chain accuracy). `cxxgpt
   prep-qa` turns GSM8K-style JSON Lines into the same format.
 - `src/gpu.cu` (interface `src/gpu.h`): the CUDA training backend, the
-  same model op for op, fp32 with cuBLAS (TF32 by default; `--matmul
-  bf16` stores the products' inputs in bf16, with fp32 master weights:
-  1.45x the tokens/s, not for ternary models yet), and fused attention
-  kernels, the default (`--no-fused-attn`
-  for cuBLAS products): on the tensor cores with TF32/bf16
+  same model op for op, fp32 with cuBLAS. `train --gpu` stores the
+  products' inputs in bf16 by default (`--matmul bf16`, fp32 master
+  weights: 1.45x the tokens/s of `--matmul tf32`, the same loss curve);
+  ternary models default to TF32, which bf16 does not take yet. Fused
+  attention kernels are the default (`--no-fused-attn` for cuBLAS
+  products): on the tensor cores with TF32/bf16
   (`src/attention_tc.cuh`, tested on the GPU only; 1.18x the cuBLAS
   attention's tokens/s on the night-1 model, at 8 x 16, which only fits
   with them), in exact fp32 otherwise (`src/attention.cuh`, also tested on

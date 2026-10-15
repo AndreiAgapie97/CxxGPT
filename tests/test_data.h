@@ -75,6 +75,13 @@ inline void test_token_writer() {
     std::remove(path.c_str());
     EXPECT(d.vocab == 1000 && d.mask.empty() && d.tokens == all, "token file read back wrongly (%zu tokens)",
            d.tokens.size());
+    // An empty file (gen-reasoning --val 0 writes one) saves and loads too.
+    TokenData empty;
+    empty.vocab = 50;
+    empty.save(path);
+    const TokenData e = TokenData::load(path);
+    std::remove(path.c_str());
+    EXPECT(e.vocab == 50 && e.tokens.empty() && e.mask.empty(), "empty token file read back wrongly");
 }
 
 // Files mixed with repeats: tokens in order, masks kept, files without a

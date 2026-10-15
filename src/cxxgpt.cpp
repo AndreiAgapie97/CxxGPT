@@ -699,8 +699,8 @@ int cmd_train(Args& a) {
             "        --eval-every 200 --eval-batches 20 --save-every 500\n"
             "        --time-limit MINUTES --threads N --profile\n"
             "gpu:    --gpu (train on the GPU; needs cxxgpt-gpu, from make gpu)\n"
-            "        --matmul tf32 (tensor cores; fp32: exact, slower; bf16: inputs stored in bf16,\n"
-            "        coarser and about 1.4x faster; not for ternary models)\n"
+            "        --matmul bf16 (inputs stored in bf16, the default; ternary models default to tf32,\n"
+            "        which bf16 does not take; tf32: finer, about 1.45x slower; fp32: exact, slowest)\n"
             "        --no-tf32 is an alias for fp32\n"
             "        attention is fused by default (no stored weight matrix; on the tensor cores\n"
             "        with tf32/bf16); --no-fused-attn uses cuBLAS products instead\n"
@@ -754,7 +754,10 @@ int cmd_train(Args& a) {
     const bool use_gpu = a.flag("gpu"), request_fused = a.flag("fused-attn"), disable_fused = a.flag("no-fused-attn");
     CHECK(!request_fused || !disable_fused, "choose only one of --fused-attn and --no-fused-attn");
     const bool no_tf32 = a.flag("no-tf32");
-    const std::string matmul = a.str("matmul", no_tf32 ? "fp32" : "tf32");
+    // bf16 products by default: 1.45x the tokens/s of tf32 on the night-1
+    // model, with the same loss curve. Ternary models default to tf32 (their
+    // quantized values are not exact in bf16).
+    const std::string matmul = a.str("matmul", no_tf32 ? "fp32" : cfg.ternary ? "tf32" : "bf16");
     CHECK(!no_tf32 || matmul == "fp32", "--no-tf32 conflicts with --matmul %s", matmul.c_str());
     CHECK(matmul == "fp32" || matmul == "tf32" || matmul == "bf16", "--matmul takes fp32, tf32 or bf16");
     AdamW opt;

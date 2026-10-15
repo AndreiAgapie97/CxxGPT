@@ -5,7 +5,7 @@
 #   scripts/probe.sh [steps]          (default 20; needs cxxgpt-gpu: make gpu)
 # The defaults match scripts/night.sh: BATCH=8 SEQ=512 ACCUM=16 VOCAB=16384,
 # OPT=--muon ("" for AdamW), GPU=--gpu (add GPU options to it, e.g.
-# GPU="--gpu --matmul bf16"; the night.sh commands carry them). Other sizes:
+# GPU="--gpu --matmul tf32"; the night.sh commands carry them). Other sizes:
 # SIZES="name:--dim 640 --layers 10 --heads 10;...".
 # The tokens are synthetic (the reasoning curriculum); speed does not depend
 # on what they say, only on the vocabulary size, which VOCAB sets.

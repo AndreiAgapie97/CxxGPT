@@ -210,8 +210,10 @@ struct TokenData {
         std::fwrite(&vocab, 4, 1, f);
         std::fwrite(&has_mask, 4, 1, f);
         std::fwrite(&n, 8, 1, f);
-        std::fwrite(tokens.data(), 2, n, f);
-        if (has_mask) std::fwrite(mask.data(), 1, n, f);
+        // An empty file (e.g. gen-reasoning --val 0) has no data pointer to
+        // write from, and fwrite with a null pointer is undefined.
+        if (n) std::fwrite(tokens.data(), 2, n, f);
+        if (n && has_mask) std::fwrite(mask.data(), 1, n, f);
         const bool failed = std::ferror(f) != 0;
         CHECK(std::fclose(f) == 0 && !failed, "error writing %s", path.c_str());
     }
@@ -238,8 +240,8 @@ struct TokenData {
         TokenData d;
         d.vocab = h.vocab;
         d.tokens.resize(n);
-        CHECK(std::fread(d.tokens.data(), 2, n, f) == n, "truncated tokens in %s", path.c_str());
-        if (h.has_mask) {
+        CHECK(n == 0 || std::fread(d.tokens.data(), 2, n, f) == n, "truncated tokens in %s", path.c_str());
+        if (h.has_mask && n) {
             d.mask.resize(n);
             CHECK(std::fread(d.mask.data(), 1, n, f) == n, "truncated mask in %s", path.c_str());
         }
