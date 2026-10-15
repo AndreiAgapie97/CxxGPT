@@ -205,6 +205,7 @@ printf 'CLI: run ledger passed\n'
 
 # prep_public.py on made-up Common Pile shards: each filter drops its record,
 # a repeated text (other case and spacing) is dropped in a later source too,
+# the textbooks lose their page buttons and quiz markup (other sources keep them),
 # and --shards stops DOAB after its first shard.
 python3 - "$TEST_DIR/pile" <<'PY'
 import gzip, json, os, sys
@@ -221,11 +222,11 @@ shard("libretexts_filtered", "libretexts-0000.json.gz", [
     ("tiny", "libretexts", {}),
     ("LINE ONE of the book.\r\n  Line two<|endoftext|> goes   on.", "libretexts", {}),
     ("x" * 30 + "�", "libretexts", {}),
-    ("Another page of the textbook here.", "libretexts", {}),
+    ("Another page\n- Save as PDF\n[hidden-answer a=\"1\"]\n[/hidden-answer]\nof the textbook here.", "libretexts", {}),
 ])
 wiki = "wiki/dump/wikipedia.com"
 shard("wikimedia_filtered", "wikimedia-0000.json.gz", [
-    ("An article about something long enough.", wiki, {"namespace": "0", "wiki": "wikipedia.com"}),
+    ("An article about something long enough.\n- Save as PDF", wiki, {"namespace": "0", "wiki": "wikipedia.com"}),
     ("A talk page that is long enough to keep.", wiki, {"namespace": "1", "wiki": "wikipedia.com"}),
     ("A page of quotations, long enough too.", wiki, {"namespace": "0", "wiki": "wikiquote.com"}),
     (book, wiki, {"namespace": "0", "wiki": "wikipedia.com"}),
@@ -235,8 +236,8 @@ shard("doab_filtered", "doab-0001.json.gz", [("Second book chapter, never read h
 PY
 python3 scripts/prep_public.py --src "$TEST_DIR/pile" --out "$TEST_DIR/pile-out" --only textbooks,wiki,doab \
     --shards doab=1 --min-chars 20 --workers 2 > /dev/null
-[[ $(cat "$TEST_DIR/pile-out/textbooks.txt") == $'Line one of the book.\nLine two goes on.\n<|endoftext|>\nAnother page of the textbook here.' ]]
-[[ $(cat "$TEST_DIR/pile-out/wiki.txt") == 'An article about something long enough.' ]]
+[[ $(cat "$TEST_DIR/pile-out/textbooks.txt") == $'Line one of the book.\nLine two goes on.\n<|endoftext|>\nAnother page\nof the textbook here.' ]]
+[[ $(cat "$TEST_DIR/pile-out/wiki.txt") == $'An article about something long enough.\n- Save as PDF' ]]
 [[ $(cat "$TEST_DIR/pile-out/doab.txt") == 'First book chapter, long enough to keep.' ]]
 python3 - "$TEST_DIR/pile-out/manifest.json" <<'PY'
 import hashlib, json, sys

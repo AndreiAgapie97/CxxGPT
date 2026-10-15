@@ -21,7 +21,10 @@ it is not an article (Wikimedia), when more than 0.1% of its characters are
 U+FFFD (text that was decoded wrongly), or when the same text (ignoring
 case and whitespace) was already kept by this run, in any source (in --only's
 order). "\\r\\n" becomes "\\n",
-and a "<|endoftext|>" inside a text is removed, so documents stay apart.
+and a "<|endoftext|>" inside a text is removed, so documents stay apart. In
+the textbooks, the lines of page buttons ("- Save as PDF", "- Last updated")
+and quiz markup ([reveal-answer ...], [hidden-answer ...], [/hidden-answer])
+are removed.
 
 --shards limits how many shards (in name order) a source reads: one night
 reads about 2.5 GB of text, far less than DOAB and arXiv hold. The shards
@@ -37,6 +40,7 @@ import gzip
 import hashlib
 import json
 import os
+import re
 import sys
 import tempfile
 from multiprocessing import Pool
@@ -70,8 +74,17 @@ def reject_reason(record, min_chars):
     return None
 
 
-def clean(text):
-    return text.replace("\r\n", "\n").replace(DOC_SEP, "").strip()
+# Lines of the textbook sites' page furniture, not text: LibreTexts' page
+# buttons and Pressbooks' quiz markup. Dropped from those two sources only.
+TEXTBOOK_SOURCES = {"libretexts", "pressbooks"}
+FURNITURE = re.compile(r"- Save as PDF|- Last updated|\[(reveal|hidden)-answer[^\]]*\].*|\[/hidden-answer\]")
+
+
+def clean(text, source=""):
+    text = text.replace("\r\n", "\n").replace(DOC_SEP, "")
+    if source in TEXTBOOK_SOURCES:
+        text = "\n".join(line for line in text.split("\n") if not FURNITURE.fullmatch(line.strip()))
+    return text.strip()
 
 
 def text_key(text):
@@ -92,7 +105,7 @@ def read_shard(job):
             if reason:
                 counts[reason] = counts.get(reason, 0) + 1
                 continue
-            data = clean(record["text"]).encode("utf-8")
+            data = clean(record["text"], str(record.get("source", ""))).encode("utf-8")
             out.write(text_key(record["text"]))
             out.write(len(data).to_bytes(8, "little"))
             out.write(data)
