@@ -124,9 +124,9 @@ with tempfile.TemporaryDirectory() as directory:
     run("text2tok", "--in", source, "--out", root / "late.tok", "--threads", 1)
     text, mask = byte_text(root / "late.tok")
     assert bytes(value for value, keep in zip(text, mask) if not keep) == b"wrong"
-    for malformed in ["[[no-loss]]unfinished", "[[/no-loss]]", 
-                                        "[[no-loss]]a[[no-loss]]b[[/no-loss]]",
-                                        "[[no-loss]]a<|endoftext|>b[[/no-loss]]"]:
+    for malformed in ["[[no-loss]]unfinished", "[[/no-loss]]",
+                      "[[no-loss]]a[[no-loss]]b[[/no-loss]]",
+                      "[[no-loss]]a<|endoftext|>b[[/no-loss]]"]:
         source.write_text(malformed)
         run("text2tok", "--in", source, "--out", root / "bad.tok",
             "--doc-sep", "<|endoftext|>", succeeds=False)
