@@ -326,6 +326,22 @@ for tool in calc-notes calc-plain; do
         > "$TEST_DIR/calc-sample.txt" 2> "$TEST_DIR/calc-sample.log"
     grep -q '^calculator calls: 0 fired, 0 malformed$' "$TEST_DIR/calc-sample.log"
 done
+# Failure labels (#16): the summary, a settings line, then one valid JSON
+# line per problem, numbered by its place in the file.
+"$CXXGPT" eval-reasoning --ckpt "$TEST_DIR/audit.ckpt" --test "$TEST_DIR/audit.txt" --max-new 4 \
+    --threads 2 --labels "$TEST_DIR/labels.jsonl" > "$TEST_DIR/labels.log"
+problems=$(grep -c . "$TEST_DIR/audit.txt")
+grep -q "^failure labels (first tries, $problems problems):$" "$TEST_DIR/labels.log"
+[[ $(wc -l < "$TEST_DIR/labels.jsonl") == $((problems + 1)) ]]
+head -1 "$TEST_DIR/labels.jsonl" | grep -q '"labelled":"first try"'
+python3 - "$TEST_DIR/labels.jsonl" "$problems" <<'PY'
+import json, sys
+lines = [json.loads(l) for l in open(sys.argv[1], encoding="utf-8")]
+assert [l["problem"] for l in lines[1:]] == list(range(int(sys.argv[2])))
+labels = {"correct", "unfinished", "format", "arithmetic", "passed_gold", "other"}
+assert all(l["label"] in labels for l in lines[1:])
+PY
+printf 'CLI: failure labels passed\n'
 for command in sample eval-reasoning; do
     "$CXXGPT" "$command" --help > "$TEST_DIR/calc-help.log"
     grep -q -- '--tools' "$TEST_DIR/calc-help.log"

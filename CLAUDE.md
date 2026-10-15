@@ -60,7 +60,12 @@ Reasoning is the first capability we go after.
   `--no-repeat N` (also on `sample`, off by default; `NoRepeat` in
   `src/no_repeat.h`) forbids writing a run of N generated tokens twice,
   against greedy loops (#33); every evaluation prints its unfinished first
-  tries. Not yet scored on a dev set.
+  tries. Not yet scored on a dev set. `--labels FILE.jsonl` (#16,
+  `src/failure_labels.h`) labels each first try: correct, unfinished,
+  format, arithmetic (a written calculation the exact calculator finds
+  wrong), passed_gold (the right number in the work, another answer
+  given) or other (for a person to judge), with flags for loops and
+  numbers from outside the question; one JSON line per problem.
 - `train --unlikelihood ALPHA --ul-ngram N` (#34, off by default, CPU
   engine only for now): at each trained position, every token that would
   repeat a run of N trained tokens of the same document (the no-repeat

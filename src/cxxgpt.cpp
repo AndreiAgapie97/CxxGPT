@@ -10,6 +10,7 @@
 //       [--tries N | --effort low/medium/high] [--temp T] [--seed S]
 //                                      sample N tries per problem; the headline becomes their maj@N vote
 //       [--no-repeat N]                never write a run of N tokens twice (also on sample)
+//       [--labels FILE.jsonl]          why each first try is wrong, one JSON line per problem
 //   cxxgpt qa-context --data a.tok,b.tok [--seq 512]   answers trained without their question
 //   cxxgpt bench-infer [--ckpt model.ckpt | model options]  ternary engine vs fp32 decode
 //
@@ -28,6 +29,7 @@
 
 #include "args.h"
 #include "clone_experts.h"
+#include "failure_labels.h"
 #include "common.h"
 #include "generate.h"
 #ifdef CXXGPT_CUDA
@@ -746,6 +748,9 @@ int cmd_eval_reasoning(Args& a) {
     // Never repeat a run of N generated tokens (no_repeat.h, NoRepeat); 0: off.
     vote.no_repeat = a.integer_int("no-repeat", 0);
     CHECK(vote.no_repeat == 0 || vote.no_repeat >= 2, "--no-repeat must be 0 (off) or at least 2");
+    // Each first try labelled (correct, unfinished, format, arithmetic,
+    // passed_gold, other; failure_labels.h, #16), one JSON line per problem.
+    const std::string labels_path = a.str("labels");
     // As TernaryEngine runs it: the embedding (and --fp-attn attention) in
     // int8 rows.
     const bool as_engine = a.flag("as-engine");
@@ -810,10 +815,10 @@ int cmd_eval_reasoning(Args& a) {
 #ifdef CXXGPT_CUDA
         if (gpu) {
             GpuDecoder dec{model.cfg, *gpu};
-            return eval_reasoning(dec, test, tok, gpu_batch, max_new, 8, false, vote, t);
+            return eval_reasoning(dec, test, tok, gpu_batch, max_new, 8, !labels_path.empty(), vote, t);
         }
 #endif
-        return eval_reasoning(model, test, tok, batch, max_new, 8, false, vote, t);
+        return eval_reasoning(model, test, tok, batch, max_new, 8, !labels_path.empty(), vote, t);
     };
     const double t0 = now_seconds();
     // The scores, and with more than one try the effort report: per level
@@ -844,6 +849,22 @@ int cmd_eval_reasoning(Args& a) {
     const EvalResult r = evaluate(calc::Mode::none);
     if (tool != calc::Mode::none) std::printf("without tool:\n");
     report(r);
+    if (!labels_path.empty()) {
+        // The run without the calculator: its results would stand in for the
+        // model's own arithmetic. Each problem keeps its place in the file.
+        std::vector<size_t> ids = vote.problem_ids;
+        for (size_t i = ids.size(); i < test.size(); ++i) ids.push_back(i);
+        auto str = [](const std::string& s) { return "\"" + labels::json_escape(s) + "\""; };
+        const std::string settings = "{\"ckpt\":" + str(ckpt) + ",\"test\":" + str(test_path) +
+                                     ",\"effort\":" + str(r.effort) + ",\"max_new\":" + std::to_string(max_new) +
+                                     ",\"tool\":\"none\",\"as_engine\":" + (as_engine ? "true" : "false") +
+                                     ",\"gpu\":" + (use_gpu ? "true" : "false") + ",\"matmul\":" + str(matmul) +
+                                     ",\"labelled\":\"first try\"}";
+        const labels::LabelSummary s = labels::write_labels(labels_path, settings, test, r.completions, ids,
+                                                            [&](const std::string& c) { return tok.encode(c); });
+        s.print(labels::kRunTokens);
+        std::printf("labels: %s\n", labels_path.c_str());
+    }
     if (tool != calc::Mode::none) {
         const EvalResult assisted = evaluate(tool);
         std::printf("with calculator:\n");

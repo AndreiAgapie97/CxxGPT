@@ -180,6 +180,26 @@ during training).
   `#### ` line. The model can dodge the block with a near-copy (another
   apostrophe in the same sentence); unlikelihood training (issue #34) is
   the training-side fix.
+- `--labels FILE.jsonl` (issue #16, `src/failure_labels.h`) says why each
+  first try is wrong, by rules anyone can check:
+  - `correct`;
+  - `unfinished`: no `#### ` line before `--max-new` ran out;
+  - `format`: the right number, written another way (`$18`);
+  - `arithmetic`: a written calculation that is wrong, checked by the
+    exact calculator (`480 * 480 = 112,400`), before any sign of the
+    right number;
+  - `passed_gold`: the right number appears in the work, then another
+    answer is given (18 dollars a day, then "in a week, 18 * 7 = 126");
+  - `other`: wrong with no wrong calculation in sight: a wrong plan or
+    goal, for a person to tell.
+
+  The file has a line with the run's settings, then one line per problem
+  with its label, every checked calculation, its flags and the text, so
+  each label can be audited. The flags count loops (a line written twice,
+  or a run of 8 tokens repeated) and numbers from outside the question;
+  they fire on right answers too, so the summary reports them for right
+  and wrong answers apart. Labels describe the run without the
+  calculator.
 
 ### Generated word problems
 
