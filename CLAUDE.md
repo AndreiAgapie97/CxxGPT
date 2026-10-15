@@ -113,6 +113,14 @@ Reasoning is the first capability we go after.
   `DEV=1 scripts/night.sh` validates on it instead of the test set.
   `cxxgpt leak-check` finds questions sharing a 13-word run with training
   files. Night 1's weights have already seen the dev questions.
+- `cxxgpt qa-context` (`src/qa_context.h`, #15): for every trained answer
+  token, the exact share of `sample_batch`'s random windows that show its
+  whole question, part of it, or none. At `--seq 512` (2026-10-15): GSM8K
+  74/15/11%, MetaMath 63/14/23%, OpenMath2 40/12/48% (37% of its
+  documents are longer than a window). OpenMath2 gives 399M of the mix's
+  ~474M trained math tokens, so about 44% of them train with no question
+  in view. Whether that hurts accuracy needs an A/B with a question-aware
+  sampler; not tested yet.
 - `train --load-log FILE`: each layer's share per expert over every log
   interval, with a warning for an expert under 1%; `night.sh` writes
   `runs/$RUN.load.csv` and `report.sh` sums it up. `cxxgpt clone-experts`

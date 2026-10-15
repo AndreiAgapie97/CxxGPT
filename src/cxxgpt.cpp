@@ -10,6 +10,7 @@
 //       [--tries N | --effort low/medium/high] [--temp T] [--seed S]
 //                                      sample N tries per problem; the headline becomes their maj@N vote
 //       [--no-repeat N]                never write a run of N tokens twice (also on sample)
+//   cxxgpt qa-context --data a.tok,b.tok [--seq 512]   answers trained without their question
 //   cxxgpt bench-infer [--ckpt model.ckpt | model options]  ternary engine vs fp32 decode
 //
 // Run a subcommand with --help for its options.
@@ -39,6 +40,7 @@
 #include "loss_mask.h"
 #include "model.h"
 #include "profile.h"
+#include "qa_context.h"
 #include "reasoning.h"
 #include "tokenizer.h"
 #include "train.h"
@@ -210,6 +212,35 @@ int cmd_leak_check(Args& a) {
             std::printf("  question %zu: %s%s\n", q + 1, example.c_str(), cut ? "..." : "");
             ++shown;
         }
+    }
+    return 0;
+}
+
+// How often a random training window trains an answer without its whole
+// question in view (qa_context.h, issue #15), for each token file.
+int cmd_qa_context(Args& a) {
+    const std::string data = a.str("data");
+    const int seq = a.integer_int("seq", 512);
+    a.done();
+    CHECK(!data.empty() && seq > 0,
+          "usage: cxxgpt qa-context --data A.tok,B.tok,... [--seq 512]\n"
+          "For every trained (masked-in) token: the share of training windows of --seq tokens\n"
+          "that show its whole question, part of it, or none of it.");
+    for (const std::string& path : split(data, ',')) {
+        const TokenData d = TokenData::load(path);
+        const QaContext q = qa_context(d, seq);
+        if (d.mask.empty()) {
+            std::printf("%s: no mask (every token is trained): no questions to lose\n", path.c_str());
+            continue;
+        }
+        auto pct = [&](uint64_t part) { return 100.0 * double(part) / double(std::max<uint64_t>(1, q.pairs)); };
+        std::printf("%s: %llu documents (mean %.0f tokens, %llu longer than %d), %llu trained tokens\n", path.c_str(),
+                    static_cast<unsigned long long>(q.documents),
+                    double(q.doc_tokens) / double(std::max<uint64_t>(1, q.documents)),
+                    static_cast<unsigned long long>(q.too_long), seq + 1,
+                    static_cast<unsigned long long>(q.trained));
+        std::printf("  windows of %d: whole question in view %.1f%%, part of it %.1f%%, none of it %.1f%%\n", seq,
+                    pct(q.whole), pct(q.partial), pct(q.none));
     }
     return 0;
 }
@@ -1451,6 +1482,7 @@ int main(int argc, char** argv) {
         {"eval-reasoning", cmd_eval_reasoning, "exact-answer accuracy on a problems file"},
         {"bench-infer", cmd_bench_infer, "times the ternary inference engine against fp32 decoding"},
         {"leak-check", cmd_leak_check, "finds questions that share a 13-word run with training files"},
+        {"qa-context", cmd_qa_context, "how often training windows cut an answer off from its question"},
     };
     const std::string cmd = argc > 1 ? argv[1] : "";
     Args a(argc, argv, 2);

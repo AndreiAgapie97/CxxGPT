@@ -215,6 +215,11 @@ printf '%s\n' '{"question":"q","answer":"work","final":9007199254740993}' 'broke
 grep -q '3 problems (4 without a usable answer skipped)' "$TEST_DIR/numeric.log"
 "$CXXGPT_TRAINING_CLI" numeric-labels "$TEST_DIR/numeric.txt"
 awk -F '\t' 'NR==1 && $5!="9007199254740993" {exit 1} NR==2 && $5!="1200" {exit 1} NR==3 && $5!="-0.0012" {exit 1} END {if(NR!=3)exit 1}' "$TEST_DIR/numeric.txt"
+# qa-context: prep-qa's masked problems, and a file without a mask.
+"$CXXGPT" qa-context --data "$TEST_DIR/numeric.tok,$TEST_DIR/bos.tok" --seq 4 > "$TEST_DIR/qa-context.log"
+grep -q 'numeric.tok: 3 documents' "$TEST_DIR/qa-context.log"
+grep -q '^  windows of 4: whole question in view .*%, part of it .*%, none of it .*%$' "$TEST_DIR/qa-context.log"
+grep -q 'bos.tok: no mask' "$TEST_DIR/qa-context.log"
 # Cross the streaming block size without a newline; threaded cuts preserve bytes.
 python3 - "$TEST_DIR/one-line.txt" <<'PYLINE'
 import pathlib,sys

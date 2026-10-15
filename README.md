@@ -145,6 +145,7 @@ during training).
 | `sample` | generates text from a prompt (`--tools` as for `eval-reasoning`) |
 | `bench-infer` | times the ternary inference engine against an fp32 baseline |
 | `leak-check` | finds questions (such as the GSM8K dev set) that share a run of 13 words with training files |
+| `qa-context` | how often random training windows train an answer without its question in view (`--data A.tok,B.tok --seq 512`) |
 
 ### Many tries and a vote
 
