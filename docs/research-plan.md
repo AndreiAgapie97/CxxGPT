@@ -489,7 +489,10 @@ questions, final answers, validation tokens and test set stay the same across
 fractions with the same seed. At 0, every output is byte-identical to the old
 generator. At a nonzero fraction it also writes `OUT.train.text` so the owner
 can inspect the planted statements. Errors change one digit, omit a carry or
-borrow, or use a wrong operator; corrections use several short phrasings.
+borrow, or redo a whole calculation with one operator slipped (`4+3+0` as
+`4*3+0`, `20-8` as `20+8`); in `cmp`, which has no calculations, the deciding
+relation is turned around (`2<3` as `2>3`) or a digit count is off by one.
+Corrections use several short phrasings.
 
 The reserved text markers `[[no-loss]]` and `[[/no-loss]]` surround exactly
 the wrong statement, excluding its following punctuation and correction.

@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cctype>
 #include <map>
+#include <tuple>
 
 #include "../src/reasoning.h"
 #include "../src/loss_mask.h"
@@ -200,49 +201,94 @@ inline bool multiplication_steps_correct(const Problem& p) {
     return multipliers.size()==1 || statements.back()==partials+"="+std::to_string(a*b);
 }
 
+// cmp's planted statement must be false for the question "max(A,B)": a
+// deciding digit pair "x<y" with the relation turned around, or digit
+// counts "N digits vs M" that are not A's and B's.
+inline bool false_comparison(const std::string& question, const std::string& s) {
+    const size_t comma = question.find(',');
+    const std::string a = question.substr(4, comma - 4), b = question.substr(comma + 1, question.size() - comma - 2);
+    const std::string vs = " digits vs ";
+    const size_t at = s.find(vs);
+    if (at != std::string::npos) {
+        const unsigned long n = std::stoul(s.substr(0, at)), m = std::stoul(s.substr(at + vs.size()));
+        return n >= 1 && m >= 1 && (n != a.size() || m != b.size());
+    }
+    if (s.size() != 3 || !std::isdigit(static_cast<unsigned char>(s[0])) ||
+        !std::isdigit(static_cast<unsigned char>(s[2])) || s[0] == s[2]) return false;
+    return s[1] == (s[0] > s[2] ? '<' : '>');
+}
+
+// A planted problem has one marked statement that is really wrong, then a
+// correction that is right, the rest of the solution unchanged, the same
+// answer, and a loss mask that hides exactly the wrong statement.
+inline void check_planted_mistake(const Problem& plain, const Problem& planted) {
+    constexpr size_t npos = std::string::npos;
+    const char* steps = planted.steps.c_str();
+    EXPECT(planted.question == plain.question && planted.answer == reasoning_check::solve(plain) &&
+           extract_answer(planted.completion()) == plain.answer, "mistake changed the true answer: %s", steps);
+    const size_t begin = planted.steps.find(kNoLossBegin), close = planted.steps.find(kNoLossEnd);
+    EXPECT(begin != npos && close != npos && planted.steps.find(kNoLossBegin, begin + 1) == npos,
+           "solution does not have exactly one wrong span: %s", steps);
+    if (begin == npos || close == npos) return;
+    const std::string wrong = planted.steps.substr(begin + kNoLossBegin.size(), close - begin - kNoLossBegin.size());
+    const size_t correction = planted.steps.find(": ", close) + 2;  // after "Wait: " and the like
+    if (plain.task == "cmp") {
+        EXPECT(false_comparison(plain.question, wrong), "planted comparison is not false: %s", steps);
+    } else {
+        // "b=a+3=4+3=8": what is worked out lies between the last two '='.
+        const size_t eq = wrong.rfind('=');
+        EXPECT(eq != npos && eq > 0, "planted statement has no result: %s", steps);
+        if (eq == npos || eq == 0) return;
+        const size_t prefix_eq = wrong.rfind('=', eq - 1);
+        const size_t from = prefix_eq == npos ? 0 : prefix_eq + 1;
+        const std::string lhs = wrong.substr(from, eq - from);
+        EXPECT(lhs.find_first_of("+-*/") != npos, "planted a statement that works nothing out: %s", steps);
+        const int64_t expected = reasoning_check::eval(lhs);
+        EXPECT(std::stoll(wrong.substr(eq + 1)) != expected, "planted value is actually right: %s", steps);
+        const std::string right = wrong.substr(0, eq + 1) + std::to_string(expected);
+        EXPECT(planted.steps.compare(correction, right.size(), right) == 0,
+               "correction line is numerically wrong: %s", steps);
+    }
+    std::string recovered = planted.steps;
+    recovered.erase(begin, correction - begin);
+    EXPECT(recovered == plain.steps, "other solution steps changed: %s", steps);
+    Tokenizer tok;
+    std::vector<uint16_t> ids;
+    std::vector<uint8_t> mask;
+    encode_loss_marked(planted.completion(), tok, ids, mask);
+    std::string hidden;
+    for (size_t j = 0; j < ids.size(); ++j)
+        if (!mask[j]) hidden += tok.token_bytes(ids[j]);
+    EXPECT(hidden == wrong, "masked token bytes differ from precisely the wrong step: %s", steps);
+}
+
 inline void test_planted_mistakes() {
-    Rng problems(551), errors(19), repeat_errors(19);
+    // The wrong-operator examples documented in wrong_value.
+    using mistake_detail::kWrongOperator;
+    Rng unused(1);
+    for (const auto& [expr, correct, wrong] : std::vector<std::tuple<std::string, int64_t, int64_t>>{
+             {"7*4", 28, 11}, {"4+3+0", 7, 12}, {"20-8", 12, 28}, {"80+12", 92, 68}, {"12/3", 4, 36},
+             {"2+2", 4, -1}, {"7+12", 19, -1}})
+        EXPECT(mistake_detail::wrong_value(expr, correct, kWrongOperator, unused) == wrong,
+               "wrong operator in %s", expr.c_str());
     int checked = 0;
-    for (const auto& task : reasoning_tasks())
-        for (int difficulty = 1; difficulty <= 5; ++difficulty)
-            for (int i = 0; i < 70; ++i) {
-                const Problem plain = make_problem(task, difficulty, problems, {true, true});
-                Problem planted = plain, repeat = plain;
-                plant_mistake(planted, errors);
-                plant_mistake(repeat, repeat_errors);
-                EXPECT(planted.steps == repeat.steps, "mistakes are not repeatable");
-                EXPECT(planted.question == plain.question && planted.answer == reasoning_check::solve(plain) &&
-                       extract_answer(planted.completion()) == plain.answer, "mistake changed the true answer");
-                const size_t begin = planted.steps.find(kNoLossBegin), close = planted.steps.find(kNoLossEnd);
-                EXPECT(begin != std::string::npos && close != std::string::npos &&
-                       planted.steps.find(kNoLossBegin, begin + 1) == std::string::npos,
-                       "solution does not have exactly one wrong span");
-                if (begin == std::string::npos || close == std::string::npos) continue;
-                const std::string wrong = planted.steps.substr(begin + kNoLossBegin.size(),
-                                                               close - begin - kNoLossBegin.size());
-                const size_t eq = wrong.rfind('=');
-                const size_t prefix_eq = eq ? wrong.rfind('=', eq - 1) : std::string::npos;
-                const std::string lhs = wrong.substr(prefix_eq == std::string::npos ? 0 : prefix_eq + 1,
-                                                     eq - (prefix_eq == std::string::npos ? 0 : prefix_eq + 1));
-                const int64_t expected = lhs.rfind("max(", 0) == 0 ? std::stoll(plain.answer) : reasoning_check::eval(lhs);
-                EXPECT(std::stoll(wrong.substr(eq + 1)) != expected, "planted value is actually right");
-                const size_t correction = planted.steps.find(": ", close) + 2;
-                const std::string right = wrong.substr(0, eq + 1) + std::to_string(expected);
-                EXPECT(planted.steps.compare(correction, right.size(), right) == 0,
-                       "correction line is numerically wrong: %s", planted.steps.c_str());
-                std::string recovered = planted.steps;
-                recovered.erase(begin, correction - begin);
-                EXPECT(recovered == plain.steps || (task == "cmp" && recovered ==
-                       plain.question + "=" + plain.answer + "; " + plain.steps), "other solution steps changed");
-                Tokenizer tok;
-                std::vector<uint16_t> ids;
-                std::vector<uint8_t> mask;
-                encode_loss_marked(planted.completion(), tok, ids, mask);
-                std::string hidden;
-                for (size_t j = 0; j < ids.size(); ++j) if (!mask[j]) hidden += tok.token_bytes(ids[j]);
-                EXPECT(hidden == wrong, "masked token bytes differ from precisely the wrong step");
-                ++checked;
-            }
+    // The default formats and chain_plan + expr_rewrite write different
+    // statements (lookups first, ':' after expr steps): check both.
+    for (const Formats& formats : {Formats{}, Formats{true, true}}) {
+        Rng problems(551), errors(19), repeat_errors(19);
+        for (const auto& task : reasoning_tasks())
+            for (int difficulty = 1; difficulty <= 5; ++difficulty)
+                for (int i = 0; i < 70; ++i) {
+                    const Problem plain = make_problem(task, difficulty, problems, formats);
+                    Problem planted = plain, repeat = plain;
+                    const bool planted_one = plant_mistake(planted, errors);
+                    plant_mistake(repeat, repeat_errors);
+                    EXPECT(planted_one, "no mistake fits: %s", plain.steps.c_str());
+                    EXPECT(planted.steps == repeat.steps, "mistakes are not repeatable");
+                    check_planted_mistake(plain, planted);
+                    ++checked;
+                }
+    }
     // Deliberately put annotations inside a word that BPE can merge. Every
     // mask-zero token must decode to the wrong span, including its edges.
     Tokenizer bpe;
