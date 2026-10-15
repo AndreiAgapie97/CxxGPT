@@ -192,7 +192,8 @@ inline void test_calc() {
     }
     EXPECT(fit >= 200 && over >= 200, "calculator boundary cases: %zu fit, %zu overflow", fit, over);
 
-    for (const char* expr : {"16 x 7 = ", "16 * 7 = ", "16 × 7 = ", "She has 16 x 7 = ", "Then: 16 * 7 = ", "next; 16 * 7 = "})
+    for (const char* expr : {"16 x 7 = ", "16 * 7 = ", "16 × 7 = ", "She has 16 x 7 = ", "Then: 16 * 7 = ", "next; 16 * 7 = ",
+                             "16 x 7 = $", "$16 x 7 = $"})
         EXPECT(calc::response(expr, calc::Mode::plain) == std::optional<std::string>("112"), "plain multiplication: %s", expr);
     EXPECT(calc::response("-3 * 2 = ", calc::Mode::plain) == std::optional<std::string>("-6"), "unary plain expression");
     for (const char* expr : {"2^3 + 4 = ", "2 ^ 3 + 4 = ", "2 @ 3 + 4 = ", "2 & 3 + 4 = ", "2 X 3 + 4 = ",
@@ -269,19 +270,44 @@ inline void test_calc_hook() {
     const auto disabled = generate(m, {{kBos}}, 12, [](const auto&) { return false; });
     EXPECT(tok.decode(disabled[0]) == "<<48/2=wrong", "default generation unchanged");
 
-    // Punctuation merges can contain both '=' and a trailing '$'. The
-    // generated text must retain that suffix after the inserted result.
-    Tokenizer bpe; bpe.train("=$ =$ =$ =$ =$ =$", 257);
-    EXPECT(bpe.encode("=$").size() == 1, "BPE trigger-tail fixture");
-    CalcFakeModel merged; merged.cfg.vocab = bpe.vocab_size(); merged.cfg.seq_len = 60;
-    merged.script = {bpe.encode("<<48/2=24>>$ done\n")};
-    merged.prediction = merged.script;
-    const auto prefix = bpe.encode("<<48/2");
-    merged.prediction[0][prefix.size()] = bpe.encode("=$")[0];
-    for (size_t i = prefix.size() + 1; i < prefix.size() + 5; ++i) merged.prediction[0][i] = '?';
-    calc::Counts merged_calls;
-    const auto merged_out = generate(merged, {{kBos}}, 50, [](const auto& ids) { return ids.back() == '\n'; },
-                                     0, nullptr, calc::Mode::notes, &bpe, &merged_calls);
-    EXPECT(bpe.decode(merged_out[0]) == "<<48/2=24>>$ done\n" && merged_calls.fired == 1,
-           "BPE trigger inside token preserves trailing text");
+    // A merged BPE token can hold the trigger and the model's own start of
+    // the answer (the tokenizer joins a space to the punctuation after it,
+    // so "= $150" arrives as " =", " $"). The calculator keeps `kept`, the
+    // start of the token, and puts its result in place of the rest: nothing
+    // of the rest comes back, so "= $150" never becomes "= 150$150".
+    struct Merged { const char* merge; calc::Mode mode; const char* before; const char* kept; const char* result; };
+    const Merged merges[] = {
+        {"=$", calc::Mode::notes, "<<48/2", "=", "24>>"},
+        {"=-", calc::Mode::notes, "<<3-5", "=", "-2>>"},
+        {"=.", calc::Mode::notes, "<<1/2", "=", "0.5>>"},
+        {" $", calc::Mode::plain, "16 x 7 =", " $", "112"},
+        {" -", calc::Mode::plain, "3 - 5 =", " ", "-2"},
+    };
+    for (const Merged& c : merges) {
+        // "a" between copies keeps each copy its own chunk, so the only
+        // pair to merge is the one we want.
+        std::string corpus;
+        for (int i = 0; i < 8; ++i) corpus += std::string("a") + c.merge;
+        Tokenizer bpe;
+        bpe.train(corpus, 257);
+        EXPECT(bpe.encode(c.merge).size() == 1, "BPE fixture merges \"%s\"", c.merge);
+        // The model writes `before`, then the merged token; poison follows
+        // where the result's tokens go, then the model's continuation.
+        auto replacement = bpe.encode(c.kept);
+        const auto answer = bpe.encode(c.result), after = bpe.encode(" ok\n");
+        replacement.insert(replacement.end(), answer.begin(), answer.end());
+        std::vector<int> wanted = bpe.encode(c.before);
+        wanted.push_back(bpe.encode(c.merge)[0]);
+        wanted.insert(wanted.end(), replacement.size() - 1, '?');
+        wanted.insert(wanted.end(), after.begin(), after.end());
+        CalcFakeModel m; m.cfg.vocab = bpe.vocab_size(); m.cfg.seq_len = 60;
+        m.script = {wanted}; m.prediction = m.script;
+        calc::Counts calls;
+        const auto out = generate(m, {{kBos}}, 50, [](const auto& ids) { return ids.back() == '\n'; },
+                                  0, nullptr, c.mode, &bpe, &calls);
+        const std::string expected = std::string(c.before) + c.kept + c.result + " ok\n";
+        EXPECT(bpe.decode(out[0]) == expected && calls.fired == 1 && calls.malformed == 0,
+               "merged token \"%s\": the result replaces its rest, got \"%s\"", c.merge, bpe.decode(out[0]).c_str());
+        EXPECT(std::equal(out[0].begin(), out[0].end() - 1, m.received[0].begin()), "merged token \"%s\" fed back", c.merge);
+    }
 }

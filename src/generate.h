@@ -81,17 +81,19 @@ std::vector<std::vector<int>> generate(Decoder& model, const std::vector<std::ve
                 pick_token(logits + size_t(b) * model.cfg.vocab, model.cfg.vocab, temperature, rng);
             if (tool != calc::Mode::none && !injected && t < tokenizer->vocab_size()) {
                 const std::string& bytes = tokenizer->token_bytes(t);
-                // A BPE token can carry the trigger and more punctuation.
-                // Split that token so the result precedes its untouched tail.
-                for (size_t end = 1; end <= bytes.size(); ++end) {
+                // A BPE token can carry the trigger and more punctuation, as
+                // in " -" or "=.". The result replaces the rest of the token:
+                // that rest is the model's own start of the answer (a sign, a
+                // point), and keeping it would garble the number. Longest
+                // prefix first, so that " $" keeps its "$" (" = $" is a
+                // trigger too) while " -" falls back to its " ".
+                for (size_t end = bytes.size(); end >= 1; --end) {
                     const auto result = calc::response(texts[b] + bytes.substr(0, end), tool);
                     if (!result) continue;
                     if (result->empty()) { if (counts) ++counts->malformed; break; }
                     auto replacement = tokenizer->encode(bytes.substr(0, end));
                     const auto answer = tokenizer->encode(*result);
-                    const auto tail = tokenizer->encode(bytes.substr(end));
                     replacement.insert(replacement.end(), answer.begin(), answer.end());
-                    replacement.insert(replacement.end(), tail.begin(), tail.end());
                     // Do not insert half a result at the context/token cap.
                     if (replacement.size() <= size_t(total - pos)) {
                         t = replacement[0]; pending[b] = std::move(replacement); next[b] = 1;

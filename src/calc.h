@@ -184,8 +184,12 @@ inline std::optional<std::string> response(std::string_view text, Mode mode) {
         if (begin == std::string_view::npos || text.find(">>", begin) != std::string_view::npos) return {};
         expr = text.substr(begin + 2, text.size() - begin - 3);
     } else {
-        if (!text.ends_with(" = ")) return {};
-        const size_t end = text.size() - 3;
+        // " = $" is a trigger too: in "$50 x 3 = $150" the number goes
+        // after the "$".
+        size_t end = 0;
+        if (text.ends_with(" = ")) end = text.size() - 3;
+        else if (text.ends_with(" = $")) end = text.size() - 4;
+        else return {};
         size_t begin = end;
         // Only arithmetic bytes, spaces and multiplication aliases belong
         // to the suffix. Never rescue part of an unsupported expression.
