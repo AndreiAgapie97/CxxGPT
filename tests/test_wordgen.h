@@ -125,7 +125,10 @@ inline void check_inputs_written(const WordProblem& generated) {
     for (int64_t added : generated.additions) inputs.push_back(Rational(added, 100));
     std::vector<Rational> written = written_numbers(generated.problem.question);
     for (const Rational& value : inputs) {
-        const auto match = std::find(written.begin(), written.end(), value);
+        // find_if, not find: Microsoft's library vectorizes std::find on
+        // small trivially copyable types and rejects a 16-byte one.
+        const auto match =
+            std::find_if(written.begin(), written.end(), [&](const Rational& w) { return w == value; });
         EXPECT(match != written.end(), "story input %g is not written in the question: %s",
                double(value.n) / double(value.d), generated.problem.question.c_str());
         if (match != written.end()) written.erase(match);
