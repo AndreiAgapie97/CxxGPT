@@ -31,5 +31,5 @@ What the columns mean:
 
 | Run | Ended | From | Model | Settings | Steps | Tokens (B) | Total (B) | Train h | GPU h | kWh | Val loss | Exam /250 | Test /1319 | Note |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| night1 | 2026-10-14 | new | 267M (98M active), MoE 8 x top-2 | lr 1.50e-03, tf32, cuBLAS attention | 5352 of 5700 | 0.351 | 0.351 | 7.25 | - | - | 1.1065 | 20 (best 20) | - | Under WSL2, before the native Windows port. The first night: from random weights. |
-| night2 | 2026-10-15 | night1 | 267M (98M active), MoE 8 x top-2 | lr 1.50e-03, bf16, fused tensor-core attention | 9640 of 9640 | 0.632 | 0.983 | 6.83 | 6.75 | 0.69 | 0.9757 | 37 (best 44) | - | Native Windows, from night 1's weights. The re-warmed learning rate first shook them (exam 4-9 by step 2500, val 1.25); they recovered by step ~4500 and passed night 1 from step 5500. |
+| night1 | 2026-10-14 | new | 267M (98M active), MoE 8 x top-2 | lr 1.50e-03, tf32, cuBLAS attention | 5352 of 5700 | 0.351 | 0.351 | 7.25 | - | - | 1.1065 | 20 (best 20) | 92 / 1319 (7.0%) | Under WSL2, before the native Windows port. The first night: from random weights. |
+| night2 | 2026-10-15 | night1 | 267M (98M active), MoE 8 x top-2 | lr 1.50e-03, bf16, fused tensor-core attention | 9640 of 9640 | 0.632 | 0.983 | 6.83 | 6.75 | 0.69 | 0.9757 | 37 (best 44) | 202 / 1319 (15.3%) | Native Windows, from night 1's weights. The re-warmed learning rate first shook them (exam 4-9 by step 2500, val 1.25); they recovered by step ~4500 and passed night 1 from step 5500. |
