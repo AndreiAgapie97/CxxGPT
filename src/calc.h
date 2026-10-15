@@ -3,25 +3,73 @@
 
 #include <cstdint>
 #include <limits>
+#include <numeric>
 #include <optional>
 #include <string>
 #include <string_view>
 
 namespace calc {
 
-// Keep reduced values in signed 64 bits. Wider intermediates let us detect
-// overflow before narrowing; unsupported sizes fail rather than round.
+// A fraction num/den, always in lowest terms, with den > 0. Both parts fit
+// in signed 64 bits and num is never INT64_MIN, so -num is always safe.
+// Every step is exact: a value that does not fit is rejected, never rounded.
+// There is no 128-bit arithmetic: 128-bit division needs runtime helpers
+// (__divti3, __modti3) that the Windows (MSVC) runtime does not ship.
 struct Rational { int64_t num = 0, den = 1; };
 
-inline std::optional<Rational> reduced(__int128 num, __int128 den) {
+constexpr int64_t kMin = std::numeric_limits<int64_t>::min();
+
+// a * b and a + b, or nothing when the exact result does not fit (INT64_MIN
+// counts as not fitting, see Rational).
+inline std::optional<int64_t> mul(int64_t a, int64_t b) {
+    int64_t r = 0;
+    if (__builtin_mul_overflow(a, b, &r) || r == kMin) return {};
+    return r;
+}
+inline std::optional<int64_t> add(int64_t a, int64_t b) {
+    int64_t r = 0;
+    if (__builtin_add_overflow(a, b, &r) || r == kMin) return {};
+    return r;
+}
+
+// num/den in lowest terms (den > 0). std::gcd works on |num|.
+inline Rational lowest(int64_t num, int64_t den) {
+    const int64_t g = std::gcd(num, den);
+    return {num / g, den / g};
+}
+
+// a * b. Cancelling crosswise first (a.num with b.den, b.num with a.den)
+// leaves the result in lowest terms, so the two products are exactly the
+// answer's numerator and denominator: one overflows only if the answer
+// does not fit.
+inline std::optional<Rational> times(Rational a, Rational b) {
+    const int64_t g1 = std::gcd(a.num, b.den), g2 = std::gcd(b.num, a.den);
+    const auto num = mul(a.num / g1, b.num / g2), den = mul(a.den / g2, b.den / g1);
+    if (!num || !den) return {};
+    return Rational{*num, *den};
+}
+
+// a / b is a times b turned upside down (keeping the sign on top).
+inline std::optional<Rational> divide(Rational a, Rational b) {
+    if (b.num == 0) return {};
+    return times(a, b.num < 0 ? Rational{-b.den, -b.num} : Rational{b.den, b.num});
+}
+
+// a + b over the smallest common denominator (Knuth's method). With
+// g = gcd(a.den, b.den), the scaled numerators and their sum are the
+// answer's numerator times a factor of g. They must fit too, which only
+// rejects an answer that would fit for values close to 2^63.
+inline std::optional<Rational> plus(Rational a, Rational b) {
+    const int64_t g = std::gcd(a.den, b.den);
+    const auto left = mul(a.num, b.den / g), right = mul(b.num, a.den / g);
+    if (!left || !right) return {};
+    const auto sum = add(*left, *right);
+    if (!sum) return {};
+    // a and b are in lowest terms, so the sum can share a factor only with g.
+    const int64_t g2 = std::gcd(*sum, g);
+    const auto den = mul(a.den / g, b.den / g2);
     if (!den) return {};
-    if (den < 0) num = -num, den = -den;
-    __int128 a = num < 0 ? -num : num, b = den;
-    while (b) { const auto r = a % b; a = b; b = r; }
-    num /= a; den /= a;
-    constexpr auto limit = std::numeric_limits<int64_t>::max();
-    if (num < -__int128(limit) || num > limit || den > limit) return {};
-    return Rational{int64_t(num), int64_t(den)};
+    return Rational{*sum / g2, *den};
 }
 
 class Parser {
@@ -31,12 +79,11 @@ class Parser {
     int depth = 0;
     void space() { while (pos < text.size() && std::string_view(" \t\n\r\f\v").find(text[pos]) != std::string_view::npos) ++pos; }
     Rational combine(Rational a, Rational b, char op) {
-        const __int128 an = a.num, ad = a.den, bn = b.num, bd = b.den;
         std::optional<Rational> r;
-        if (op == '+') r = reduced(an * bd + bn * ad, ad * bd);
-        if (op == '-') r = reduced(an * bd - bn * ad, ad * bd);
-        if (op == '*') r = reduced(an * bn, ad * bd);
-        if (op == '/') r = reduced(an * bd, ad * bn);
+        if (op == '+') r = plus(a, b);
+        if (op == '-') r = plus(a, Rational{-b.num, b.den});
+        if (op == '*') r = times(a, b);
+        if (op == '/') r = divide(a, b);
         if (!r) valid = false;
         return r.value_or(Rational{});
     }
@@ -51,21 +98,23 @@ class Parser {
             ++pos; r = expression(); space();
             if (pos == text.size() || text[pos++] != ')') valid = false;
         } else {
-            __int128 num = 0, den = 1;
+            int64_t num = 0, den = 1;
             bool decimal = false, digit = false;
-            constexpr auto limit = std::numeric_limits<int64_t>::max();
             while (pos < text.size()) {
                 const char c = text[pos];
                 if (c == '.' && !decimal) { decimal = true; ++pos; continue; }
                 if (c < '0' || c > '9') break;
-                digit = true; ++pos; num = num * 10 + c - '0';
-                if (decimal) den *= 10;
-                if (num > limit || den > limit) { valid = false; break; }
+                digit = true; ++pos;
+                // num = num * 10 + digit, and one more decimal place after
+                // the point, unless that no longer fits.
+                const auto times10 = mul(num, 10);
+                const auto next = times10 ? add(*times10, c - '0') : std::optional<int64_t>();
+                const auto places = decimal ? mul(den, 10) : std::optional<int64_t>(den);
+                if (!next || !places) { valid = false; break; }
+                num = *next; den = *places;
             }
             if (!digit) valid = false;
-            const auto value = reduced(num, den);
-            if (!value) valid = false;
-            r = value.value_or(Rational{});
+            if (valid) r = lowest(num, den);
         }
         --depth; return r;
     }
@@ -101,11 +150,23 @@ inline std::optional<std::string> evaluate(std::string_view expression) {
     while (d % 5 == 0) d /= 5;
     // A repeating decimal cannot be printed exactly in GSM8K's format.
     if (d != 1) return {};
-    const uint64_t n = uint64_t(r->num < 0 ? -r->num : r->num);
-    std::string out = (r->num < 0 ? "-" : "") + std::to_string(n / r->den);
-    __int128 rest = n % r->den;
+    const uint64_t n = uint64_t(r->num < 0 ? -r->num : r->num), den = uint64_t(r->den);
+    std::string out = (r->num < 0 ? "-" : "") + std::to_string(n / den);
+    uint64_t rest = n % den;
     if (rest) out += '.';
-    while (rest) { rest *= 10; out += char('0' + rest / r->den); rest %= r->den; }
+    while (rest) {
+        // The next digit is 10 * rest / den, but 10 * rest may not fit in
+        // 64 bits. So add rest ten times, taking den away whenever the sum
+        // reaches it: the sum stays below 2 * den, which always fits.
+        int digit = 0;
+        uint64_t sum = 0;
+        for (int k = 0; k < 10; ++k) {
+            sum += rest;
+            if (sum >= den) { sum -= den; ++digit; }
+        }
+        out += char('0' + digit);
+        rest = sum;
+    }
     return out;
 }
 

@@ -31,8 +31,13 @@ calls remain unchanged, letting the model continue. Numeric overflow and
 division by zero also count as malformed. Reduced numerators and denominators
 must fit in signed 64 bits (excluding its asymmetric minimum); literals must
 fit before reduction. Expressions are limited to 4096 bytes and 128 nested
-parentheses/signs. Wider intermediates detect overflow before narrowing;
-there is no floating-point rounding in the evaluator.
+parentheses/signs. All arithmetic is in 64-bit integers with overflow
+checks (`__builtin_mul_overflow`, `__builtin_add_overflow`), cancelling
+common factors before multiplying, so a product overflows only when the
+exact answer does not fit. An addition also checks its scaled numerators,
+which can reject an answer that would fit only for values close to 2^63.
+There is no floating-point rounding and no 128-bit arithmetic (128-bit
+division needs runtime helpers that the Windows MSVC runtime lacks).
 
 The plain detector uses the arithmetic suffix before the exact delimiter
 ` = `. It requires an operator; a bare `24 = ` or prose assignment does not
