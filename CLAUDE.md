@@ -40,6 +40,21 @@ Reasoning is the first capability we go after.
   test levels (`gen-reasoning --chain-plan`: chain solutions look the
   variables up first, which more than doubles chain accuracy). `cxxgpt
   prep-qa` turns GSM8K-style JSON Lines into the same format.
+  `gen-reasoning --mistakes P` plants one wrong statement and its
+  correction in a share P of the training solutions; the wrong statement
+  stays visible but gets no loss (`[[no-loss]]` spans, `src/loss_mask.h`,
+  also read by `text2tok`). Validation and test stay clean.
+- `src/calc.h` (`--tools calc-notes|calc-plain` on `sample` and
+  `eval-reasoning`): an exact calculator (fractions, 64-bit, no rounding)
+  that finishes the arithmetic the model starts (`<<48/2=` or `16 x 7 = `);
+  `eval-reasoning` then prints the score without and with it, and the call
+  counts. Neither mode fires on the curriculum's `a*b=c` steps
+  (docs/calculator.md).
+- `eval-reasoning --tries N --temp T --seed S` (or `--effort
+  low|medium|high`: 1/8/32 tries): samples each problem N times and votes
+  on the final answer (maj@N, also pass@N and the first try's score). Each
+  try has its own seed, so results do not depend on `--batch` or
+  `--limit`; every headline names its effort (`(greedy)`, `(maj@8, ...)`).
 - `src/gpu.cu` (interface `src/gpu.h`): the CUDA training backend, the
   same model op for op, fp32 with cuBLAS. `train --gpu` stores the
   products' inputs in bf16 by default (`--matmul bf16`, fp32 master
@@ -76,9 +91,25 @@ Reasoning is the first capability we go after.
   MetaMath and OpenMath2), never on the GSM8K test set, which gives
   headline numbers only.
 - `src/wordgen.h` (`cxxgpt gen-word`): GSM8K-style word problems with exact
-  answers, worked solutions with calculator notes, and sentence patterns
-  held out for the test split. First version: one quantity changed step by
-  step; the review on PR 4 lists what a second version needs.
+  answers and worked solutions (with or without calculator notes). Six
+  story shapes (a running quantity, comparisons, totals over people,
+  rates, a fraction or percentage of a part, purchases and change), 2-8
+  operations, distractor sentences, money spelled three ways; 120 sentence
+  patterns, 40 of them held out for the test split. Besides the plan's own
+  exact check, a second solver works the five newer shapes out from the
+  story's quantities alone.
+- GSM8K dev set: `scripts/get_data.py` holds out 500 GSM8K train problems
+  (fixed seed) and removes their MetaMath and OpenMath2 rewrites;
+  `DEV=1 scripts/night.sh` validates on it instead of the test set.
+  `cxxgpt leak-check` finds questions sharing a 13-word run with training
+  files. Night 1's weights have already seen the dev questions.
+- `train --load-log FILE`: each layer's share per expert over every log
+  interval, with a warning for an expert under 1%; `night.sh` writes
+  `runs/$RUN.load.csv` and `report.sh` sums it up.
+- `CMakeLists.txt`: the native Windows build of the CPU engine (clang-cl;
+  `cxxgpt.exe`, `ternary_moe.exe`, `test_engine.exe`), run in CI. The
+  vector kernels are picked at run time from what the CPU and Windows
+  support. The GPU build on Windows is the next step (the port).
 - `src/cxxgpt.cpp`: the CLI (train, sample, eval, data prep, benchmarks).
 - `scripts/get_data.py`: downloads public datasets (GSM8K, TinyStories,
   FineWeb-Edu, OpenMathInstruct-2, MetaMathQA) into `data/`, as text with
