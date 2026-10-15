@@ -36,12 +36,17 @@ inline void encode_loss_marked(std::string_view text, const Tokenizer& tok,
 // the closing marker, which is itself a safe tokenization boundary. npos
 // means the reader needs more input, subject to its existing buffer limit.
 inline size_t loss_marker_safe_split(std::string_view text, size_t end, size_t start = 0) {
+    // Search only the block [start, end), plus enough bytes past end to see a
+    // marker that starts inside it: with many threads, each block searching
+    // the rest of the buffer would read it many times over. Only a span still
+    // open at the end makes us look further, for its closing marker.
     bool ignored = false;
     size_t pos = start;
     while (pos < end) {
-        const size_t open = text.find(kNoLossBegin, pos), close = text.find(kNoLossEnd, pos);
+        const std::string_view block = text.substr(0, std::min(text.size(), end + kNoLossEnd.size() - 1));
+        const size_t open = block.find(kNoLossBegin, pos), close = block.find(kNoLossEnd, pos);
         const size_t next = std::min(open, close);
-        if (next == text.npos || next >= end) break;
+        if (next == block.npos || next >= end) break;
         CHECK((next == open && !ignored) || (next == close && ignored),
               "nested or unmatched no-loss marker");
         ignored = next == open;
