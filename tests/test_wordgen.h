@@ -1,6 +1,7 @@
 // test_wordgen.h — independent rational and double-precision references.
 #pragma once
 
+#include <algorithm>
 #include <fstream>
 #include <iterator>
 #include <limits>
@@ -99,6 +100,38 @@ inline Rational solve_shape(WordProblem::Shape shape, const std::array<int64_t, 
     return three_people ? apply('+', result, d) : result;
 }
 
+// The numbers written in a question, as exact values: "$7.50" gives 7.5,
+// "25%" gives 25, and "1/4" gives 1 and 4.
+inline std::vector<Rational> written_numbers(const std::string& question) {
+    auto digit = [&](size_t at) { return at < question.size() && question[at] >= '0' && question[at] <= '9'; };
+    std::vector<Rational> found;
+    for (size_t at = 0; at < question.size(); ++at) {
+        if (!digit(at)) continue;
+        const size_t begin = at;
+        while (digit(at) || (question[at] == '.' && digit(at + 1))) ++at;
+        found.push_back(decimal(question.substr(begin, at - begin)));
+    }
+    return found;
+}
+
+// solve_shape takes its inputs from the generator's record, so also check
+// that each one is really written in the question: a sentence pattern that
+// dropped a number would otherwise go unnoticed. Each input uses up one
+// written number, so two equal inputs must both be written.
+inline void check_inputs_written(const WordProblem& generated) {
+    const auto& in = generated.inputs;
+    std::vector<Rational> inputs = {Rational(in[0], 100), Rational(in[1], 100), Rational(in[2], 100)};
+    if (generated.shape == WordProblem::total && generated.three_people) inputs.push_back(Rational(in[3], 100));
+    for (int64_t added : generated.additions) inputs.push_back(Rational(added, 100));
+    std::vector<Rational> written = written_numbers(generated.problem.question);
+    for (const Rational& value : inputs) {
+        const auto match = std::find(written.begin(), written.end(), value);
+        EXPECT(match != written.end(), "story input %g is not written in the question: %s",
+               double(value.n) / double(value.d), generated.problem.question.c_str());
+        if (match != written.end()) written.erase(match);
+    }
+}
+
 inline void check_money(const std::string& question) {
     // Check both dollar signs and amounts spelled as "7.50 dollars".
     for (size_t at = 0; at < question.size(); ++at) {
@@ -148,10 +181,12 @@ inline std::set<int> check_solution(const WordProblem& generated, bool notes) {
     for (size_t i = 0; i < reference.size(); ++i)
         EXPECT((reference[i] == Rational(generated.values[i], 100)), "plan node %zu has a wrong value", i);
     EXPECT(decimal(p.answer) == reference.back(), "answer disagrees with independently solved plan");
-    if (generated.shape != WordProblem::chain)
+    if (generated.shape != WordProblem::chain) {
         EXPECT(decimal(p.answer) == solve_shape(generated.shape, generated.inputs, generated.additions,
                                                generated.three_people, generated.percentage),
                "answer disagrees with independently solved story shape");
+        check_inputs_written(generated);
+    }
     check_money(p.question);
     if (generated.distractor_number) {
         const Rational distractor(generated.distractor_number, 100);
