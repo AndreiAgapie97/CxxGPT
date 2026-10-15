@@ -77,9 +77,34 @@ during training).
 | `text2tok` | encodes text into a token file (parallel, streaming; `--doc-sep` splits documents) |
 | `prep-qa` | turns question/answer JSONL (GSM8K and the like) into token files with a loss mask and a test set |
 | `train` | trains or resumes a model (CPU, or GPU with `cxxgpt-gpu --gpu`) |
-| `eval-reasoning` | exact-answer accuracy per task and difficulty |
+| `eval-reasoning` | exact-answer accuracy per task and difficulty; greedy by default, or a vote over several sampled tries (below) |
 | `sample` | generates text from a prompt |
 | `bench-infer` | times the ternary inference engine against an fp32 baseline |
+
+### Many tries and a vote
+
+```sh
+./cxxgpt eval-reasoning --ckpt model.ckpt --test data/word/test.txt --tries 8 --temp 0.7 --seed 1
+```
+
+- `--tries N` samples every problem N times at temperature `--temp`
+  (above 0) and takes the most common final answer; `--effort
+  low/medium/high` is a shorthand for 1/8/32 tries (`--tries` wins).
+- With more than one try, the headline `overall` score is that vote
+  (maj@N), and an effort report follows: per level, the first sampled
+  try's accuracy, the vote's, any try's (pass@N), and the mean number of
+  distinct answers.
+- Only tries that finish their `#### answer` line vote; a problem where no
+  try finished is wrong. With one try at `--temp 0` (the default) the score
+  is exactly the greedy one.
+- Every headline names its effort: `(greedy)`, `(1 sampled try, temp 0.8,
+  seed 1)` or `(maj@8, temp 0.7, seed 1)`. Scores at different efforts
+  are different tests.
+- Each try is seeded from (`--seed`, the problem's place in the test file,
+  the try's number), so a try gives the same text whatever `--batch` and
+  `--limit` are, and try k is the same at every effort level. All of one
+  problem's tries are generated together, so `--tries` must not exceed
+  `--batch` (64 by default).
 
 ### Generated word problems
 

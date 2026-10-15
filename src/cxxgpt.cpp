@@ -7,6 +7,8 @@
 //   cxxgpt gen-reasoning --out data/reason                 synthetic reasoning data
 //   cxxgpt prep-qa --in gsm8k.jsonl --out data/gsm8k/train  Q/A JSON Lines -> problems + tokens
 //   cxxgpt eval-reasoning --ckpt model.ckpt --test FILE    exact-answer accuracy
+//       [--tries N | --effort low/medium/high] [--temp T] [--seed S]
+//                                      sample N tries per problem; the headline becomes their maj@N vote
 //   cxxgpt bench-infer [--ckpt model.ckpt | model options]  ternary engine vs fp32 decode
 //
 // Run a subcommand with --help for its options.
