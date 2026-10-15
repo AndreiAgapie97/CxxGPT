@@ -36,8 +36,10 @@ jobs:
           $installation = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -format json | ConvertFrom-Json
           if (-not $installation) { throw "No Visual Studio C++ toolchain found" }
           $version = [version]$installation.installationVersion
-          $generator = "Visual Studio $($version.Major) $($installation.catalog.productLineVersion)"
-          cmake -S . -B build -G $generator -T ClangCL -A x64
+          $generators = (cmake -E capabilities | ConvertFrom-Json).generators
+          $generator = $generators.name | Where-Object { $_ -like "Visual Studio $($version.Major) *" } | Select-Object -First 1
+          if (-not $generator) { throw "CMake has no generator for Visual Studio $($version.Major)" }
+          cmake -S . -B build -G $generator -T ClangCL -A x64 "-DCMAKE_GENERATOR_INSTANCE=$($installation.installationPath)"
       - name: Build CPU engine and tests
         run: cmake --build build --config Release --parallel
       - name: Test
