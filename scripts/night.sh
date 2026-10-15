@@ -25,7 +25,8 @@
 #        by default web text, stories, OpenMath, MetaMath and GSM8K train x4.
 #   DEV=1: use the held-out GSM8K dev files for both validation and exams.
 # Validation defaults to the GSM8K test set, which training never sees: the loss
-# on its worked solutions every 500 steps, and exact answers every 2000.
+# on its worked solutions every 500 steps, and exact answers every 500 too
+# (on the GPU an exam of 250 problems takes about 16 s).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 DATA=${DATA:-data}
@@ -107,7 +108,7 @@ fi
 # tee -i: Ctrl-C reaches only the trainer, which saves before it stops.
 # shellcheck disable=SC2086
 "$CX" train $GPU --data "$MIX" --val "$DATA/gsm8k/$validation.tok" --bpe "$DATA/tok.bpe" \
-  --reason-test "$DATA/gsm8k/$validation.txt" --reason-every 2000 --reason-limit 250 \
+  --reason-test "$DATA/gsm8k/$validation.txt" --reason-every 500 --reason-limit 250 \
   "${model[@]}" $OPT --seq "$SEQ" --batch "$BATCH" --accum "$ACCUM" --steps "$steps" --warmup 500 --lr "$LR" \
   --eval-every 500 --eval-batches "$eval_batches" --save-every 1000 --log-every 50 --time-limit "$minutes" \
   --seed "$seed" --out "runs/$RUN.ckpt" --log "runs/$RUN.csv" --load-log "runs/$RUN.load.csv" "${resume[@]}" "$@" 2>&1 | tee -ia "runs/$RUN.log"
