@@ -16,9 +16,21 @@
 
 namespace leak_check {
 
+inline bool is_hex_digit(char ch) {
+    return (ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f') || (ch >= 'A' && ch <= 'F');
+}
+
 // ASCII letters and digits define words; punctuation and line breaks separate
 // them. Cap retained word length at the longest question word. A longer word
 // cannot match, even when a training file contains a gigantic unbroken token.
+//
+// prep-qa's .txt files and JSON Lines files store a line break as the two
+// characters \n. So that "apples.\nHow" gives the words "apples", "how" (not
+// "nhow"), the escapes \n, \t, \r and \u plus up to four hex digits are
+// separators. A backslash before anything else is an ordinary separator and
+// the next character is read normally; a backslash after a backslash starts
+// a new escape. The stored form "\\x" of a real "\x" therefore gives the same
+// words as "\x" itself, whichever side of the check is stored escaped.
 template<class Emit>
 void words(std::istream& in, size_t max_length, Emit emit) {
     std::array<char, 65536> buffer{};
@@ -29,10 +41,26 @@ void words(std::istream& in, size_t max_length, Emit emit) {
         word.clear();
         too_long = false;
     };
+    // Kept across reads: an escape may straddle the end of the buffer.
+    bool after_backslash = false;
+    int hex_left = 0;  // hex digits still allowed after \u
     while (in) {
         in.read(buffer.data(), buffer.size());
         for (std::streamsize i = 0; i < in.gcount(); ++i) {
             char ch = buffer[size_t(i)];
+            if (after_backslash) {
+                after_backslash = false;
+                if (ch == 'n' || ch == 't' || ch == 'r') continue;
+                if (ch == 'u') { hex_left = 4; continue; }
+            } else if (hex_left > 0) {
+                if (is_hex_digit(ch)) { --hex_left; continue; }
+                hex_left = 0;
+            }
+            if (ch == '\\') {
+                finish();
+                after_backslash = true;
+                continue;
+            }
             if (ch >= 'A' && ch <= 'Z') ch = char(ch - 'A' + 'a');
             if ((ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9')) {
                 if (word.size() < max_length) word += ch;
