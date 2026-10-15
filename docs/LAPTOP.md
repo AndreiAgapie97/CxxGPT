@@ -126,7 +126,31 @@ validation loss every 500 steps, exact answers every 2000. Its settings
 Run the same command again to resume after an interruption. The log is
 `runs/night1.log`; in the morning, `scripts/report.sh night1` sums it up on
 one screen (validation loss and exact answers over the night, speed, how
-it ended, and one answer the model got wrong). To ask the model a question
+it ended, and one answer the model got wrong).
+
+For MoE models, `night.sh` also writes `runs/night1.load.csv` (or
+`runs/$RUN.load.csv`): `step,layer,expert_0,...,max_load_ratio`. You can
+request this on any CPU or GPU run with `train --load-log FILE`.
+Layer and expert numbers start at zero. Each row covers the successful
+training steps since the previous row, every `--log-every` steps, plus a
+final partial interval when the run stops. Validation and skipped updates
+do not count. Shares divide each expert's assignments by all assignments
+in that layer, so they sum to one even with top-2 routing. The last column
+is the largest share times the number of experts: 1 means equal use.
+The existing console `load` still describes the last step's worst layer.
+With `--load-log` (only then), the console also gets one warning line per
+logging interval that lists every expert below 1% of its layer, in layer
+order, e.g. `under 1%: layer 2 expert 5 (0.0%), layer 7 expert 3 (0.2%)`; after 12
+experts it ends with "and N more".
+`report.sh` shows each layer's final shares and the first logged step
+with a share below 1%. Resuming appends rows to the same file, after a
+`# resumed at step N` line; use a new file for a different run. As with
+`--log`, training restarts from the last checkpoint, so the steps after it
+are run again and their rows appear twice: the rows after the `# resumed`
+line are the ones the model kept. Nothing is written for dense models: they have
+no experts, so `--load-log` creates no file.
+
+To ask the model a question
 yourself (`--temp 0`: its most likely answer; `--answer`: stop after the
 `#### answer` line):
 ```sh

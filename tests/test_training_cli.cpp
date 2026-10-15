@@ -4,10 +4,39 @@
 #include <iterator>
 #include <set>
 #include "test_accumulation.h"
+#include "test_load_log.h"
 #include "../src/reasoning.h"
 #include "../src/tokenizer.h"
 
 int main(int argc, char** argv) {
+    if (argc == 5 && std::string(argv[1]) == "load-log") {
+        Model<float> model(peek_checkpoint_config(argv[2]));
+        load_checkpoint(argv[2], model, nullptr, nullptr);
+        const TokenData data = TokenData::load(argv[3]);
+        std::vector<int> inputs(8), targets(8), first, last;
+        // Rebuild by hand the batches test_cli.sh's `train --steps 3 --accum 2
+        // --batch 1 --seq 8` drew. This mirrors cmd_train in src/cxxgpt.cpp
+        // (data_rng is Rng(seed + 1), seed 1 by default; every step calls
+        // group.sample over the whole file) and AccumulationBatch::sample in
+        // src/train.h (one sample_batch per micro-batch). If sampling changes
+        // there, change it here too: the rows below would no longer match.
+        Rng rng(2);
+        for (int step = 1; step <= 3; ++step) {
+            for (int micro = 0; micro < 2; ++micro) {
+                data.sample_batch(rng, 1, 8, 0, data.tokens.size(), inputs.data(), targets.data());
+                auto& expected = step <= 2 ? first : last;
+                expected.insert(expected.end(), inputs.begin(), inputs.end());
+            }
+        }
+        std::ifstream csv(argv[4]);
+        std::string header;
+        std::getline(csv, header);
+        EXPECT(header == ExpertLoadLog::header(4), "missing load log header");
+        check_load_log_rows(csv, 2, reference_load_counts(model, first));
+        check_load_log_rows(csv, 3, reference_load_counts(model, last));
+        EXPECT(!std::getline(csv, header), "unexpected load log rows");
+        return g_failures ? 1 : 0;
+    }
     if (argc == 5 && std::string(argv[1]) == "bpe-stream-reference") {
         Tokenizer tok; tok.load(argv[2]);
         std::ifstream input(argv[3],std::ios::binary); CHECK(input, "cannot open whole-text reference");
@@ -125,6 +154,8 @@ int main(int argc, char** argv) {
         data.save((dir / "sparse.tok").string());
         data.mask.assign(13, 0);
         data.save((dir / "ignored.tok").string());
+        auto load_model = load_log_fixture();
+        save_checkpoint((dir / "load.ckpt").string(), load_model, AdamW{}, Rng(2));
         Config cfg;
         cfg.vocab = 256; cfg.seq_len = 8; cfg.d_model = 8;
         cfg.n_layers = 1; cfg.n_heads = 2; cfg.ffn_hidden = 12;

@@ -99,4 +99,4 @@ fi
   --reason-test "$DATA/gsm8k/test.txt" --reason-every 2000 --reason-limit 250 \
   "${model[@]}" $OPT --seq "$SEQ" --batch "$BATCH" --accum "$ACCUM" --steps "$steps" --warmup 500 --lr "$LR" \
   --eval-every 500 --eval-batches "$eval_batches" --save-every 1000 --log-every 50 --time-limit "$minutes" \
-  --seed "$seed" --out "runs/$RUN.ckpt" --log "runs/$RUN.csv" "${resume[@]}" "$@" 2>&1 | tee -ia "runs/$RUN.log"
+  --seed "$seed" --out "runs/$RUN.ckpt" --log "runs/$RUN.csv" --load-log "runs/$RUN.load.csv" "${resume[@]}" "$@" 2>&1 | tee -ia "runs/$RUN.log"
