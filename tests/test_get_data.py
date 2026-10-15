@@ -138,6 +138,40 @@ class DatasetTest(unittest.TestCase):
         self.assertEqual(len(self.read("metamath/train.jsonl")), 2)
 
 
+    def test_identical_rerun_keeps_timestamps(self):
+        # Run the real script, as prepare_data.sh does, twice. The second run
+        # writes the same bytes, so it must leave the files (and their
+        # timestamps) alone; otherwise prepare_data.sh re-encodes ~1.4M
+        # MetaMath/OpenMath2 problems on every rerun.
+        meta = [{"query": f"Reworded fixture {i}", "response": "A step. The answer is: 2",
+                 "original_question": f"Unrelated fixture {i}"} for i in range(50)]
+        meta_url = "/datasets/meta-math/MetaMathQA/resolve/main/MetaMathQA-395K.json"
+        self.files[meta_url] = json.dumps(meta).encode()
+        script = Path(__file__).resolve().parents[1] / "scripts/get_data.py"
+        env = dict(os.environ, HF_ENDPOINT=self.url, GSM8K_ENDPOINT=self.url + "/gsm8k")
+
+        def run():
+            subprocess.run(["python3", str(script), "metamath", "--out", str(self.root)], env=env,
+                           check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+
+        outputs = ["metamath/train.jsonl", "gsm8k/train.jsonl", "gsm8k/dev.jsonl"]
+        run()
+        first = {name: (self.root / name).read_bytes() for name in outputs}
+        # An old timestamp: a rewrite would replace it, even on a coarse clock.
+        for name in outputs:
+            os.utime(self.root / name, (1, 1))
+        run()
+        for name in outputs:
+            self.assertEqual((self.root / name).stat().st_mtime_ns, 1_000_000_000, name)
+            self.assertEqual((self.root / name).read_bytes(), first[name], name)
+        self.assertFalse(list(self.root.rglob("*.part")))
+        # A changed source still replaces the output.
+        self.files[meta_url] = json.dumps(meta[:10]).encode()
+        os.remove(self.root / "metamath/MetaMathQA-395K.json")
+        run()
+        self.assertNotEqual((self.root / "metamath/train.jsonl").stat().st_mtime_ns, 1_000_000_000)
+        self.assertNotEqual((self.root / "metamath/train.jsonl").read_bytes(), first["metamath/train.jsonl"])
+
     def test_preparation_produces_dev_and_refreshes_filtered_tokens(self):
         repo = Path(__file__).resolve().parents[1]
         data_root = self.root / "prepared"

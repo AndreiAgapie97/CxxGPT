@@ -24,6 +24,7 @@ pyarrow for Parquet files (pip install pyarrow). For gated datasets, set
 HF_TOKEN to a Hugging Face access token.
 """
 import argparse
+import filecmp
 import http.client
 import io
 import json
@@ -244,8 +245,21 @@ def write_qa(rows, dest):
                 continue
             f.write(json.dumps({"question": q, "answer": f"{sol}\n#### {final}"}, ensure_ascii=False) + "\n")
             n += 1
-    os.replace(dest + ".part", dest)
-    log(f"  {dest}: {n} problems ({skipped} skipped)")
+    same = replace_if_changed(dest + ".part", dest)
+    log(f"  {dest}: {n} problems ({skipped} skipped){', unchanged' if same else ''}")
+
+
+def replace_if_changed(part, dest):
+    """Moves part over dest, unless dest already holds the same bytes.
+
+    An identical rerun then leaves dest and its timestamp alone, so
+    prepare_data.sh does not re-encode token files that are still valid.
+    Returns True when dest was already up to date."""
+    if os.path.exists(dest) and filecmp.cmp(part, dest, shallow=False):
+        os.remove(part)
+        return True
+    os.replace(part, dest)
+    return False
 
 
 def write_docs(docs, dest):
@@ -297,18 +311,11 @@ def get_gsm8k(out, args):
         dest = os.path.join(out, f"{split}.jsonl")
         text = "".join(json.dumps(row, ensure_ascii=False) + "\n" for i, row in enumerate(rows)
                        if (i in held_out) == (split == "dev"))
-        # Preserve timestamps on identical reruns so prepared tokens stay valid.
-        if not os.path.exists(dest) or open_text(dest) != text:
-            with open(dest + ".part", "w", encoding="utf-8") as f:
-                f.write(text)
-            os.replace(dest + ".part", dest)
+        with open(dest + ".part", "w", encoding="utf-8") as f:
+            f.write(text)
+        replace_if_changed(dest + ".part", dest)
     log(f"  GSM8K: {len(rows) - DEV_SIZE} train, {DEV_SIZE} dev (seed {DEV_SEED})")
     download(f"{base}/test.jsonl", os.path.join(out, "test.jsonl"))
-
-
-def open_text(path):
-    with open(path, encoding="utf-8") as f:
-        return f.read()
 
 
 def dev_questions(args):
