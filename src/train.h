@@ -5,13 +5,6 @@
 #include <cerrno>
 #ifdef _WIN32
 #include <io.h>
-#ifndef NOMINMAX
-#define NOMINMAX
-#endif
-#ifndef WIN32_LEAN_AND_MEAN
-#define WIN32_LEAN_AND_MEAN
-#endif
-#include <windows.h>
 #else
 #include <unistd.h>
 #endif
@@ -19,8 +12,10 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <filesystem>
 #include <limits>
 #include <string>
+#include <system_error>
 #include <vector>
 
 #include "common.h"
@@ -513,14 +508,12 @@ inline bool save_checkpoint(const std::string& path, const Model<float>& model, 
         return fail("error writing or syncing");
     }
     // Rename is atomic; no directory-fsync/power-loss guarantee is claimed.
-#ifdef _WIN32
-    // Windows' C rename refuses to replace an existing destination. Keep
-    // the old checkpoint until the new, fully flushed file can replace it.
-    const bool renamed = MoveFileExA(tmp.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING) != 0;
-#else
-    const bool renamed = std::rename(tmp.c_str(), path.c_str()) == 0;
-#endif
-    if (!renamed) {
+    // std::filesystem::rename replaces an existing checkpoint on Linux and
+    // Windows alike (Windows' std::rename would refuse), so the old file
+    // stays until the new, fully flushed one takes its place.
+    std::error_code rename_error;
+    std::filesystem::rename(tmp, path, rename_error);
+    if (rename_error) {
         std::remove(tmp.c_str());
         return fail("cannot rename");
     }
