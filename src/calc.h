@@ -174,6 +174,7 @@ enum class Mode { none, notes, plain };
 struct Counts { size_t fired = 0, malformed = 0; };
 
 inline bool is_digit(char c) { return c >= '0' && c <= '9'; }
+inline bool is_blank(char c) { return c == ' ' || c == '\t' || c == '\n' || c == '\r'; }
 
 // In plain mode "x" means times only as in "16 x 7": a space on each side,
 // and beyond the spaces a digit on each side. In "3x + 2" or "2 x3" it is
@@ -209,30 +210,39 @@ inline std::optional<std::string> response(std::string_view text, Mode mode) {
         // An "x" that is not a times sign ends the suffix like any letter.
         while (begin > 0) {
             const unsigned char c = text[begin - 1];
+            // ". " ends a sentence: in "He has 3 bags. 16 * 7 = " the
+            // expression starts after it.
+            if (c == '.' && is_blank(text[begin])) break;
             if (is_digit(char(c)) || std::string_view(".+-*/() \t").find(char(c)) != std::string_view::npos ||
                 c == 0xc3 || c == 0x97 || (c == 'x' && times_sign(text, begin - 1))) --begin;
             else break;
         }
         if (begin == end) return {};
-        if (begin && text[begin] != ' ' && text[begin] != '\t' && text[begin - 1] != '\n' &&
-            text[begin - 1] != ':' && text[begin - 1] != '$') return std::string{};
-        if (begin) {
-            const char before = text[begin - 1];
+        // Where a clause starts, so an expression may start: the start of
+        // the text, right after a newline, ':' or '$', or after one of
+        // ". , ; ! ?" followed by whitespace ("So, 16 * 7 = ").
+        const auto clause_start = [&](size_t i) {
+            if (i == 0) return true;
+            const char c = text[i - 1];
+            if (c == '\n' || c == '\r' || c == ':' || c == '$') return true;
+            return std::string_view(".,;!?").find(c) != std::string_view::npos && i < text.size() && is_blank(text[i]);
+        };
+        if (!clause_start(begin)) {
+            // Otherwise only a prose word and a space may come before
+            // ("She has 16 * 7"). But do not drop an unsupported word or
+            // operator between operands, as in "2 X 3 + 4" or
+            // "2 \\times 3 + 4": the word must not follow a number or an
+            // operator, unless a clause starts there ("8, and 8 * 2").
             const auto letter = [](char c) { return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'); };
-            if (letter(before)) {
-                // A preceding prose word is fine ("She has 16 * 7"), but
-                // do not discard an unsupported word/operator between
-                // operands, as in "2 X 3 + 4" or "2 \\times 3 + 4".
-                size_t word = begin;
-                while (word && letter(text[word - 1])) --word;
-                size_t left = word;
-                while (left && (text[left - 1] == ' ' || text[left - 1] == '\t')) --left;
-                if (left && ((text[left - 1] >= '0' && text[left - 1] <= '9') ||
-                             std::string_view(".+-*/()^%,\\=<>_@&").find(text[left - 1]) != std::string_view::npos))
-                    return std::string{};
-            } else if (std::string_view("\n\r:;$").find(before) == std::string_view::npos) {
+            if (!letter(text[begin - 1]) || !is_blank(text[begin])) return std::string{};
+            size_t word = begin;
+            while (word && letter(text[word - 1])) --word;
+            size_t left = word;
+            while (left && (text[left - 1] == ' ' || text[left - 1] == '\t')) --left;
+            if (left && !clause_start(left) &&
+                (is_digit(text[left - 1]) ||
+                 std::string_view(".+-*/()^%,\\=<>_@&").find(text[left - 1]) != std::string_view::npos))
                 return std::string{};
-            }
         }
         expr = text.substr(begin, end - begin);
         const size_t first = expr.find_first_not_of(" \t");
@@ -241,9 +251,8 @@ inline std::optional<std::string> response(std::string_view text, Mode mode) {
         if (expr[first] == '+' || expr[first] == '-') {
             if (first + 1 == expr.size() || expr[first + 1] == ' ' || expr[first + 1] == '\t') return std::string{};
             // "a -3*2" may be subtraction from a named value. Accept a
-            // leading sign only at a clear clause boundary, never after a word.
-            if (begin && text[begin - 1] != '\n' && text[begin - 1] != ':' && text[begin - 1] != '$')
-                return std::string{};
+            // leading sign only where a clause starts, never after a word.
+            if (!clause_start(begin)) return std::string{};
         }
         for (size_t i = 0; (i = expr.find("×", i)) != std::string::npos;) expr.replace(i, 2, "*");
         for (char& c : expr) if (c == 'x') c = '*';  // every "x" left is a times sign

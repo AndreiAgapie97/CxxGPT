@@ -201,6 +201,19 @@ inline void test_calc() {
         const auto r = calc::response(expr, calc::Mode::plain);
         EXPECT(r && r->empty(), "malformed plain expression must not be partially computed: %s", expr);
     }
+    // ". , ; ! ?" followed by whitespace end a clause; the expression after
+    // them is computed, not rejected. Without the whitespace they are not.
+    const std::pair<const char*, const char*> clauses[] = {
+        {"He has 3 bags. 16 * 7 = ", "112"}, {"So, 16 * 7 = ", "112"}, {"8, and 8 * 2 = ", "16"},
+        {"It costs 4; 2 * 3 = ", "6"}, {"Really! 2 + 3 = ", "5"}, {"Why? 2 + 3 = ", "5"},
+        {"He has 3 bags. -3 * 2 = ", "-6"}, {"So, he pays 2 * 3 = ", "6"}, {"3.5 * 2 = ", "7"}};
+    for (const auto& [expr, expected] : clauses)
+        EXPECT(calc::response(expr, calc::Mode::plain) == std::optional<std::string>(expected), "clause boundary: %s", expr);
+    for (const char* expr : {"1,000 * 2 = ", "8,and 8 * 2 = ", "3 + 4.5 * 2,3 * 2 = "}) {
+        const auto r = calc::response(expr, calc::Mode::plain);
+        EXPECT(r && r->empty(), "punctuation without a space is no boundary: %s", expr);
+    }
+
     // Algebra is not arithmetic: an "x" next to a number, or a sign right
     // after an operator, must never give a result (3x + 2 once gave 6).
     for (const char* expr : {"If 3x + 2 = ", "2x - 4 = ", "3x = ", "4 + 2x = ", "x + 5 = ", "3 * x + 2 = ",
