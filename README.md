@@ -322,8 +322,9 @@ windows of 512):
 | 12 | 0.08% | 0.49% | 0.98% | 0.01% | 0.07% |
 
 A first CPU run (4 layers of 128, MetaMath, 1,500 steps, N = 6, same seed
-and data): without the term, the probability the model gives to repeating
-grows as it learns (`ul` 0.0044 at step 250, 0.0074 at 1,500). With ALPHA = 1
+and data): with the term at a negligible weight (ALPHA = 1e-9, so it is
+still measured), the probability the model gives to repeating grows as it
+learns (`ul` 0.0044 at step 250, 0.0074 at 1,500). With ALPHA = 1
 it ends 6% lower (0.0070), at the same validation loss (2.1001 against
 2.0993). That is one seed on a small model; whether it removes loops in
 the answers is the experiment in issue #34.
