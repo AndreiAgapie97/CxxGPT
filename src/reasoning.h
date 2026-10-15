@@ -31,8 +31,6 @@
 
 #include "common.h"
 
-constexpr int kBos = 1;  // a byte that never occurs in the text
-
 struct Problem {
     std::string task;
     int difficulty = 1;

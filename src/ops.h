@@ -417,13 +417,78 @@ double cross_entropy_forward(T* probs, T* losses, const int* targets, int N, int
     return count ? total / count : 0.0;
 }
 
+// ---------------------------------------------------------------------------
+// Unlikelihood (#34): besides the right next token, some rows name wrong
+// ones whose probability training should push down (for loops: the tokens
+// that would repeat a run already written). Row n's negative tokens are
+// tokens[offsets[n] .. offsets[n + 1]); their loss is -log(1 - p_c) each,
+// times alpha, added to the row's cross-entropy.
+// ---------------------------------------------------------------------------
+struct NegativeRows {
+    const int* offsets = nullptr;  // N + 1 entries
+    const int* tokens = nullptr;
+    double alpha = 0;
+    bool on() const { return offsets && alpha > 0; }
+};
+
+// 1 - p_c below this counts as this in the loss, which stays finite (at
+// most 69 per negative) when the other probabilities all underflow.
+constexpr double kUnlikelihoodFloor = 1e-30;
+
+// 1 - p[c] for one row of probabilities, summed from the other tokens: when
+// p[c] is close to 1, 1 - p[c] would lose every digit.
+template <class T>
+double one_minus_prob(const T* p, int V, int c) {
+    double q = 0;
+    for (int i = 0; i < V; ++i)
+        if (i != c) q += double(p[i]);
+    return q;
+}
+
+// The sum over rows and their negatives of -log(1 - p_c), on probabilities
+// from cross_entropy_forward (alpha not applied). A negative must be a valid
+// token on a counted row, never the row's target, and listed once.
+template <class T>
+double unlikelihood_forward(const T* probs, const int* targets, NegativeRows neg, int N, int V) {
+    PROFILE("unlikelihood_fwd");
+    for (int n = 0; n < N; ++n)
+        for (int k = neg.offsets[n]; k < neg.offsets[n + 1]; ++k)
+            CHECK(neg.tokens[k] >= 0 && neg.tokens[k] < V && targets[n] >= 0 && neg.tokens[k] != targets[n],
+                  "negative token %d is not a wrong token of a counted row", neg.tokens[k]);
+    for (int n = 0; n < N; ++n)
+        for (int k = neg.offsets[n]; k < neg.offsets[n + 1]; ++k)
+            for (int k2 = neg.offsets[n]; k2 < k; ++k2)
+                CHECK(neg.tokens[k2] != neg.tokens[k], "negative token %d appears twice in a row", neg.tokens[k]);
+    std::vector<double> rows(size_t(N), 0.0);
+    for_rows(N, [&](int n0, int n1) {
+        for (int n = n0; n < n1; ++n)
+            for (int k = neg.offsets[n]; k < neg.offsets[n + 1]; ++k)
+                rows[size_t(n)] -= std::log(std::max(one_minus_prob(probs + int64_t(n) * V, V, neg.tokens[k]),
+                                                     kUnlikelihoodFloor));
+    });
+    double total = 0;
+    for (double r : rows) total += r;
+    return total;
+}
+
 // dlogits = (p - onehot(target)) * dloss for counted rows, 0 for ignored
 // ones. Overwrites (not accumulates), and may alias probs.
+// With negatives, each row also gets alpha * dloss times the gradient of its
+// unlikelihood terms. For one negative c, with q = 1 - p_c:
+//   d/dz_j [-log q] = (p_c / q) * (delta_jc - p_j),
+// which is p_c at j = c (q cancels exactly, so it is written that way) and
+// -(p_c / q) * p_j elsewhere; these sum to 0, and none exceeds 1 even when
+// q is tiny, since p_j <= q. The floor only touches the loss value. If q is
+// 0 (in float, when every other probability underflows), the push on c
+// could not be balanced by the others, so that negative adds no gradient.
 template <class T>
-void cross_entropy_backward(T* dlogits, const T* probs, const int* targets, int N, int V, T dloss) {
+void cross_entropy_backward(T* dlogits, const T* probs, const int* targets, int N, int V, T dloss,
+                            NegativeRows neg) {
     PROFILE("xent_bwd");
     for (int n = 0; n < N; ++n) CHECK(targets[n] >= -1 && targets[n] < V, "target %d out of range", targets[n]);
+    const bool ul = neg.on();
     for_rows(N, [&](int n0, int n1) {
+        std::vector<double> w;  // p_c / (1 - p_c) for this row's negatives
         for (int n = n0; n < n1; ++n) {
             const T* p = probs + int64_t(n) * V;
             T* d = dlogits + int64_t(n) * V;
@@ -431,10 +496,38 @@ void cross_entropy_backward(T* dlogits, const T* probs, const int* targets, int 
                 std::fill(d, d + V, T(0));
                 continue;
             }
-            for (int i = 0; i < V; ++i) d[i] = p[i] * dloss;
+            const int k0 = ul ? neg.offsets[n] : 0, k1 = ul ? neg.offsets[n + 1] : 0;
+            if (k0 == k1) {
+                for (int i = 0; i < V; ++i) d[i] = p[i] * dloss;
+                d[targets[n]] -= dloss;
+                continue;
+            }
+            // Read the whole row before writing it: d may alias p.
+            w.clear();
+            double sum_w = 0;
+            for (int k = k0; k < k1; ++k) {
+                const int c = neg.tokens[k];
+                const double q = one_minus_prob(p, V, c);
+                w.push_back(q > 0 ? double(p[c]) / q : 0.0);
+                sum_w += w.back();
+            }
+            std::vector<double> own(size_t(k1 - k0));
+            for (int k = k0; k < k1; ++k) own[size_t(k - k0)] = double(p[neg.tokens[k]]);
+            const double rest = 1 - neg.alpha * sum_w;
+            for (int i = 0; i < V; ++i) d[i] = T(double(p[i]) * rest * double(dloss));
+            for (int k = k0; k < k1; ++k) {
+                const double pc = own[size_t(k - k0)], wc = w[size_t(k - k0)];
+                const double self = wc > 0 ? neg.alpha * pc : 0.0;  // (p_c / q) * (1 - p_c), with 1 - p_c = q
+                d[neg.tokens[k]] = T((pc * (1 - neg.alpha * (sum_w - wc)) + self) * double(dloss));
+            }
             d[targets[n]] -= dloss;
         }
     });
+}
+
+template <class T>
+void cross_entropy_backward(T* dlogits, const T* probs, const int* targets, int N, int V, T dloss) {
+    cross_entropy_backward(dlogits, probs, targets, N, V, dloss, NegativeRows{});
 }
 
 // ---------------------------------------------------------------------------

@@ -12,6 +12,9 @@
 #include <new>
 #include <string>
 
+// The token that starts every document (a byte that never occurs in the text).
+constexpr int kBos = 1;
+
 // Fails loudly in every build type (unlike assert, which NDEBUG removes).
 // For conditions that depend on input: files, configs, command lines.
 #define CHECK(cond, ...)                                                    \

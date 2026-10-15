@@ -1,4 +1,4 @@
-// test_no_repeat.h — the no-repeat block (generate.h, NoRepeat): a fake
+// test_no_repeat.h — the no-repeat block (no_repeat.h and generate.h): a fake
 // model with a first, second and third choice at every position shows
 // exactly which tokens the block forbids; every expected text below was
 // worked out by hand. With the block off, or never triggered, generation

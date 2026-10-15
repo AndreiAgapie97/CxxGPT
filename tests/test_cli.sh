@@ -237,6 +237,25 @@ status=0
 "$CXXGPT" train "${SHORT[@]}" --sampler docs > "$TEST_DIR/sampler-bad.log" 2>&1 || status=$?
 [[ "$status" == 1 ]]
 grep -q 'sampler takes random or qa' "$TEST_DIR/sampler-bad.log"
+# train --unlikelihood: says so, logs the term on every line and as two
+# more CSV columns; off, neither appears.
+"$CXXGPT" train "${SHORT[@]}" --unlikelihood 0.5 --ul-ngram 2 --log-every 1 --log "$TEST_DIR/ul.csv" \
+    > "$TEST_DIR/ul.log"
+grep -q '^unlikelihood: alpha 0.5 on tokens that would repeat a run of 2 trained tokens (validation stays cross-entropy only)$' \
+    "$TEST_DIR/ul.log"
+[[ $(grep -c '^step .* | ul .* on .*% of targets (.* negatives)$' "$TEST_DIR/ul.log") == 2 ]]
+head -n 1 "$TEST_DIR/ul.csv" | grep -q '^step,loss,val_loss,lr,grad_norm,ms_per_step,load_ratio,unlikelihood,ul_fired$'
+awk -F, 'NR > 1 && NF != 9 {exit 1}' "$TEST_DIR/ul.csv"
+"$CXXGPT" train "${SHORT[@]}" --log "$TEST_DIR/no-ul.csv" > "$TEST_DIR/no-ul.log"
+require_absent -q 'unlikelihood\| ul ' "$TEST_DIR/no-ul.log"
+head -n 1 "$TEST_DIR/no-ul.csv" | grep -q '^step,loss,val_loss,lr,grad_norm,ms_per_step,load_ratio$'
+for bad in "--unlikelihood -1" "--unlikelihood nan" "--ul-ngram 1"; do
+    status=0
+    # shellcheck disable=SC2086
+    "$CXXGPT" train "${SHORT[@]}" $bad > "$TEST_DIR/ul-bad.log" 2>&1 || status=$?
+    [[ "$status" == 1 ]]
+done
+grep -q 'ul-ngram must be at least 2' "$TEST_DIR/ul-bad.log"
 # Cross the streaming block size without a newline; threaded cuts preserve bytes.
 python3 - "$TEST_DIR/one-line.txt" <<'PYLINE'
 import pathlib,sys

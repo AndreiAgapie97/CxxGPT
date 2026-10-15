@@ -300,6 +300,34 @@ affected, and validation keeps random windows. Whether it helps accuracy
 is not measured yet (docs/research-plan.md, "Answers with their
 questions").
 
+**Loops: unlikelihood training (issue #34).** `--no-repeat` stops an
+exact loop while decoding; `train --unlikelihood ALPHA --ul-ngram N` tries
+to make the model stop wanting one. Wherever the training text breaks off
+a run of N - 1 tokens it already wrote, in a way that differs from how it
+went on the first time, the token that would have repeated the run is
+pushed down: `ALPHA * -log(1 - p)` is added to the loss. The right next
+token is never pushed down, runs shorter than N may repeat ("9 * 2"),
+and masked text (the question, planted mistakes) never counts, so copying
+the question costs nothing. The log keeps the cross-entropy as `loss` and
+adds `ul` (the term without ALPHA, per trained token) and how often it
+fires. It runs on the CPU engine only for now; the GPU kernels come next.
+
+How often it fires (share of trained tokens with a token to push down,
+windows of 512):
+
+| N | GSM8K | MetaMath | OpenMath2 | TinyStories | FineWeb-Edu |
+|---|---|---|---|---|---|
+| 6 | 2.2% | 4.0% | 5.6% | 0.44% | 0.84% |
+| 8 | 0.60% | 1.7% | 2.8% | 0.08% | 0.27% |
+| 12 | 0.08% | 0.49% | 0.98% | 0.01% | 0.07% |
+
+A first CPU run (4 layers of 128, MetaMath, 1,500 steps, N = 6, same seed
+and data): without the term, the probability the model gives to repeating
+grows as it learns (`ul` 0.0044 at step 250, 0.0074 at 1,500). With ALPHA = 1
+it ends 6% lower (0.0070), at the same validation loss (2.1001 against
+2.0993). That is one seed on a small model; whether it removes loops in
+the answers is the experiment in issue #34.
+
 ## Reproducible research
 
 ```sh
@@ -330,6 +358,7 @@ The research CUDA stable-loss and masked-accumulation tests require
 | `src/tokenizer.h` | byte-level BPE |
 | `src/reasoning.h` | the reasoning curriculum and its evaluation |
 | `src/calc.h` | the exact calculator used during generation (`--tools`) |
+| `src/no_repeat.h`, `src/unlikelihood.h` | repeated runs of tokens: blocked when decoding (`--no-repeat`), pushed down in training (`--unlikelihood`) |
 | `src/ternary.h`, `src/infer.h` | bitplane int8 kernels and the ternary inference engine |
 | `src/thread_pool.h` | the thread pool everything runs on |
 | `src/cxxgpt.cpp` | the command-line tool |

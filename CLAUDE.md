@@ -56,9 +56,18 @@ Reasoning is the first capability we go after.
   try has its own seed, so results do not depend on `--batch` or
   `--limit`; every headline names its effort (`(greedy)`, `(maj@8, ...)`).
   `--no-repeat N` (also on `sample`, off by default; `NoRepeat` in
-  `src/generate.h`) forbids writing a run of N generated tokens twice,
+  `src/no_repeat.h`) forbids writing a run of N generated tokens twice,
   against greedy loops (#33); every evaluation prints its unfinished first
   tries. Not yet scored on a dev set.
+- `train --unlikelihood ALPHA --ul-ngram N` (#34, off by default, CPU
+  engine only for now): at each trained position, every token that would
+  repeat a run of N trained tokens of the same document (the no-repeat
+  block's definition, `src/unlikelihood.h`) adds `ALPHA * -log(1 - p)` to
+  the loss, never the target, never from masked text. The loss and
+  gradient (`ops.h`) are tested against finite differences in double,
+  with `1 - p` summed from the other tokens (exact near p = 1). The log
+  keeps the cross-entropy as `loss` and adds the term and how often it
+  fires (also as two more CSV columns). The GPU kernels come next.
 - `src/gpu.cu` (interface `src/gpu.h`): the CUDA training backend, the
   same model op for op, fp32 with cuBLAS. `train --gpu` stores the
   products' inputs in bf16 by default (`--matmul bf16`, fp32 master

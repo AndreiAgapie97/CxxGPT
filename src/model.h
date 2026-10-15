@@ -22,6 +22,7 @@
 #include "config.h"
 #include "memory.h"
 #include "ops.h"
+#include "unlikelihood.h"
 
 template <class T>
 class Model {
@@ -39,6 +40,21 @@ public:
     // weighting them, and nudged after each step toward an even load.
     std::vector<std::vector<T>> router_bias;   // [layer][expert]
     std::vector<std::vector<double>> expert_load;  // tokens routed, since last reset
+
+    // Unlikelihood training (#34), off while alpha is 0. In a training
+    // forward, every token that would repeat a run of `ngram` trained tokens
+    // (unlikelihood.h) adds alpha * -log(1 - p) to the loss, with the same
+    // denominator as the cross-entropy. Other forwards (validation) are
+    // cross-entropy only.
+    struct Unlikelihood {
+        double alpha = 0;
+        int ngram = 8;
+    } unlikelihood;
+    // The last forward's parts, as means over its counted targets: it
+    // returned last_ce + alpha * last_ul. last_fired counts the positions
+    // with negatives, last_negatives the negatives.
+    double last_ce = 0, last_ul = 0;
+    size_t last_fired = 0, last_negatives = 0;
 
     explicit Model(const Config& c) : cfg(c) {
         cfg.validate();
@@ -167,6 +183,7 @@ public:
         }
         rmsnorm_forward(lnf.data(), rstdf.data(), x, P(lnf_), N, C);
         linear_forward(logits.data(), lnf.data(), P(wte_), N, C, V);  // tied head
+        ul_active_ = false;
         if (!targets) {
             has_targets_ = false;
             return 0.0;
@@ -175,7 +192,16 @@ public:
         std::copy(targets, targets + N, targets_.begin());
         n_valid_ = 0;
         for (int n = 0; n < N; ++n) n_valid_ += targets[n] >= 0;
-        return cross_entropy_forward(logits.data(), losses.data(), targets, N, V);
+        last_ce = cross_entropy_forward(logits.data(), losses.data(), targets, N, V);
+        last_ul = 0;
+        last_fired = last_negatives = 0;
+        if (!training || unlikelihood.alpha <= 0 || n_valid_ == 0) return last_ce;
+        find_repeat_negatives(negatives_, tokens, targets, B, Tn, unlikelihood.ngram);
+        ul_active_ = true;
+        last_ul = unlikelihood_forward(logits.data(), targets, negatives_.rows(unlikelihood.alpha), N, V) / n_valid_;
+        last_fired = negatives_.fired;
+        last_negatives = negatives_.tokens.size();
+        return last_ce + unlikelihood.alpha * last_ul;
     }
 
     // Accumulates d(loss * loss_scale) into grads, for the last forward().
@@ -187,8 +213,9 @@ public:
         const int B = B_cur, Tn = T_cur, N = B * Tn, C = cfg.d_model, V = cfg.vocab;
         if (n_valid_ == 0) return;
         T* dlogits = logits.data();  // in place: probabilities become gradients
-        cross_entropy_backward(dlogits, logits.data(), targets_.data(), N, V,
-                               T(loss_scale / n_valid_));
+        cross_entropy_backward(dlogits, logits.data(), targets_.data(), N, V, T(loss_scale / n_valid_),
+                               ul_active_ ? negatives_.rows(unlikelihood.alpha) : NegativeRows{});
+        ul_active_ = false;
         const T* xL = cfg.n_layers ? acts.back().resid2.data() : x0.data();
         zero(dC, size_t(N) * C);
         linear_backward(dC.data(), G(wte_), dlogits, lnf.data(), P(wte_), N, C, V);
@@ -587,6 +614,8 @@ private:
     int B_cur = 0, T_cur = 0;    // last forward
     bool has_targets_ = false;
     int n_valid_ = 0;
+    RepeatNegatives negatives_;  // the last training forward's, for backward
+    bool ul_active_ = false;
     std::vector<int> tokens_, targets_;
     std::vector<LayerActs> acts;
     std::vector<T> x0, lnf, rstdf, logits, losses, xq, out_tmp;

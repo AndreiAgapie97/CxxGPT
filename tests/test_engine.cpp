@@ -25,6 +25,7 @@
 #include "test_vote.h"
 #include "test_no_repeat.h"
 #include "test_qa_context.h"
+#include "test_unlikelihood.h"
 
 int main(int argc, char** argv) {
     int threads = int(std::thread::hardware_concurrency());
@@ -56,6 +57,7 @@ int main(int argc, char** argv) {
         {"vote", test_vote},
         {"no-repeat block", test_no_repeat},
         {"qa context", test_qa_context},
+        {"unlikelihood", test_unlikelihood},
         {"attention", test_attention},
     };
     for (auto& s : suites) {

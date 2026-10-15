@@ -12,6 +12,7 @@
 
 #include "calc.h"
 #include "model.h"
+#include "no_repeat.h"
 #include "reasoning.h"
 #include "tokenizer.h"
 
@@ -56,47 +57,6 @@ int pick_token(const T* logits, int V, double temperature, Rng* rng, const std::
         if (p[i] > 0 && (u -= p[i]) < 0) return i;
     return best;
 }
-
-// The no-repeat block (--no-repeat N) for one sequence: the tokens that
-// would complete a run of N tokens the sequence has already written once.
-// Small models greedily repeat a sentence until the token budget runs out;
-// this forces something new instead. Only the generated text counts, not
-// the prompt: an answer may copy a whole phrase of its question. A run
-// shorter than N may repeat ("9 * 2" after "16 - 3 - 4 = 9"), so N must be
-// longer than the numbers and phrases a solution reuses on purpose. A BOS
-// starts a new document and forgets what came before.
-class NoRepeat {
-public:
-    explicit NoRepeat(int n) : n_(n) { CHECK(n >= 2, "--no-repeat must be 0 (off) or at least 2, not %d", n); }
-
-    void add(int t) {
-        if (t == kBos) {
-            text_.clear();
-            next_.clear();
-            return;
-        }
-        text_.push_back(t);
-        if (int(text_.size()) < n_) return;
-        // The run of N tokens just completed: its first N - 1 tokens, then t.
-        std::vector<int>& after = next_[std::vector<int>(text_.end() - n_, text_.end() - 1)];
-        if (std::find(after.begin(), after.end(), t) == after.end()) after.push_back(t);
-    }
-
-    // The tokens that may not come next.
-    const std::vector<int>& blocked() const {
-        if (int(text_.size()) < n_ - 1) return none_;
-        const auto it = next_.find(std::vector<int>(text_.end() - (n_ - 1), text_.end()));
-        return it == next_.end() ? none_ : it->second;
-    }
-
-private:
-    int n_;
-    std::vector<int> text_;
-    // Every N - 1 tokens seen so far -> the tokens that followed them. Exact
-    // keys, not hashes: a collision would block a token wrongly.
-    std::map<std::vector<int>, std::vector<int>> next_;
-    std::vector<int> none_;
-};
 
 // Continues every prompt by max_new tokens, all in one batch, or by fewer
 // when the context runs out: with prompts of up to L tokens, at most

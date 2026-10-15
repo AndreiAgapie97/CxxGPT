@@ -743,7 +743,7 @@ int cmd_eval_reasoning(Args& a) {
     const long seed = a.integer("seed", 1);
     CHECK(seed >= 0, "--seed must not be negative");
     vote.seed = uint64_t(seed);
-    // Never repeat a run of N generated tokens (generate.h, NoRepeat); 0: off.
+    // Never repeat a run of N generated tokens (no_repeat.h, NoRepeat); 0: off.
     vote.no_repeat = a.integer_int("no-repeat", 0);
     CHECK(vote.no_repeat == 0 || vote.no_repeat >= 2, "--no-repeat must be 0 (off) or at least 2");
     // As TernaryEngine runs it: the embedding (and --fp-attn attention) in
@@ -876,6 +876,19 @@ struct Backend {
     virtual EvalResult reason(const std::vector<Problem>& problems, const Tokenizer& tok, int max_new) = 0;
     // Device memory held, for the GPU; 0 on the CPU.
     virtual size_t device_bytes() const { return 0; }
+    // Unlikelihood training (#34): the CPU engine only, for now. While it is
+    // on, forward() still returns the cross-entropy alone (the curve stays
+    // comparable with runs without it), and the term's own numbers add up in
+    // take_unlikelihood() until it is called.
+    virtual void set_unlikelihood(double alpha, int ngram) {
+        (void)ngram;
+        CHECK(alpha == 0, "--unlikelihood runs on the CPU engine only for now (#34)");
+    }
+    struct UnlikelihoodStats {
+        double sum = 0;  // the term (without alpha), summed over trained targets
+        size_t targets = 0, fired = 0, negatives = 0;
+    };
+    virtual UnlikelihoodStats take_unlikelihood() { return {}; }
 };
 
 struct CpuBackend : Backend {
@@ -883,9 +896,19 @@ struct CpuBackend : Backend {
     AdamW& opt;
     CpuBackend(Model<float>& m, AdamW& o) : model(m), opt(o) {}
     double forward(const int* inp, const int* tgt, int B, int Tn, bool training) override {
-        return model.forward(inp, tgt, B, Tn, training);
+        const double loss = model.forward(inp, tgt, B, Tn, training);
+        if (!training || model.unlikelihood.alpha <= 0 || !tgt) return loss;
+        const size_t targets = count_targets(tgt, size_t(B) * Tn);
+        ul.sum += model.last_ul * double(targets);
+        ul.targets += targets;
+        ul.fired += model.last_fired;
+        ul.negatives += model.last_negatives;
+        return model.last_ce;
     }
     void backward(double loss_scale) override { model.backward(loss_scale); }
+    void set_unlikelihood(double alpha, int ngram) override { model.unlikelihood = {alpha, ngram}; }
+    UnlikelihoodStats take_unlikelihood() override { return std::exchange(ul, {}); }
+    UnlikelihoodStats ul;
     void zero_grad() override { model.zero_grad(); }
     double step(double lr, double max_norm) override {
         const double norm = clip_grad_norm(model, max_norm);
@@ -994,6 +1017,8 @@ int cmd_train(Args& a) {
             "        --muon (Muon instead of AdamW for the matrices in the blocks)\n"
             "        --sampler random (qa: a window starting inside a question-answer document that fits\n"
             "        in one moves back to its start, so the answer is trained with its question)\n"
+            "        --unlikelihood 0 (ALPHA > 0: also push down each token that would repeat a run of\n"
+            "        --ul-ngram 8 trained tokens of the same document; CPU only for now, #34)\n"
             "start:  --init FILE (FILE's weights and model; new optimizer and schedule; data order from --seed;\n"
             "        with --ternary, the weights turn ternary from here on)\n"
             "output: --out model.ckpt --resume --log FILE.csv --log-every 10\n"
@@ -1068,6 +1093,10 @@ int cmd_train(Args& a) {
     opt.muon = a.flag("muon");
     const std::string sampler = a.str("sampler", "random");
     CHECK(sampler == "random" || sampler == "qa", "--sampler takes random or qa");
+    const double ul_alpha = a.real("unlikelihood", 0);
+    const int ul_ngram = a.integer_int("ul-ngram", 8);
+    CHECK(std::isfinite(ul_alpha) && ul_alpha >= 0, "--unlikelihood must be 0 (off) or positive");
+    CHECK(ul_ngram >= 2, "--ul-ngram must be at least 2");
     a.done();
     CHECK(cfg.vocab >= int(data.vocab), "model vocab %d < data vocab %u", cfg.vocab, data.vocab);
     CHECK(val_path.empty() || cfg.vocab >= int(val_data.vocab),
@@ -1110,6 +1139,8 @@ int cmd_train(Args& a) {
         backend = std::make_unique<CpuBackend>(model, opt);
     }
     Backend& be = *backend;
+    be.set_unlikelihood(ul_alpha, ul_ngram);
+    const bool ul_on = ul_alpha > 0;
 
     // Train on [0, train_end) of data; validate on val_data or the tail.
     size_t train_end = data.tokens.size();
@@ -1139,6 +1170,9 @@ int cmd_train(Args& a) {
         std::printf("sampler: qa (%zu question-answer documents that fit in a window start their windows)\n",
                     qa->documents());
     }
+    if (ul_on)
+        std::printf("unlikelihood: alpha %g on tokens that would repeat a run of %d trained tokens "
+                    "(validation stays cross-entropy only)\n", ul_alpha, ul_ngram);
     std::printf("data: %zu train tokens, %zu val tokens; %d x %d x %d = %zu tokens per step\n",
                 train_end, val_hi - val_lo, B, Tn, accum, group.inputs.size());
 
@@ -1147,7 +1181,9 @@ int cmd_train(Args& a) {
         const bool fresh = !std::filesystem::exists(log_path);
         log = create_file(log_path, "a");
         CHECK(log, "cannot open %s", log_path.c_str());
-        if (fresh) std::fprintf(log, "step,loss,val_loss,lr,grad_norm,ms_per_step,load_ratio\n");
+        if (fresh)
+            std::fprintf(log, "step,loss,val_loss,lr,grad_norm,ms_per_step,load_ratio%s\n",
+                         ul_on ? ",unlikelihood,ul_fired" : "");
         if (resume) std::fprintf(log, "# resumed at step %ld\n", opt.step);
     }
     ExpertLoadLog load_interval(cfg);
@@ -1194,6 +1230,7 @@ int cmd_train(Args& a) {
     const double t_start = now_seconds();
     double loss_acc = 0, ms_acc = 0;
     int n_acc = 0;
+    Backend::UnlikelihoodStats ul_acc;  // over the same steps as loss_acc
     long step = opt.step;
     const long first_step = step;
     size_t empty_groups = 0;
@@ -1214,6 +1251,7 @@ int cmd_train(Args& a) {
             continue;  // no Adam moments, decay, balancing, or schedule step
         }
         const double loss = accumulated_backward(be, group);
+        const Backend::UnlikelihoodStats ul_step = be.take_unlikelihood();  // this attempt's only
         const double lr_now = lr_at(step, warmup, steps, lr, min_frac);
         const double gnorm = std::isfinite(loss) ? be.step(lr_now, clip)
                                                : std::numeric_limits<double>::quiet_NaN();
@@ -1241,6 +1279,10 @@ int cmd_train(Args& a) {
         loss_acc += loss;
         ms_acc += ms;
         ++n_acc;
+        ul_acc.sum += ul_step.sum;
+        ul_acc.targets += ul_step.targets;
+        ul_acc.fired += ul_step.fired;
+        ul_acc.negatives += ul_step.negatives;
 
         const bool last = step + 1 == steps;
         double vloss = -1;
@@ -1254,15 +1296,25 @@ int cmd_train(Args& a) {
             std::printf(" | lr %.2e | gnorm %6.3f | %6.1f ms | %7.0f tok/s", lr_now, gnorm,
                         ms_acc / n_acc, double(group.inputs.size()) / (ms_acc / n_acc) * 1e3);
             if (cfg.moe()) std::printf(" | load %.2f", load);
+            // The term without alpha, per trained target; and the share of
+            // targets with a token to push down.
+            const double ul_mean = ul_acc.targets ? ul_acc.sum / double(ul_acc.targets) : 0.0;
+            const double ul_fired = ul_acc.targets ? double(ul_acc.fired) / double(ul_acc.targets) : 0.0;
+            if (ul_on)
+                std::printf(" | ul %.4g on %.3f%% of targets (%zu negatives)", ul_mean, 100 * ul_fired,
+                            ul_acc.negatives);
             std::printf("\n");
             std::fflush(stdout);
             if (log) {
-                std::fprintf(log, "%ld,%.5f,%.5f,%.3e,%.4f,%.1f,%.3f\n", step + 1, loss_acc / n_acc,
+                std::fprintf(log, "%ld,%.5f,%.5f,%.3e,%.4f,%.1f,%.3f", step + 1, loss_acc / n_acc,
                              vloss, lr_now, gnorm, ms_acc / n_acc, load);
+                if (ul_on) std::fprintf(log, ",%.6f,%.6f", ul_mean, ul_fired);
+                std::fprintf(log, "\n");
                 std::fflush(log);
             }
             loss_acc = ms_acc = 0;
             n_acc = 0;
+            ul_acc = {};
         }
         if ((step + 1) % log_every == 0 || last)
             load_interval.write(step + 1, load_log, load_warnings);

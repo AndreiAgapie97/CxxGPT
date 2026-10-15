@@ -243,6 +243,34 @@ night 1's default `MIX` in `night.sh`:
   GSM8K test (sparingly, recorded per the measurement rules) or on a separate
   set such as SVAMP. A model trained from scratch can use the dev set.
 
+## Loops: answers that repeat themselves (issues #33, #34)
+
+Night 1's greedy answers often repeat a sentence until the token budget
+runs out. Two fixes, one at each end:
+- **At decode time** (#33, done): `--no-repeat N` forbids writing a run of N
+  tokens twice. It breaks exact loops, but the model can dodge it with a
+  near-copy (night 1 on Janet's ducks: the same sentence with another
+  apostrophe). To do: score night 2 on the dev set with N = 8, 12, 16,
+  greedy and maj@8, with the unfinished count.
+- **In training** (#34): `train --unlikelihood ALPHA --ul-ngram N` pushes down
+  the token that would repeat a run of N trained tokens wherever the text
+  goes on differently (README, "Loops: unlikelihood training"). CPU engine
+  only so far. It fires on 0.6-2.8% of math tokens at N = 8; on a small
+  CPU model it lowered the term 6% at the same validation loss.
+
+Next for #34, in order:
+1. The GPU kernels: the candidates are built on the host (as now), and the
+   term goes into `xent_fwd`/`xent_bwd`. Test it against the CPU engine.
+2. Seed pairs (the funnel): small models from scratch on the math mix, with
+   and without the term, at least 3 seeds, the same tokens. Judge on the dev
+   set *without* the decode-time block: unfinished answers and repeated runs
+   in the answers, accuracy (greedy and maj@8), validation loss. Watch for
+   the model avoiding numbers it should reuse, and for shorter answers.
+3. If it helps: a short continuation from a night checkpoint, with and
+   without the term.
+4. The sequence-level form (the model's own decoded answers, penalized where
+   they loop), if the token-level form fires too seldom to matter.
+
 ## The bets, in the order to try them
 
 Prerequisites, before night 2:
