@@ -30,7 +30,14 @@ public:
     // A token routed to K experts contributes K assignments. Dividing by
     // their total makes the expert shares sum to one, including for top-k.
     // Empty intervals (dense models or no successful steps) write no rows.
+    // Experts under 1% of their layer's assignments go on one warning line
+    // per interval, in layer order, e.g.
+    //   under 1%: layer 1 expert 3 (0.0%), layer 2 expert 5 (0.4%)
+    // After kMaxWarnings experts it only says how many more there are.
+    static constexpr int kMaxWarnings = 12;
     void write(long step, FILE* csv, FILE* warnings) {
+        std::string starving;  // the warning line's list of experts
+        int n_starving = 0;
         for (size_t l = 0; l < counts_.size(); ++l) {
             auto& counts = counts_[l];
             const double total = std::accumulate(counts.begin(), counts.end(), 0.0);
@@ -41,15 +48,24 @@ public:
                 const double ratio = *std::max_element(counts.begin(), counts.end()) * counts.size() / total;
                 std::fprintf(csv, ",%.17g\n", ratio);
             }
-            if (warnings)
-                for (size_t e = 0; e < counts.size(); ++e)
-                    if (counts[e] * 100 < total)
-                        std::fprintf(warnings, "layer %zu: expert %zu got %.1f%% of tokens\n",
-                                     l, e, counts[e] * 100 / total);
+            for (size_t e = 0; e < counts.size(); ++e) {
+                if (counts[e] * 100 >= total) continue;  // at least 1%
+                ++n_starving;
+                if (n_starving > kMaxWarnings) continue;
+                char pair[64];
+                std::snprintf(pair, sizeof(pair), "%slayer %zu expert %zu (%.1f%%)",
+                              n_starving == 1 ? "" : ", ", l, e, counts[e] * 100 / total);
+                starving += pair;
+            }
             std::fill(counts.begin(), counts.end(), 0.0);
         }
         if (csv) CHECK(std::fflush(csv) == 0 && !std::ferror(csv), "cannot write expert load log");
-        if (warnings) std::fflush(warnings);
+        if (warnings && n_starving > 0) {
+            if (n_starving > kMaxWarnings)
+                starving += ", and " + std::to_string(n_starving - kMaxWarnings) + " more";
+            std::fprintf(warnings, "under 1%%: %s\n", starving.c_str());
+            std::fflush(warnings);
+        }
     }
 };
 

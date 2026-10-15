@@ -116,8 +116,10 @@ inline void test_load_log() {
     interval.write(2, csv, warnings);
     std::istringstream rows(load_log_text(csv));
     check_load_log_rows(rows, 2, reference_load_counts(model, all));
-    EXPECT(load_log_text(warnings).find("layer 1: expert 3 got 0.0% of tokens") != std::string::npos,
+    const std::string warning = load_log_text(warnings);
+    EXPECT(warning.starts_with("under 1%: ") && warning.find("layer 1 expert 3 (0.0%)") != std::string::npos,
            "dead expert did not trigger a warning");
+    EXPECT(std::count(warning.begin(), warning.end(), '\n') == 1, "more than one warning line per interval");
     for (const auto& layer : model.expert_load)
         for (double count : layer) EXPECT(count == 0, "logging changed the per-step load reset");
     const long previous_bytes = std::ftell(csv);
@@ -142,6 +144,21 @@ inline void test_load_log() {
     EXPECT(load_log_text(warnings).empty(), "exactly 1%% triggered a warning");
     threshold.add({{2, 998}});
     threshold.write(2, nullptr, warnings);
-    EXPECT(load_log_text(warnings) == "layer 0: expert 0 got 0.2% of tokens\n", "wrong fractional warning");
+    EXPECT(load_log_text(warnings) == "under 1%: layer 0 expert 0 (0.2%)\n", "wrong fractional warning");
+    std::fclose(warnings);
+
+    // Fourteen starving experts: one line, the first twelve named.
+    cfg.n_layers = 2; cfg.n_experts = 8;
+    ExpertLoadLog capped(cfg);
+    warnings = std::tmpfile();
+    CHECK(warnings, "cannot create warning test file");
+    capped.add({{1, 2, 0, 0, 0, 0, 0, 997}, {0, 0, 0, 0, 0, 0, 0, 1000}});
+    capped.write(1, nullptr, warnings);
+    EXPECT(load_log_text(warnings) ==
+               "under 1%: layer 0 expert 0 (0.1%), layer 0 expert 1 (0.2%), layer 0 expert 2 (0.0%), "
+               "layer 0 expert 3 (0.0%), layer 0 expert 4 (0.0%), layer 0 expert 5 (0.0%), "
+               "layer 0 expert 6 (0.0%), layer 1 expert 0 (0.0%), layer 1 expert 1 (0.0%), "
+               "layer 1 expert 2 (0.0%), layer 1 expert 3 (0.0%), layer 1 expert 4 (0.0%), and 2 more\n",
+           "wrong capped warning line");
     std::fclose(warnings);
 }

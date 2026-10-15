@@ -850,6 +850,8 @@ int cmd_train(Args& a) {
         if (fresh) std::fprintf(load_log, "%s\n", header.c_str());
         if (resume) std::fprintf(load_log, "# resumed at step %ld\n", opt.step);
     }
+    // The "under 1%" warning lines come with the load log, not without it.
+    FILE* const load_warnings = load_log ? stdout : nullptr;
     std::signal(SIGINT, on_signal);
     std::signal(SIGTERM, on_signal);
 
@@ -948,7 +950,7 @@ int cmd_train(Args& a) {
             n_acc = 0;
         }
         if ((step + 1) % log_every == 0 || last)
-            load_interval.write(step + 1, load_log, stdout);
+            load_interval.write(step + 1, load_log, load_warnings);
         if (save_every > 0 && (step + 1) % save_every == 0) {
             be.sync();
             if (save_checkpoint(out, model, opt, data_rng, true)) saved_step = opt.step;
@@ -962,7 +964,7 @@ int cmd_train(Args& a) {
     }
     // Also preserve a partial interval when a time limit, signal or failed
     // attempt stops the run between ordinary logging steps.
-    load_interval.write(opt.step, load_log, stdout);
+    load_interval.write(opt.step, load_log, load_warnings);
     if (load_log) CHECK(std::fclose(load_log) == 0, "cannot close expert load log");
     if (g_profiler.enabled) g_profiler.report(int(step - first_step));
     if (empty_groups) std::printf("skipped %zu empty sampled groups\n", empty_groups);

@@ -62,7 +62,13 @@ grep -q 'one-logit softmax has zero task gradient' "$TEST_DIR/top1.log"
 "$CXXGPT" train "${COMMON[@]}" --init "$TEST_DIR/load.ckpt" --steps 3 --accum 2 --lr 0 --bias-rate 0 \
     --log-every 2 --load-log "$TEST_DIR/load.csv" --out "$TEST_DIR/load-trained.ckpt" > "$TEST_DIR/load.log"
 "$CXXGPT_TRAINING_CLI" load-log "$TEST_DIR/load.ckpt" "$TEST_DIR/data.tok" "$TEST_DIR/load.csv"
-grep -q '^layer 1: expert 3 got 0.0% of tokens$' "$TEST_DIR/load.log"
+# One warning line per logging interval (steps 2 and 3), naming the dead expert.
+[[ $(grep -c '^under 1%: .*layer 1 expert 3 (0\.0%)' "$TEST_DIR/load.log") == 2 ]]
+# Without --load-log the same model prints no warnings.
+"$CXXGPT" train "${COMMON[@]}" --init "$TEST_DIR/load.ckpt" --steps 2 --lr 0 --bias-rate 0 \
+    --log-every 2 --out "$TEST_DIR/load-quiet.ckpt" > "$TEST_DIR/load-quiet.log"
+grep -q '| load ' "$TEST_DIR/load-quiet.log"
+require_absent -q 'under 1%' "$TEST_DIR/load-quiet.log"
 "$CXXGPT" train "${COMMON[@]}" --resume --steps 4 --accum 2 --lr 0 --bias-rate 0 --log-every 2 \
     --load-log "$TEST_DIR/load.csv" --out "$TEST_DIR/load-trained.ckpt" > "$TEST_DIR/load-resume.log"
 [[ $(grep -c '^step,layer,' "$TEST_DIR/load.csv") == 1 ]]

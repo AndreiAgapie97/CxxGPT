@@ -131,8 +131,11 @@ final partial interval when the run stops. Validation and skipped updates
 do not count. Shares divide each expert's assignments by all assignments
 in that layer, so they sum to one even with top-2 routing. The last column
 is the largest share times the number of experts: 1 means equal use.
-The existing console `load` still describes the last step's worst layer;
-new warning lines name experts below 1% during the logging interval.
+The existing console `load` still describes the last step's worst layer.
+With `--load-log` (only then), the console also gets one warning line per
+logging interval that lists every expert below 1% of its layer, in layer
+order, e.g. `under 1%: layer 2 expert 5 (0.0%), layer 7 expert 3 (0.2%)`; after 12
+experts it ends with "and N more".
 `report.sh` shows each layer's final shares and the first logged step
 with a share below 1%. Resuming appends rows to the same file; use a new
 file for a different run. Dense models have no expert rows.
