@@ -48,6 +48,50 @@ C++20; builds warning-free under g++ and clang++. CI builds with both
 compilers on several `-march` targets, runs every test under the
 sanitizers, and compiles the CUDA backend with nvcc 12.8 and 13.0.
 
+### Native Windows CPU build
+
+Install Visual Studio's C++ tools, LLVM/clang-cl, CMake and Ninja. From an
+**x64 Native Tools Command Prompt for VS**, run:
+
+```bat
+cmake -S . -B build -G Ninja -DCMAKE_CXX_COMPILER=clang-cl -DCMAKE_BUILD_TYPE=Release
+cmake --build build --parallel
+ctest --test-dir build --output-on-failure
+```
+
+This builds `build\cxxgpt.exe`, `build\ternary_moe.exe` and
+`build\test_engine.exe`. The tests run directly on Windows; the shell CLI
+tests stay on Linux. This is a CPU build; the CUDA build and laptop training
+scripts continue to use WSL2.
+
+Windows CI builds the same targets another way: it finds Visual Studio with
+`vswhere`, configures with that Visual Studio generator and its clang-cl
+toolset (`-T ClangCL -A x64`), builds with `--config Release` and runs
+`ctest -C Release -V`.
+
+For timing on the laptop, add `-DCXXGPT_MARCH=native` to the first command
+(in a fresh `build` folder). Everything is then compiled for that CPU, as
+the Linux Makefile's `-march=native` does: the fp32 GEMM, the int8/fp32
+helpers and the ternary kernels all use AVX-512. **Only this native build is
+comparable with WSL timings**; the default build below keeps the GEMM at SSE
+and the helpers scalar. (CMake's Release is `-O2`, the Makefile's `-O3`.) A
+native binary may not run on a different CPU. CI builds the default one.
+
+The default Windows binary includes AVX2, AVX-512 and VNNI row kernels, each
+compiled with its own instruction settings. At runtime it checks both the CPU's
+features and Windows' support for saving vector registers, then chooses the
+widest available int8 kernel, using the same preference as Linux. The rest
+of the binary uses baseline x86-64 instructions, so an older CPU can use the
+scalar kernels safely. The Linux Makefile and its `-march` choices are unchanged.
+
+One kernel differs from WSL in the default build. It compiles B6 (int8 VNNI
+256-bit) for AVX-VNNI, the encoding of Intel's newer CPUs, so on a CPU that
+has AVX512-VNNI but not AVX-VNNI, such as the laptop's Zen 4, it leaves B6
+out. WSL's `-march=native` build, like the native Windows build, has B6
+there, in its AVX-512 encoding. The MoE layer uses B6b (512-bit) on Zen 4
+either way. `ternary_moe --tests` prints the kernels it tested, and the
+default build also prints the CPU features it found.
+
 ## Quick start
 
 Train a small model on the reasoning curriculum, then test it on held-out

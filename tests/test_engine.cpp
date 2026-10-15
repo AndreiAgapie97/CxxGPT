@@ -9,6 +9,7 @@
 #include "test_model.h"
 #include "test_memory.h"
 #include "test_ops.h"
+#include "test_portability.h"
 #include "test_reasoning.h"
 #include "test_wordgen.h"
 #include "test_reasoning_metrics.h"
@@ -28,6 +29,7 @@ int main(int argc, char** argv) {
 
     struct { const char* name; void (*fn)(); } suites[] = {
         {"ops", test_ops},
+        {"portability", test_portability},
         {"model", test_model},
         {"expert load log", test_load_log},
         {"memory", test_memory},

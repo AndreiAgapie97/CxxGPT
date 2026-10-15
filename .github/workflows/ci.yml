@@ -25,6 +25,28 @@ jobs:
           make test
           ./research_experiment --steps 5 --seeds 1 --threads 2 --continual --rl-steps 5 --out runs/ci-smoke.csv
 
+  windows:
+    name: Windows clang-cl CPU
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: |
+          $installation = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -format json | ConvertFrom-Json
+          if (-not $installation) { throw "No Visual Studio C++ toolchain found" }
+          $version = [version]$installation.installationVersion
+          $generators = (cmake -E capabilities | ConvertFrom-Json).generators
+          $generator = $generators.name | Where-Object { $_ -like "Visual Studio $($version.Major) *" } | Select-Object -First 1
+          if (-not $generator) { throw "CMake has no generator for Visual Studio $($version.Major)" }
+          cmake -S . -B build -G $generator -T ClangCL -A x64 "-DCMAKE_GENERATOR_INSTANCE=$($installation.installationPath)"
+      - name: Build CPU engine and tests
+        run: cmake --build build --config Release --parallel
+      # -V shows every test's output, including the CPU features and
+      # kernels that ternary_moe --tests found on the runner.
+      - name: Test
+        run: ctest --test-dir build -C Release -V
+
   # ISA paths the runner may not be able to execute still have to compile.
   compile-only:
     name: compile ${{ matrix.cxx }} -march=${{ matrix.march }}

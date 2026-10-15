@@ -11,13 +11,13 @@ inline std::string_view trim(std::string_view s) {
     while (!s.empty() && (s.back() == ' ' || s.back() == '\n' || s.back() == '\r')) s.remove_suffix(1);
     return s;
 }
-inline bool number(std::string_view s, long& v) {
+inline bool number(std::string_view s, int64_t& v) {
     s = trim(s);
     if (s.empty() || s.front() < '0' || s.front() > '9') return false;
     const auto result = std::from_chars(s.data(), s.data() + s.size(), v);
     return result.ec == std::errc{} && result.ptr == s.data() + s.size();
 }
-inline bool pair(std::string_view s, char sep, long& a, long& b) {
+inline bool pair(std::string_view s, char sep, int64_t& a, int64_t& b) {
     const size_t pos = s.find(sep);
     return pos != s.npos && number(s.substr(0, pos), a) && number(s.substr(pos + 1), b);
 }
@@ -41,7 +41,7 @@ inline Score score(const Problem& p, std::string_view completion) {
     const size_t mark = completion.find("\n#### ");
     const auto body = trim(completion.substr(0, mark));
     Score out;
-    long a = 0, b = 0;
+    int64_t a = 0, b = 0;
     if (p.task == "add") {
         CHECK(pair(p.question, '+', a, b), "unsupported addition question");
         const auto steps = statements(body, ',');
@@ -53,7 +53,7 @@ inline Score score(const Problem& p, std::string_view completion) {
             if (i < steps.size()) {
                 const auto s = steps[i];
                 const size_t plus = s.find('+'), eq = s.find('=');
-                long dx = 0, dy = 0, dc = 0, z = 0;
+                int64_t dx = 0, dy = 0, dc = 0, z = 0;
                 const bool valid = plus != s.npos && eq != s.npos && plus < eq &&
                     number(s.substr(0, plus), dx) && pair(s.substr(plus + 1, eq - plus - 1), '+', dy, dc) &&
                     number(s.substr(eq + 1), z) && dx <= 9 && dy <= 9 && dc <= 1;
@@ -77,7 +77,7 @@ inline Score score(const Problem& p, std::string_view completion) {
             out.expected = 1;
             if (!steps.empty()) {
                 const size_t sep = steps[0].find(" digits vs ");
-                long x = 0, y = 0;
+                int64_t x = 0, y = 0;
                 const bool local = sep != steps[0].npos && number(steps[0].substr(0, sep), x) &&
                     number(steps[0].substr(sep + 11), y) && x > 0 && y > 0 && x != y;
                 out.local_correct = local;

@@ -102,7 +102,7 @@ void embedding_forward(T* out, const int* tokens, const T* wte, int N, int C) {
     PROFILE("embedding_fwd");
     for_rows(N, [&](int n0, int n1) {
         for (int n = n0; n < n1; ++n)
-            std::copy(wte + long(tokens[n]) * C, wte + long(tokens[n] + 1) * C, out + long(n) * C);
+            std::copy(wte + int64_t(tokens[n]) * C, wte + int64_t(tokens[n] + 1) * C, out + int64_t(n) * C);
     });
 }
 
@@ -111,8 +111,8 @@ template <class T>
 void embedding_backward(T* dwte, const T* dout, const int* tokens, int N, int C) {
     PROFILE("embedding_bwd");
     for (int n = 0; n < N; ++n) {
-        T* d = dwte + long(tokens[n]) * C;
-        const T* g = dout + long(n) * C;
+        T* d = dwte + int64_t(tokens[n]) * C;
+        const T* g = dout + int64_t(n) * C;
         for (int c = 0; c < C; ++c) d[c] += g[c];
     }
 }
@@ -127,10 +127,10 @@ void rmsnorm_forward(T* out, T* rstd, const T* x, const T* w, int N, int C) {
     PROFILE("rmsnorm_fwd");
     for_rows(N, [&](int n0, int n1) {
         for (int n = n0; n < n1; ++n) {
-            const T* xn = x + long(n) * C;
+            const T* xn = x + int64_t(n) * C;
             const T r = T(1) / std::sqrt(dot(xn, xn, C) / T(C) + T(kRmsEps));
             rstd[n] = r;
-            T* o = out + long(n) * C;
+            T* o = out + int64_t(n) * C;
             for (int c = 0; c < C; ++c) o[c] = xn[c] * r * w[c];
         }
     });
@@ -144,13 +144,13 @@ void rmsnorm_backward(T* dx, T* dw, const T* dout, const T* x, const T* w, const
     PROFILE("rmsnorm_bwd");
     for_rows(N, [&](int n0, int n1) {
         for (int n = n0; n < n1; ++n) {
-            const T* xn = x + long(n) * C;
-            const T* dn = dout + long(n) * C;
+            const T* xn = x + int64_t(n) * C;
+            const T* dn = dout + int64_t(n) * C;
             const T r = rstd[n];
             T gx = 0;
             for (int c = 0; c < C; ++c) gx += dn[c] * w[c] * xn[c];
             const T k = r * r * r * gx / T(C);
-            T* dxn = dx + long(n) * C;
+            T* dxn = dx + int64_t(n) * C;
             for (int c = 0; c < C; ++c) dxn[c] += r * dn[c] * w[c] - k * xn[c];
         }
     });
@@ -168,8 +168,8 @@ void rmsnorm_backward(T* dx, T* dw, const T* dout, const T* x, const T* w, const
         for (int b = b0; b < b1; ++b) {
             T* acc = partial + size_t(b) * C;
             for (int n = b * kRowsPerBlock; n < std::min(N, (b + 1) * kRowsPerBlock); ++n) {
-                const T* xn = x + long(n) * C;
-                const T* dn = dout + long(n) * C;
+                const T* xn = x + int64_t(n) * C;
+                const T* dn = dout + int64_t(n) * C;
                 const T r = rstd[n];
                 for (int c = 0; c < C; ++c) acc[c] += dn[c] * xn[c] * r;
             }
@@ -216,7 +216,7 @@ void rope_apply(T* qkv, const RopeTable<T>& rope, int B, int Tn, int C, int NH, 
             const T* sn = &rope.sin[size_t(t) * half];
             for (int part = 0; part < 2; ++part)  // q, then k
                 for (int h = 0; h < NH; ++h) {
-                    T* x = qkv + long(n) * 3 * C + part * C + h * HS;
+                    T* x = qkv + int64_t(n) * 3 * C + part * C + h * HS;
                     for (int i = 0; i < half; ++i) {
                         const T x0 = x[i], x1 = x[i + half];
                         const T s = inverse ? -sn[i] : sn[i];
@@ -257,14 +257,14 @@ void attention_forward(T* out, T* att, const T* qkv, int B, int Tn, int C, int N
     pool().parallel_for(B * NH, [&](int j0, int j1) {
         for (int j = j0; j < j1; ++j) {
             const int b = j / NH, h = j % NH;
-            const T* q = qkv + long(b) * Tn * 3 * C + h * HS;
+            const T* q = qkv + int64_t(b) * Tn * 3 * C + h * HS;
             const T* k = q + C;
             const T* v = q + 2 * C;
-            T* P = att + long(j) * Tn * Tn;
+            T* P = att + int64_t(j) * Tn * Tn;
             // P = Q · Kᵀ, then a scaled, causally masked softmax per row.
             gemm(Tn, Tn, HS, MatView<T>{q, 3 * C, 1}, MatView<T>{k, 1, 3 * C}, P, Tn, false, false);
             for (int t = 0; t < Tn; ++t) {
-                T* p = P + long(t) * Tn;
+                T* p = P + int64_t(t) * Tn;
                 T mx = -std::numeric_limits<T>::infinity();
                 for (int s = 0; s <= t; ++s) mx = std::max(mx, p[s]);
                 T sum = 0;
@@ -278,7 +278,7 @@ void attention_forward(T* out, T* att, const T* qkv, int B, int Tn, int C, int N
             }
             // out = P · V
             gemm(Tn, HS, Tn, MatView<T>{P, Tn, 1}, MatView<T>{v, 3 * C, 1},
-                 out + long(b) * Tn * C + h * HS, C, false, false);
+                 out + int64_t(b) * Tn * C + h * HS, C, false, false);
         }
     }, 1);
 }
@@ -297,22 +297,22 @@ void attention_backward(T* dqkv, const T* dout, const T* att, const T* qkv, int 
         T* dS = scratch.data();
         for (int j = j0; j < j1; ++j) {
             const int b = j / NH, h = j % NH;
-            const long base = long(b) * Tn * 3 * C + h * HS;
+            const int64_t base = int64_t(b) * Tn * 3 * C + h * HS;
             const T* q = qkv + base;
             const T* k = q + C;
             const T* v = q + 2 * C;
             T* dq = dqkv + base;
             T* dk = dq + C;
             T* dv = dq + 2 * C;
-            const T* P = att + long(j) * Tn * Tn;
-            const T* dO = dout + long(b) * Tn * C + h * HS;
+            const T* P = att + int64_t(j) * Tn * Tn;
+            const T* dO = dout + int64_t(b) * Tn * C + h * HS;
             // dP = dO · Vᵀ
             gemm(Tn, Tn, HS, MatView<T>{dO, C, 1}, MatView<T>{v, 1, 3 * C}, dS, Tn, false, false);
             // Softmax backward: dS = P ⊙ (dP - Σ P ⊙ dP), times the score scale.
             // P is zero above the diagonal, so dS is too.
             for (int t = 0; t < Tn; ++t) {
-                const T* p = P + long(t) * Tn;
-                T* d = dS + long(t) * Tn;
+                const T* p = P + int64_t(t) * Tn;
+                T* d = dS + int64_t(t) * Tn;
                 T pd = 0;
                 for (int s = 0; s <= t; ++s) pd += p[s] * d[s];
                 for (int s = 0; s <= t; ++s) d[s] = p[s] * (d[s] - pd) * scale;
@@ -335,9 +335,9 @@ void swiglu_forward(T* out, const T* inp, int N, int F) {
     PROFILE("swiglu_fwd");
     for_rows(N, [&](int n0, int n1) {
         for (int n = n0; n < n1; ++n) {
-            const T* g = inp + long(n) * 2 * F;
+            const T* g = inp + int64_t(n) * 2 * F;
             const T* u = g + F;
-            T* o = out + long(n) * F;
+            T* o = out + int64_t(n) * F;
             for (int i = 0; i < F; ++i) o[i] = g[i] / (T(1) + fast_exp(-g[i])) * u[i];
         }
     });
@@ -349,10 +349,10 @@ void swiglu_backward(T* dinp, const T* dout, const T* inp, int N, int F) {
     PROFILE("swiglu_bwd");
     for_rows(N, [&](int n0, int n1) {
         for (int n = n0; n < n1; ++n) {
-            const T* g = inp + long(n) * 2 * F;
+            const T* g = inp + int64_t(n) * 2 * F;
             const T* u = g + F;
-            const T* d = dout + long(n) * F;
-            T* dg = dinp + long(n) * 2 * F;
+            const T* d = dout + int64_t(n) * F;
+            T* dg = dinp + int64_t(n) * 2 * F;
             T* du = dg + F;
             for (int i = 0; i < F; ++i) {
                 const T sg = T(1) / (T(1) + fast_exp(-g[i]));
@@ -367,18 +367,18 @@ void swiglu_backward(T* dinp, const T* dout, const T* inp, int N, int F) {
 // Elementwise helpers
 // ---------------------------------------------------------------------------
 template <class T>
-void add_forward(T* out, const T* a, const T* b, long n) {
+void add_forward(T* out, const T* a, const T* b, int64_t n) {
     PROFILE("residual_add");
     const int blocks = int((n + 16383) / 16384);
     pool().parallel_for(blocks, [&](int b0, int b1) {
-        const long i1 = std::min(n, long(b1) * 16384);
-        for (long i = long(b0) * 16384; i < i1; ++i) out[i] = a[i] + b[i];
+        const int64_t i1 = std::min(n, int64_t(b1) * 16384);
+        for (int64_t i = int64_t(b0) * 16384; i < i1; ++i) out[i] = a[i] + b[i];
     }, 1);
 }
 
 template <class T>
-void add_into(T* dst, const T* src, long n) {
-    for (long i = 0; i < n; ++i) dst[i] += src[i];
+void add_into(T* dst, const T* src, int64_t n) {
+    for (int64_t i = 0; i < n; ++i) dst[i] += src[i];
 }
 
 // ---------------------------------------------------------------------------
@@ -392,7 +392,7 @@ double cross_entropy_forward(T* probs, T* losses, const int* targets, int N, int
     for (int n = 0; n < N; ++n) CHECK(targets[n] >= -1 && targets[n] < V, "target %d out of range", targets[n]);
     for_rows(N, [&](int n0, int n1) {
         for (int n = n0; n < n1; ++n) {
-            T* p = probs + long(n) * V;
+            T* p = probs + int64_t(n) * V;
             T mx = p[0];
             for (int i = 1; i < V; ++i) mx = std::max(mx, p[i]);
             // Save the target logit before replacing logits by probabilities.
@@ -425,8 +425,8 @@ void cross_entropy_backward(T* dlogits, const T* probs, const int* targets, int 
     for (int n = 0; n < N; ++n) CHECK(targets[n] >= -1 && targets[n] < V, "target %d out of range", targets[n]);
     for_rows(N, [&](int n0, int n1) {
         for (int n = n0; n < n1; ++n) {
-            const T* p = probs + long(n) * V;
-            T* d = dlogits + long(n) * V;
+            const T* p = probs + int64_t(n) * V;
+            T* d = dlogits + int64_t(n) * V;
             if (targets[n] < 0) {
                 std::fill(d, d + V, T(0));
                 continue;
@@ -447,12 +447,12 @@ void cross_entropy_backward(T* dlogits, const T* probs, const int* targets, int 
 // The inference kernels store exactly these values: the sign pattern as
 // bitplanes and gamma as the matrix scale.
 template <class T>
-T ternary_quantize(T* wq, const T* w, long n) {
+T ternary_quantize(T* wq, const T* w, int64_t n) {
     PROFILE("ternary_quant");
     double s = 0.0;
-    for (long i = 0; i < n; ++i) s += std::abs(double(w[i]));
+    for (int64_t i = 0; i < n; ++i) s += std::abs(double(w[i]));
     const T gamma = T(s / double(n)) + T(1e-8);
-    for (long i = 0; i < n; ++i) {
+    for (int64_t i = 0; i < n; ++i) {
         const T r = std::nearbyint(w[i] / gamma);
         wq[i] = std::clamp(r, T(-1), T(1)) * gamma;
     }
@@ -470,8 +470,8 @@ void act_quantize(T* xq, const T* x, int N, int C) {
     PROFILE("act_quant");
     for_rows(N, [&](int n0, int n1) {
         for (int n = n0; n < n1; ++n) {
-            const T* xn = x + long(n) * C;
-            T* q = xq + long(n) * C;
+            const T* xn = x + int64_t(n) * C;
+            T* q = xq + int64_t(n) * C;
             T amax = 0;
             for (int c = 0; c < C; ++c) amax = std::max(amax, std::abs(xn[c]));
             if (amax == T(0)) {

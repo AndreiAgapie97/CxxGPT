@@ -129,8 +129,7 @@ inline void test_ternary_learning_and_resume() {
 
     // Same model/optimizer settings: save moments, RNG and balancing biases,
     // continue, reload into a fresh model, and take exactly the same step.
-    const std::string path = "/tmp/cxxgpt_test_train_" +
-                             std::to_string(uint64_t(now_seconds() * 1e9)) + ".ckpt";
+    const std::string path = test_path("train-resume.ckpt");
     save_checkpoint(path, model, opt, rng);
     const Config loaded_cfg = peek_checkpoint_config(path);
     Model<float> restored(loaded_cfg);

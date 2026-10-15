@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <cassert>
+#include <bit>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -13,11 +14,17 @@
 #include <random>
 #include <vector>
 
-#if defined(__AVX2__)
+#if defined(__AVX2__) || defined(CXXGPT_RUNTIME_SIMD)
 #include <immintrin.h>
 #endif
 
 #include "thread_pool.h"
+#ifdef CXXGPT_RUNTIME_SIMD
+#include "cpu_features.h"
+#define TERNARY_TARGET(features) __attribute__((target(features)))
+#else
+#define TERNARY_TARGET(features)
+#endif
 
 // =============================================================================
 // Constants
@@ -147,17 +154,17 @@ inline void gemv_bitplane_sparse(const float* __restrict X, const TernaryMatrixB
         for (int w = 0; w < WPR; ++w) {
             const float* __restrict xw = X + w * cfg::kWeightsPerWord;
             uint32_t bp = p[w];
-            while (bp) { acc_p += xw[__builtin_ctz(bp)]; bp &= bp - 1; }
+            while (bp) { acc_p += xw[std::countr_zero(bp)]; bp &= bp - 1; }
             uint32_t bn = n[w];
-            while (bn) { acc_n += xw[__builtin_ctz(bn)]; bn &= bn - 1; }
+            while (bn) { acc_n += xw[std::countr_zero(bn)]; bn &= bn - 1; }
         }
         Y[r] = (acc_p - acc_n) * W.scale;
     }
 }
 
 // --- B3: AVX2, fp32 activations ---------------------------------------------
-#if defined(__AVX2__)
-inline float hsum256(__m256 v) {
+#if defined(__AVX2__) || defined(CXXGPT_RUNTIME_SIMD)
+TERNARY_TARGET("avx2") inline float hsum256(__m256 v) {
     __m128 lo = _mm256_castps256_ps128(v);
     __m128 hi = _mm256_extractf128_ps(v, 1);
     lo = _mm_add_ps(lo, hi);
@@ -168,7 +175,7 @@ inline float hsum256(__m256 v) {
 }
 
 // Expand the low 8 bits of b into eight 32-bit all-ones / all-zeros lanes.
-inline __m256 expand8(uint32_t b, __m256i shifts) {
+TERNARY_TARGET("avx2") inline __m256 expand8(uint32_t b, __m256i shifts) {
     __m256i v = _mm256_set1_epi32(int(b));
     v = _mm256_srlv_epi32(v, shifts);  // bit i -> lane i, position 0
     v = _mm256_slli_epi32(v, 31);      // -> sign bit
@@ -176,7 +183,7 @@ inline __m256 expand8(uint32_t b, __m256i shifts) {
     return _mm256_castsi256_ps(v);
 }
 
-inline void gemv_bitplane_avx2(const float* __restrict X, const TernaryMatrixBitplane& W,
+TERNARY_TARGET("avx2") inline void gemv_bitplane_avx2(const float* __restrict X, const TernaryMatrixBitplane& W,
                         float* __restrict Y, int r0, int r1) {
     const int WPR = W.words_per_row;
     const __m256i shifts = _mm256_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7);
@@ -202,8 +209,8 @@ inline void gemv_bitplane_avx2(const float* __restrict X, const TernaryMatrixBit
 
 // --- B3b: AVX-512, fp32 activations -----------------------------------------
 // The mask registers make expand8() unnecessary: a mask word IS the predicate.
-#if defined(__AVX512F__)
-inline void gemv_bitplane_avx512(const float* __restrict X, const TernaryMatrixBitplane& W,
+#if defined(__AVX512F__) || defined(CXXGPT_RUNTIME_SIMD)
+TERNARY_TARGET("avx512f") inline void gemv_bitplane_avx512(const float* __restrict X, const TernaryMatrixBitplane& W,
                           float* __restrict Y, int r0, int r1) {
     const int WPR = W.words_per_row;
     constexpr int kChunks = cfg::kWeightsPerWord / cfg::kAvx512Floats;  // 2
@@ -318,9 +325,9 @@ inline void gemv_bitplane_int8_scalar(const int8_t* __restrict xq, float x_scale
     }
 }
 
-#if defined(__AVX2__)
+#if defined(__AVX2__) || defined(CXXGPT_RUNTIME_SIMD)
 // Expand a 32-bit mask into 32 bytes of 0x00 / 0xFF, LSB -> byte 0.
-inline __m256i expand32(uint32_t m) {
+TERNARY_TARGET("avx2") inline __m256i expand32(uint32_t m) {
     const __m256i shuf = _mm256_setr_epi8(0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1,
                                           2, 2, 2, 2, 2, 2, 2, 2, 3, 3, 3, 3, 3, 3, 3, 3);
     const __m256i bit = _mm256_set1_epi64x(int64_t(0x8040201008040201ULL));
@@ -328,7 +335,7 @@ inline __m256i expand32(uint32_t m) {
     return _mm256_cmpeq_epi8(_mm256_and_si256(v, bit), bit);
 }
 
-inline int hsum_epi32(__m256i v) {
+TERNARY_TARGET("avx2") inline int hsum_epi32(__m256i v) {
     __m128i lo = _mm256_castsi256_si128(v);
     __m128i hi = _mm256_extracti128_si256(v, 1);
     lo = _mm_add_epi32(lo, hi);
@@ -338,7 +345,7 @@ inline int hsum_epi32(__m256i v) {
 }
 
 // One mask word applied to its 32 activations: x, -x, or 0 per byte.
-inline __m256i apply_ternary32(uint32_t bp, uint32_t bn, const int8_t* xw) {
+TERNARY_TARGET("avx2") inline __m256i apply_ternary32(uint32_t bp, uint32_t bn, const int8_t* xw) {
     const __m256i one8 = _mm256_set1_epi8(1);
     const __m256i x = _mm256_loadu_si256((const __m256i*)xw);
     const __m256i s = _mm256_sub_epi8(_mm256_and_si256(expand32(bp), one8),
@@ -346,7 +353,7 @@ inline __m256i apply_ternary32(uint32_t bp, uint32_t bn, const int8_t* xw) {
     return _mm256_sign_epi8(x, s);
 }
 
-inline void gemv_bitplane_int8_avx2(const int8_t* __restrict xq, float x_scale,
+TERNARY_TARGET("avx2") inline void gemv_bitplane_int8_avx2(const int8_t* __restrict xq, float x_scale,
                              const TernaryMatrixBitplane& W, float* __restrict Y,
                              int r0, int r1) {
     const int WPR = W.words_per_row;
@@ -377,19 +384,19 @@ inline void gemv_bitplane_int8_avx2(const int8_t* __restrict xq, float x_scale,
 // cycles of latency, so these kernels split the sum across independent
 // accumulators: 2 for 256-bit, 4 for 512-bit. A single accumulator gives
 // up roughly half of the 512-bit kernel's gain over B5b.
-#if defined(__AVX2__) && \
-    (defined(__AVXVNNI__) || (defined(__AVX512VNNI__) && defined(__AVX512VL__)))
+#if defined(CXXGPT_RUNTIME_SIMD) || (defined(__AVX2__) && \
+    (defined(__AVXVNNI__) || (defined(__AVX512VNNI__) && defined(__AVX512VL__))))
 #define TERNARY_HAVE_VNNI256 1
 
-inline __m256i dpbusd256(__m256i acc, __m256i u8, __m256i s8) {
-#if defined(__AVXVNNI__)
+TERNARY_TARGET("avx2,avxvnni") inline __m256i dpbusd256(__m256i acc, __m256i u8, __m256i s8) {
+#if defined(__AVXVNNI__) || defined(CXXGPT_RUNTIME_SIMD)
     return _mm256_dpbusd_avx_epi32(acc, u8, s8);  // VEX: AVX-VNNI without AVX-512
 #else
     return _mm256_dpbusd_epi32(acc, u8, s8);      // EVEX: AVX512-VNNI + VL
 #endif
 }
 
-inline void gemv_bitplane_int8_vnni256(const int8_t* __restrict xq, float x_scale,
+TERNARY_TARGET("avx2,avxvnni") inline void gemv_bitplane_int8_vnni256(const int8_t* __restrict xq, float x_scale,
                                 const TernaryMatrixBitplane& W, float* __restrict Y,
                                 int r0, int r1) {
     const int WPR = W.words_per_row;
@@ -413,11 +420,11 @@ inline void gemv_bitplane_int8_vnni256(const int8_t* __restrict xq, float x_scal
 }
 #endif
 
-#if defined(__AVX512BW__)
+#if defined(__AVX512BW__) || defined(CXXGPT_RUNTIME_SIMD)
 // Two mask words applied to their 64 activations: x, -x, or 0 per byte.
 // With pair == false only p[0] / n[0] are read and the upper 32 activation
 // bytes are neither loaded nor counted.
-inline __m512i apply_ternary64(const uint32_t* p, const uint32_t* n,
+TERNARY_TARGET("avx512f,avx512bw") inline __m512i apply_ternary64(const uint32_t* p, const uint32_t* n,
                                       const int8_t* xw, bool pair) {
     uint64_t kp = p[0], kn = n[0];
     if (pair) {
@@ -431,7 +438,7 @@ inline __m512i apply_ternary64(const uint32_t* p, const uint32_t* n,
 }
 
 // 64 int8 lanes per iteration => two mask words at a time.
-inline void gemv_bitplane_int8_avx512(const int8_t* __restrict xq, float x_scale,
+TERNARY_TARGET("avx512f,avx512bw") inline void gemv_bitplane_int8_avx512(const int8_t* __restrict xq, float x_scale,
                                const TernaryMatrixBitplane& W, float* __restrict Y,
                                int r0, int r1) {
     const int WPR = W.words_per_row;
@@ -455,8 +462,8 @@ inline void gemv_bitplane_int8_avx512(const int8_t* __restrict xq, float x_scale
     }
 }
 
-#if defined(__AVX512VNNI__)
-inline void gemv_bitplane_int8_vnni512(const int8_t* __restrict xq, float x_scale,
+#if defined(__AVX512VNNI__) || defined(CXXGPT_RUNTIME_SIMD)
+TERNARY_TARGET("avx512f,avx512bw,avx512vnni") inline void gemv_bitplane_int8_vnni512(const int8_t* __restrict xq, float x_scale,
                                 const TernaryMatrixBitplane& W, float* __restrict Y,
                                 int r0, int r1) {
     const int WPR = W.words_per_row;
@@ -707,26 +714,26 @@ struct Kernel {
 };
 
 inline std::vector<Kernel> all_kernels() {
-    return {
+    std::vector<Kernel> kernels = {
         {"B1: bitplane scalar", gemv_threaded<gemv_bitplane_scalar>,
          gemv_bitplane_scalar, nullptr},
         {"B2: bitplane sparse", gemv_threaded<gemv_bitplane_sparse>,
          gemv_bitplane_sparse, nullptr},
-#if defined(__AVX2__)
+#if defined(__AVX2__) || defined(CXXGPT_RUNTIME_SIMD)
         {"B3: bitplane AVX2", gemv_threaded<gemv_bitplane_avx2>,
          gemv_bitplane_avx2, nullptr},
 #endif
-#if defined(__AVX512F__)
+#if defined(__AVX512F__) || defined(CXXGPT_RUNTIME_SIMD)
         {"B3b: bitplane AVX-512", gemv_threaded<gemv_bitplane_avx512>,
          gemv_bitplane_avx512, nullptr},
 #endif
         {"B4: int8 scalar", gemv_quantize_then<gemv_bitplane_int8_scalar>,
          nullptr, gemv_bitplane_int8_scalar},
-#if defined(__AVX2__)
+#if defined(__AVX2__) || defined(CXXGPT_RUNTIME_SIMD)
         {"B5: int8 AVX2", gemv_quantize_then<gemv_bitplane_int8_avx2>,
          nullptr, gemv_bitplane_int8_avx2},
 #endif
-#if defined(__AVX512BW__)
+#if defined(__AVX512BW__) || defined(CXXGPT_RUNTIME_SIMD)
         {"B5b: int8 AVX-512", gemv_quantize_then<gemv_bitplane_int8_avx512>,
          nullptr, gemv_bitplane_int8_avx512},
 #endif
@@ -734,15 +741,42 @@ inline std::vector<Kernel> all_kernels() {
         {"B6: int8 VNNI 256-bit", gemv_quantize_then<gemv_bitplane_int8_vnni256>,
          nullptr, gemv_bitplane_int8_vnni256},
 #endif
-#if defined(__AVX512BW__) && defined(__AVX512VNNI__)
+#if (defined(__AVX512BW__) && defined(__AVX512VNNI__)) || defined(CXXGPT_RUNTIME_SIMD)
         {"B6b: int8 VNNI 512-bit", gemv_quantize_then<gemv_bitplane_int8_vnni512>,
          nullptr, gemv_bitplane_int8_vnni512},
 #endif
     };
+#ifdef CXXGPT_RUNTIME_SIMD
+    const auto features = cpu_features();
+    std::erase_if(kernels, [&](const Kernel& k) {
+        if (k.rows == gemv_bitplane_avx2 || k.qrows == gemv_bitplane_int8_avx2) return !features.avx2;
+        if (k.rows == gemv_bitplane_avx512) return !features.avx512f;
+        if (k.qrows == gemv_bitplane_int8_avx512) return !features.avx512bw;
+        if (k.qrows == gemv_bitplane_int8_vnni256) return !features.avxvnni;
+        if (k.qrows == gemv_bitplane_int8_vnni512) return !features.avx512vnni;
+        return false;
+    });
+#endif
+    return kernels;
 }
+
+#ifdef CXXGPT_RUNTIME_SIMD
+// The explicit order is the same as Linux's compile-time selection below.
+// Keep it independent of registry order, which groups similar benchmarks.
+inline RowsQFn preferred_int8_rows(const CpuFeatures& features) {
+    if (features.avx512vnni) return gemv_bitplane_int8_vnni512;
+    if (features.avx512bw) return gemv_bitplane_int8_avx512;
+    if (features.avxvnni) return gemv_bitplane_int8_vnni256;
+    if (features.avx2) return gemv_bitplane_int8_avx2;
+    return gemv_bitplane_int8_scalar;
+}
+#endif
 
 // The int8 kernel the MoE layer uses by default: the widest this build has.
 inline Kernel default_int8_kernel() {
+#ifdef CXXGPT_RUNTIME_SIMD
+    const RowsQFn want = preferred_int8_rows(cpu_features());
+#else
 #if defined(__AVX512BW__) && defined(__AVX512VNNI__)
     const RowsQFn want = gemv_bitplane_int8_vnni512;
 #elif defined(__AVX512BW__)
@@ -753,6 +787,7 @@ inline Kernel default_int8_kernel() {
     const RowsQFn want = gemv_bitplane_int8_avx2;
 #else
     const RowsQFn want = gemv_bitplane_int8_scalar;
+#endif
 #endif
     for (const auto& k : all_kernels())
         if (k.qrows == want) return k;
@@ -881,3 +916,5 @@ public:
         });
     }
 };
+
+#undef TERNARY_TARGET

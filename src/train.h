@@ -12,8 +12,10 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <filesystem>
 #include <limits>
 #include <string>
+#include <system_error>
 #include <vector>
 
 #include "common.h"
@@ -182,10 +184,10 @@ inline double clip_grad_norm(Model<float>& model, double max_norm) {
 }
 
 // Linear warmup, then cosine decay to min_frac * max_lr at total_steps.
-inline double lr_at(long step, long warmup, long total_steps, double max_lr, double min_frac) {
+inline double lr_at(int64_t step, int64_t warmup, int64_t total_steps, double max_lr, double min_frac) {
     if (step < warmup) return max_lr * double(step + 1) / double(warmup);
     if (step >= total_steps) return max_lr * min_frac;
-    const double t = double(step - warmup) / double(std::max(1L, total_steps - warmup));
+    const double t = double(step - warmup) / double(std::max<int64_t>(1, total_steps - warmup));
     return max_lr * (min_frac + (1 - min_frac) * 0.5 * (1 + std::cos(3.141592653589793 * t)));
 }
 
@@ -508,7 +510,12 @@ inline bool save_checkpoint(const std::string& path, const Model<float>& model, 
         return fail("error writing or syncing");
     }
     // Rename is atomic; no directory-fsync/power-loss guarantee is claimed.
-    if (std::rename(tmp.c_str(), path.c_str()) != 0) {
+    // std::filesystem::rename replaces an existing checkpoint on Linux and
+    // Windows alike (Windows' std::rename would refuse), so the old file
+    // stays until the new, fully flushed one takes its place.
+    std::error_code rename_error;
+    std::filesystem::rename(tmp, path, rename_error);
+    if (rename_error) {
         std::remove(tmp.c_str());
         return fail("cannot rename");
     }
@@ -555,13 +562,13 @@ inline void load_checkpoint(const std::string& path, Model<float>& model, AdamW*
     } else if (has_opt) {
         // fseek beyond EOF succeeds on regular files. Check the extent before
         // skipping moments, even for dense models with no following biases.
-        const long current = std::ftell(f);
-        CHECK(current >= 0 && n <= uint64_t(std::numeric_limits<long>::max()) / 8,
+        const int64_t current = file_tell(f);
+        CHECK(current >= 0 && n <= uint64_t(std::numeric_limits<int64_t>::max()) / 8,
               "optimizer state exceeds seek range");
-        CHECK(std::fseek(f, 0, SEEK_END) == 0, "cannot seek checkpoint");
-        const long end = std::ftell(f), bytes = long(n * 8);
+        CHECK(file_seek(f, 0, SEEK_END) == 0, "cannot seek checkpoint");
+        const int64_t end = file_tell(f), bytes = int64_t(n * 8);
         CHECK(end >= current && end - current >= bytes, "truncated optimizer state");
-        CHECK(std::fseek(f, current + bytes, SEEK_SET) == 0, "cannot seek optimizer state");
+        CHECK(file_seek(f, current + bytes, SEEK_SET) == 0, "cannot seek optimizer state");
     }
     for (auto& b : model.router_bias)
         CHECK(std::fread(b.data(), 4, b.size(), f) == b.size(), "truncated router bias");
