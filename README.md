@@ -131,6 +131,17 @@ optimizer), `--gpu` (with `cxxgpt-gpu`), `--time-limit MINUTES` (stop and
 save in time), `--resume`, `--reason-test FILE --reason-every N` (accuracy
 during training).
 
+Add `--reason-report runs/model.reason` to `train` to save every evaluated
+question and answer, with the existing heuristic failure labels, in
+`runs/model.reason.step-N.jsonl`. Each file starts with evaluation settings
+and ends with label counts and the original zero-based problem IDs that
+became correct or regressed since the previous evaluation. Intermediate
+evaluations use the current weights; they need not have a saved checkpoint.
+Comparisons cover one training invocation: after `--resume`, the first
+evaluation starts a new baseline. Use a distinct prefix for each run;
+evaluating the same step again replaces that step's file. Labels flag
+patterns for inspection and do not establish the cause of a wrong answer.
+
 ### Commands
 
 | command | does |

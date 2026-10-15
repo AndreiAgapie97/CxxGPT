@@ -387,7 +387,8 @@ inline std::string json_line(int64_t problem, const Problem& p, const AnswerLabe
         o += std::string(i ? "," : "") + "{\"text\":" + str(c.text) + ",\"wrote\":" + str(c.wrote) +
              ",\"exact\":" + str(c.exact) + ",\"ok\":" + boolean(c.ok) + "}";
     }
-    o += "],\"unreadable\":" + std::to_string(l.unreadable) + ",\"completion\":" + str(completion) + "}";
+    o += "],\"unreadable\":" + std::to_string(l.unreadable) + ",\"question\":" + str(p.question) +
+         ",\"completion\":" + str(completion) + "}";
     return o;
 }
 
