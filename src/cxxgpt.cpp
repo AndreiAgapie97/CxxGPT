@@ -532,7 +532,9 @@ void print_eval(const EvalResult& r, size_t show_failures) {
         }
         std::printf(" %5.1f%%\n", 100.0 * c / std::max(1, n));
     }
-    std::printf("overall %.1f%% (%d / %d)\n", 100.0 * r.correct / std::max(1, r.total), r.correct, r.total);
+    // The effort label goes last, so "overall X% (a / b)" reads as before.
+    std::printf("overall %.1f%% (%d / %d) (%s)\n", 100.0 * r.correct / std::max(1, r.total), r.correct, r.total,
+                r.effort.c_str());
     std::printf("gold completions exceeding --max-new %d: %zu / %d\n", r.max_new, r.gold_over_cap, r.total);
     // Multi-line answers (GSM8K's) stay indented under their label.
     auto indent = [](std::string t) {
@@ -584,9 +586,9 @@ int cmd_eval_reasoning(Args& a) {
         // are seeded the same as without --limit.
         std::vector<Problem> sub;
         for (int i = 0; i < limit; ++i) {
-            const size_t line = size_t(i) * test.size() / size_t(limit);
-            sub.push_back(test[line]);
-            vote.problem_ids.push_back(line);
+            const size_t place = size_t(i) * test.size() / size_t(limit);
+            sub.push_back(test[place]);
+            vote.problem_ids.push_back(place);
         }
         test = std::move(sub);
     }
@@ -595,18 +597,21 @@ int cmd_eval_reasoning(Args& a) {
     print_eval(r, show ? r.failures.size() : 0);
     if (vote.tries > 1) {
         // The effort report: per level (task, difficulty) and overall, the
-        // first try's accuracy, the vote's (maj@N), any try's (pass@N), and
-        // the mean number of distinct answers per problem.
+        // first sampled try's accuracy (a sample, not the greedy score), the
+        // vote's (maj@N), any try's (pass@N), and the mean number of distinct
+        // answers per problem (finished tries only).
         std::printf("effort: tries %d, temperature %g, seed %ld\n", vote.tries, vote.temperature, seed);
-        std::printf("task   d    n   single   vote    any   distinct\n");
+        std::printf("%-6s %2s %4s %17s %7s %7s %8s\n", "task", "d", "n", "first sampled try", "vote", "any",
+                    "distinct");
         auto pct = [](int part, int whole) { return 100.0 * part / std::max(1, whole); };
         for (const auto& [key, s] : r.by_task)
-            std::printf("%-6s %2d %4d %7.1f%% %6.1f%% %6.1f%% %8.2f\n", key.first.c_str(), key.second, s.total,
+            std::printf("%-6s %2d %4d %16.1f%% %6.1f%% %6.1f%% %8.2f\n", key.first.c_str(), key.second, s.total,
                         pct(s.first_correct, s.total), pct(s.vote_correct, s.total), pct(s.any_correct, s.total),
                         double(s.distinct_answers) / std::max(1, s.total));
         const LevelScore all = r.overall();
-        std::printf("overall %4d %7.1f%% %6.1f%% %6.1f%% %8.2f (single-try / vote maj@%d / any-try pass@%d / "
-                    "mean distinct answers)\n",
+        std::printf("%-9s %4d %16.1f%% %6.1f%% %6.1f%% %8.2f (first sampled try / vote maj@%d / any try "
+                    "pass@%d / mean distinct answers)\n",
+                    "overall",
                     all.total, pct(all.first_correct, all.total), pct(all.vote_correct, all.total),
                     pct(all.any_correct, all.total), double(all.distinct_answers) / std::max(1, all.total),
                     vote.tries, vote.tries);

@@ -284,7 +284,12 @@ grep -q -- '--tries 4 is more than --batch 2' "$TEST_DIR/tries-batch.log"
     --tries 4 --temp 0.9 --seed 3 --max-new 6 --threads 2 > "$TEST_DIR/vote-b.log"
 cmp "$TEST_DIR/vote-a.log" "$TEST_DIR/vote-b.log"
 grep -q '^effort: tries 4, temperature 0.9, seed 3$' "$TEST_DIR/vote-a.log"
-grep -q 'single-try / vote maj@4 / any-try pass@4 / mean distinct answers' "$TEST_DIR/vote-a.log"
+grep -q 'first sampled try / vote maj@4 / any try pass@4 / mean distinct answers' "$TEST_DIR/vote-a.log"
+# Every headline names its effort.
+grep -q '^overall .* (maj@4, temp 0.9, seed 3)$' "$TEST_DIR/vote-a.log"
+"$CXXGPT" eval-reasoning --ckpt "$TEST_DIR/audit.ckpt" --test "$TEST_DIR/audit.txt" \
+    --temp 0.8 --max-new 6 --threads 2 > "$TEST_DIR/vote-one-sampled.log"
+grep -q '^overall .* (1 sampled try, temp 0.8, seed 1)$' "$TEST_DIR/vote-one-sampled.log"
 "$CXXGPT" eval-reasoning --ckpt "$TEST_DIR/audit.ckpt" --test "$TEST_DIR/audit.txt" \
     --effort medium --temp 0.5 --max-new 6 --threads 2 > "$TEST_DIR/vote-effort.log"
 grep -q '^effort: tries 8, temperature 0.5, seed 1$' "$TEST_DIR/vote-effort.log"
@@ -294,6 +299,7 @@ grep -q '^effort: tries 32, temperature 0.5, seed 1$' "$TEST_DIR/vote-effort-hig
 "$CXXGPT" eval-reasoning --ckpt "$TEST_DIR/audit.ckpt" --test "$TEST_DIR/audit.txt" \
     --effort low --threads 2 > "$TEST_DIR/vote-effort-low.log"
 require_absent -q 'effort:' "$TEST_DIR/vote-effort-low.log"
+grep -q '^overall .* (greedy)$' "$TEST_DIR/vote-effort-low.log"
 printf 'CLI: eval-reasoning tries/vote options passed\n'
 
 # Vocab compatibility must fail before constructing/training the model.

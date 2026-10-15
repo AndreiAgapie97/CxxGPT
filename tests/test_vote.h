@@ -304,8 +304,29 @@ inline void test_vote_seeding() {
     EXPECT(seeds.size() == 27, "only %zu distinct seeds for 27 (seed, problem, try)", seeds.size());
 }
 
+// Every score is printed with its effort.
+inline void test_effort_label() {
+    VoteOpts v;
+    EXPECT(effort_label(v) == "greedy", "one try at temperature 0 is labelled '%s'", effort_label(v).c_str());
+    v.temperature = 0.8;
+    EXPECT(effort_label(v) == "1 sampled try, temp 0.8, seed 1", "one sampled try is labelled '%s'",
+           effort_label(v).c_str());
+    v.tries = 8;
+    v.temperature = 0.7;
+    v.seed = 3;
+    EXPECT(effort_label(v) == "maj@8, temp 0.7, seed 3", "eight tries are labelled '%s'", effort_label(v).c_str());
+    std::vector<Problem> ps = {vote_problem("add", 1, "1+1=?", "2")};
+    ScriptedModel fake;
+    fake.queue = {vote_script("2"), vote_script("2")};
+    fake.prompt_len = 1 + int(ps[0].prompt().size());
+    v.tries = 2;
+    EXPECT(eval_reasoning(fake, ps, Tokenizer{}, 2, 40, 8, false, v).effort == "maj@2, temp 0.7, seed 3",
+           "the evaluation does not carry its effort label");
+}
+
 inline void test_vote() {
     test_vote_answer();
+    test_effort_label();
     test_score_tries();
     test_vote_report();
     test_vote_empty_answer();

@@ -3,6 +3,7 @@
 #pragma once
 
 #include <algorithm>
+#include <cstdio>
 #include <functional>
 #include <map>
 #include <set>
@@ -133,6 +134,21 @@ inline uint64_t try_seed(uint64_t seed, uint64_t problem, uint64_t try_index) {
     return mix(mix(mix(seed) ^ problem) ^ try_index);
 }
 
+// The effort a score was measured at, for printing next to it: "greedy",
+// "1 sampled try, temp 0.8, seed 1" or "maj@8, temp 0.7, seed 1". Scores at
+// different efforts are different tests, so every printed score says which.
+inline std::string effort_label(const VoteOpts& vote) {
+    if (vote.tries == 1 && vote.temperature <= 0) return "greedy";
+    char buf[96];
+    if (vote.tries == 1)
+        std::snprintf(buf, sizeof buf, "1 sampled try, temp %g, seed %llu", vote.temperature,
+                      static_cast<unsigned long long>(vote.seed));
+    else
+        std::snprintf(buf, sizeof buf, "maj@%d, temp %g, seed %llu", vote.tries, vote.temperature,
+                      static_cast<unsigned long long>(vote.seed));
+    return buf;
+}
+
 // The most common answer; on a tie, the one that appeared first.
 inline std::string vote_answer(const std::vector<std::string>& answers) {
     std::map<std::string, std::pair<int, size_t>> seen;  // answer -> (count, first index)
@@ -221,6 +237,7 @@ struct EvalResult {
     // plain score), out of all of them.
     int correct = 0, total = 0;
     int tries = 1;
+    std::string effort = "greedy";  // effort_label() of the run, printed with the headline
     int max_new = 200;
     size_t gold_over_cap = 0;
     std::vector<std::pair<Problem, std::string>> failures;  // a few, for inspection
@@ -312,6 +329,7 @@ EvalResult eval_reasoning(M& model, const std::vector<Problem>& problems, const 
     EvalResult r;
     r.max_new = max_new;
     r.tries = vote.tries;
+    r.effort = effort_label(vote);
     for (size_t i = 0; i < n; ++i) {
         const Problem& p = problems[i];
         r.gold_over_cap += tok.encode(p.completion()).size() > size_t(max_new);
