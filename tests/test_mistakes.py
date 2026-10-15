@@ -34,52 +34,69 @@ def byte_text(path):
 
 with tempfile.TemporaryDirectory() as directory:
     root = Path(directory)
-    common = ["--seed", 41, "--train", 120, "--val", 12, "--test-per-cell", 2,
-              "--max-diff", 3, "--chain-plan", "--expr-rewrite"]
-    for name, options in [("default", []), ("zero", ["--mistakes", 0]),
-                          ("all", ["--mistakes", 1]), ("repeat", ["--mistakes", 1]),
-                          ("partial", ["--mistakes", .3])]:
-        run("gen-reasoning", "--out", root / name, *common, *options)
-    for suffix in ["train.tok", "val.tok", "test.txt"]:
-        assert (root / f"default.{suffix}").read_bytes() == (root / f"zero.{suffix}").read_bytes()
-        assert (root / f"all.{suffix}").read_bytes() == (root / f"repeat.{suffix}").read_bytes()
-    # Captured from unmodified main (d287a66), using the exact common flags.
-    baseline = {
-        "train.tok": "1d0612d12505ef56a690f23f5dc2e723819744ad5149b55aef0282b8ac25561a",
-        "val.tok": "c35a29a476f94e8a167984f1893ed9a47edea983e5665944b15371884be3a5f7",
-        "test.txt": "5c4bf5213374d70de66a3955c4e73e7111723fc420674c8b001aa3f277268b0f",
-    }
-    for suffix, digest in baseline.items():
-        assert hashlib.sha256((root / f"zero.{suffix}").read_bytes()).hexdigest() == digest
-    assert not (root / "zero.train.text").exists()
-    for name in ["all", "partial"]:
-        for suffix in ["val.tok", "test.txt"]:
-            assert (root / f"default.{suffix}").read_bytes() == (root / f"{name}.{suffix}").read_bytes()
-        text = (root / f"{name}.train.text").read_text()
-        documents = text.split("<|endoftext|>\n")[:-1]
-        assert len(documents) == 120
-        planted = sum("[[no-loss]]" in doc for doc in documents)
-        assert planted == 120 if name == "all" else 15 < planted < 60
-        tokens, masks = byte_text(root / f"{name}.train.tok")
-        expected_tokens, expected_masks = bytearray(), bytearray()
-        for doc in documents:
-            prompt_end = doc.index("\nA: ") + 4
-            pos, loss = 0, True
-            expected_tokens.append(1)
-            expected_masks.append(0)
-            while pos < len(doc):
-                if doc.startswith("[[no-loss]]", pos):
-                    loss = False
-                    pos += len("[[no-loss]]")
-                elif doc.startswith("[[/no-loss]]", pos):
-                    loss = True
-                    pos += len("[[/no-loss]]")
-                else:
-                    expected_tokens.extend(doc[pos].encode())
-                    expected_masks.append(int(loss and pos >= prompt_end))
-                    pos += 1
-        assert tokens == expected_tokens and masks == expected_masks
-        assert b"[[no-loss]]" not in tokens
+    common = ["--seed", 41, "--train", 120, "--val", 12, "--test-per-cell", 2, "--max-diff", 3]
+    # With --mistakes 0 the output must stay byte-identical to main's, so
+    # these SHA-256 digests were taken from unmodified main (d287a66) with the
+    # same flags. A mismatch means the generator changed. If that change is
+    # intended (it alters every problem, not only planted ones), regenerate
+    # them from the new main: for each format set below,
+    #   ./cxxgpt gen-reasoning --out base --seed 41 --train 120 --val 12 \
+    #       --test-per-cell 2 --max-diff 3 [--chain-plan --expr-rewrite]
+    #   sha256sum base.train.tok base.val.tok base.test.txt
+    baselines = [
+        ([], {
+            "train.tok": "f9d99aec275bac673960d013a99d7b3595b261fa84d278e3ba9f240050a96f08",
+            "val.tok": "7ed07c983c8829e6905a075b60523d899ed81e35577d8c0f9e7567ec7a466d9e",
+            "test.txt": "c427e0e3ff047597f1e01c41ca1e7ee96313a853eb9c9126168f9b66d0c82ebd",
+        }),
+        (["--chain-plan", "--expr-rewrite"], {
+            "train.tok": "1d0612d12505ef56a690f23f5dc2e723819744ad5149b55aef0282b8ac25561a",
+            "val.tok": "c35a29a476f94e8a167984f1893ed9a47edea983e5665944b15371884be3a5f7",
+            "test.txt": "5c4bf5213374d70de66a3955c4e73e7111723fc420674c8b001aa3f277268b0f",
+        }),
+    ]
+    for formats, baseline in baselines:
+        tag = "formats" if formats else "plain"
+        for name, options in [("default", []), ("zero", ["--mistakes", 0]),
+                              ("all", ["--mistakes", 1]), ("repeat", ["--mistakes", 1]),
+                              ("partial", ["--mistakes", .3])]:
+            run("gen-reasoning", "--out", root / f"{tag}-{name}", *common, *formats, *options)
+        for suffix in ["train.tok", "val.tok", "test.txt"]:
+            assert (root / f"{tag}-default.{suffix}").read_bytes() == (root / f"{tag}-zero.{suffix}").read_bytes()
+            assert (root / f"{tag}-all.{suffix}").read_bytes() == (root / f"{tag}-repeat.{suffix}").read_bytes()
+        for suffix, digest in baseline.items():
+            assert hashlib.sha256((root / f"{tag}-zero.{suffix}").read_bytes()).hexdigest() == digest, \
+                f"{tag}-zero.{suffix} differs from main's output; see the comment above the digests"
+        assert not (root / f"{tag}-zero.train.text").exists()
+        for name in ["all", "partial"]:
+            for suffix in ["val.tok", "test.txt"]:
+                assert (root / f"{tag}-default.{suffix}").read_bytes() == \
+                    (root / f"{tag}-{name}.{suffix}").read_bytes()
+            text = (root / f"{tag}-{name}.train.text").read_text()
+            documents = text.split("<|endoftext|>\n")[:-1]
+            assert len(documents) == 120
+            planted = sum("[[no-loss]]" in doc for doc in documents)
+            assert planted == 120 if name == "all" else 15 < planted < 60
+            tokens, masks = byte_text(root / f"{tag}-{name}.train.tok")
+            expected_tokens, expected_masks = bytearray(), bytearray()
+            for doc in documents:
+                prompt_end = doc.index("\nA: ") + 4
+                pos, loss = 0, True
+                expected_tokens.append(1)
+                expected_masks.append(0)
+                while pos < len(doc):
+                    if doc.startswith("[[no-loss]]", pos):
+                        loss = False
+                        pos += len("[[no-loss]]")
+                    elif doc.startswith("[[/no-loss]]", pos):
+                        loss = True
+                        pos += len("[[/no-loss]]")
+                    else:
+                        expected_tokens.extend(doc[pos].encode())
+                        expected_masks.append(int(loss and pos >= prompt_end))
+                        pos += 1
+            assert tokens == expected_tokens and masks == expected_masks
+            assert b"[[no-loss]]" not in tokens
     for value in ["-0.1", "1.1", "nan"]:
         run("gen-reasoning", "--out", root / "bad", *common, "--mistakes", value, succeeds=False)
 
