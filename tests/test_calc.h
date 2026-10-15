@@ -273,7 +273,7 @@ inline void test_calc_hook() {
         calc::Counts calls;
         Rng actual(42), reference(42);
         const auto out = generate(m, {{kBos},{kBos}}, 120, [](const auto& ids) { return ids.back() == '\n'; },
-                                  1, &actual, mode, &tok, &calls);
+                                  1, &actual, nullptr, mode, &tok, &calls);
         EXPECT(calls.fired == 2 && calls.malformed == 1, "independent batch calculator counts");
         size_t draws = 0;
         for (size_t b = 0; b < expected.size(); ++b) draws += expected[b].size() - insertions[b].size();
@@ -288,10 +288,10 @@ inline void test_calc_hook() {
     CalcFakeModel m; m.cfg.vocab = 256; m.cfg.seq_len = 30;
     m.script = {tok.encode("<<48/2=wrong")}; m.prediction = m.script;
     calc::Counts calls;
-    const auto capped = generate(m, {{kBos}}, 8, [](const auto&) { return false; }, 0, nullptr, calc::Mode::notes, &tok, &calls);
+    const auto capped = generate(m, {{kBos}}, 8, [](const auto&) { return false; }, 0, nullptr, nullptr, calc::Mode::notes, &tok, &calls);
     EXPECT(tok.decode(capped[0]) == "<<48/2=w" && calls.fired == 0, "budget never inserts partial result");
     m.cfg.seq_len = 8;
-    const auto context = generate(m, {{kBos}}, 100, [](const auto&) { return false; }, 0, nullptr, calc::Mode::notes, &tok, &calls);
+    const auto context = generate(m, {{kBos}}, 100, [](const auto&) { return false; }, 0, nullptr, nullptr, calc::Mode::notes, &tok, &calls);
     EXPECT(context[0] == capped[0], "context cap includes result tokens");
     m.cfg.seq_len = 30;
     const auto disabled = generate(m, {{kBos}}, 12, [](const auto&) { return false; });
@@ -311,7 +311,7 @@ inline void test_calc_hook() {
         p.script = {wanted}; p.prediction = p.script;
         calc::Counts prompt_calls;
         const auto out = generate(p, {prompt}, 30, [](const auto& ids) { return ids.back() == '\n'; },
-                                  0, nullptr, calc::Mode::plain, &tok, &prompt_calls);
+                                  0, nullptr, nullptr, calc::Mode::plain, &tok, &prompt_calls);
         EXPECT(tok.decode(out[0]) == " 112 ok\n" && prompt_calls.fired == 1 && prompt_calls.malformed == 0,
                "a trigger at the end of the prompt fires, got \"%s\"", tok.decode(out[0]).c_str());
         EXPECT(std::equal(out[0].begin(), out[0].end() - 1, p.received[0].begin() + ptrdiff_t(L - 1)),
@@ -352,7 +352,7 @@ inline void test_calc_hook() {
         m.script = {wanted}; m.prediction = m.script;
         calc::Counts calls;
         const auto out = generate(m, {{kBos}}, 50, [](const auto& ids) { return ids.back() == '\n'; },
-                                  0, nullptr, c.mode, &bpe, &calls);
+                                  0, nullptr, nullptr, c.mode, &bpe, &calls);
         const std::string expected = std::string(c.before) + c.kept + c.result + " ok\n";
         EXPECT(bpe.decode(out[0]) == expected && calls.fired == 1 && calls.malformed == 0,
                "merged token \"%s\": the result replaces its rest, got \"%s\"", c.merge, bpe.decode(out[0]).c_str());

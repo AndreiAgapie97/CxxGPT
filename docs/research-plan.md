@@ -437,6 +437,12 @@ ways to turn more time into better answers, each with its own effort knob:
      batches.
    - It only helps once the right answer is often the most common one. At
      night 1's 0.8% it cannot. Add it when scores reach a few percent.
+   - **Status: built** (`eval-reasoning --tries N --temp T --seed S`, or
+     `--effort`; README, "Many tries and a vote"). Only finished tries
+     vote, each try has its own seed, and the headline is labelled with
+     its effort (`(greedy)`, `(maj@8, temp 0.7, seed 1)`). Not yet run on
+     a trained checkpoint: measure maj@N against greedy on the dev set
+     once scores reach a few percent.
 2. **Many tries and a judge.**
    - A second small model reads a solution and scores how likely it is right;
      keep its favorite of N.

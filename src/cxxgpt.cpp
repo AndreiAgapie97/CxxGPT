@@ -7,6 +7,8 @@
 //   cxxgpt gen-reasoning --out data/reason                 synthetic reasoning data
 //   cxxgpt prep-qa --in gsm8k.jsonl --out data/gsm8k/train  Q/A JSON Lines -> problems + tokens
 //   cxxgpt eval-reasoning --ckpt model.ckpt --test FILE    exact-answer accuracy
+//       [--tries N | --effort low/medium/high] [--temp T] [--seed S]
+//                                      sample N tries per problem; the headline becomes their maj@N vote
 //   cxxgpt bench-infer [--ckpt model.ckpt | model options]  ternary engine vs fp32 decode
 //
 // Run a subcommand with --help for its options.
@@ -579,10 +581,10 @@ int cmd_prep_qa(Args& a) {
 // The table of accuracy per task and difficulty, then up to show_failures
 // of the wrong answers.
 void print_eval(const EvalResult& r, size_t show_failures) {
-    std::map<std::string, std::map<int, std::pair<int, int>>> table;
+    std::map<std::string, std::map<int, LevelScore>> table;
     int min_d = 1 << 30, max_d = -(1 << 30);
-    for (const auto& [key, cell] : r.by_task) {
-        table[key.first][key.second] = cell;
+    for (const auto& [key, score] : r.by_task) {
+        table[key.first][key.second] = score;
         min_d = std::min(min_d, key.second);
         max_d = std::max(max_d, key.second);
     }
@@ -598,13 +600,15 @@ void print_eval(const EvalResult& r, size_t show_failures) {
                 std::printf("      -");
                 continue;
             }
-            std::printf(" %5.1f%%", 100.0 * it->second.first / it->second.second);
-            c += it->second.first;
-            n += it->second.second;
+            std::printf(" %5.1f%%", 100.0 * it->second.vote_correct / it->second.total);
+            c += it->second.vote_correct;
+            n += it->second.total;
         }
         std::printf(" %5.1f%%\n", 100.0 * c / std::max(1, n));
     }
-    std::printf("overall %.1f%% (%d / %d)\n", 100.0 * r.correct / std::max(1, r.total), r.correct, r.total);
+    // The effort label goes last, so "overall X% (a / b)" reads as before.
+    std::printf("overall %.1f%% (%d / %d) (%s)\n", 100.0 * r.correct / std::max(1, r.total), r.correct, r.total,
+                r.effort.c_str());
     std::printf("gold completions exceeding --max-new %d: %zu / %d\n", r.max_new, r.gold_over_cap, r.total);
     // Multi-line answers (GSM8K's) stay indented under their label.
     auto indent = [](std::string t) {
@@ -635,6 +639,20 @@ int cmd_eval_reasoning(Args& a) {
     const bool show = a.flag("show-failures");
     const int max_new = a.integer_int("max-new", 200);
     CHECK(max_new > 0, "--max-new must be positive");
+    // How many times to sample each problem and take a vote. --effort is a
+    // shorthand for a number of tries; --tries wins if both are given.
+    VoteOpts vote;
+    const std::string effort = a.str("effort", "low");
+    CHECK(effort == "low" || effort == "medium" || effort == "high", "--effort must be low, medium or high");
+    const int effort_tries = effort == "low" ? 1 : effort == "medium" ? 8 : 32;
+    vote.tries = a.has("tries") ? a.integer_int("tries", 1) : effort_tries;
+    CHECK(vote.tries > 0, "--tries must be positive");
+    vote.temperature = a.real("temp", 0.0);
+    CHECK(vote.tries == 1 || vote.temperature > 0, "--temp must be above 0 when sampling more than one try");
+    // Each try is seeded from (seed, problem, try): see VoteOpts.
+    const long seed = a.integer("seed", 1);
+    CHECK(seed >= 0, "--seed must not be negative");
+    vote.seed = uint64_t(seed);
     // As TernaryEngine runs it: the embedding (and --fp-attn attention) in
     // int8 rows.
     const bool as_engine = a.flag("as-engine");
@@ -647,19 +665,50 @@ int cmd_eval_reasoning(Args& a) {
     if (as_engine) round_to_engine_int8(model);
     std::vector<Problem> test = load_problems(test_path);
     if (limit > 0 && size_t(limit) < test.size()) {
-        // An even sample across the file, which is ordered by task.
+        // An even sample across the file, which is ordered by task. Each
+        // problem keeps its place in the file as its number, so its tries
+        // are seeded the same as without --limit.
         std::vector<Problem> sub;
-        for (int i = 0; i < limit; ++i) sub.push_back(test[size_t(i) * test.size() / limit]);
+        for (int i = 0; i < limit; ++i) {
+            const size_t place = size_t(i) * test.size() / size_t(limit);
+            sub.push_back(test[place]);
+            vote.problem_ids.push_back(place);
+        }
         test = std::move(sub);
     }
     const double t0 = now_seconds();
-    const EvalResult r = eval_reasoning(model, test, tok, batch, max_new);
+    // The scores, and with more than one try the effort report: per level
+    // (task, difficulty) and overall, the first sampled try's accuracy (a
+    // sample, not the greedy score), the vote's (maj@N), any try's (pass@N),
+    // and the mean number of distinct answers per problem (finished tries
+    // only).
+    auto report = [&](const EvalResult& r) {
+        print_eval(r, show ? r.failures.size() : 0);
+        if (vote.tries == 1) return;
+        std::printf("effort: tries %d, temperature %g, seed %ld\n", vote.tries, vote.temperature, seed);
+        std::printf("%-6s %2s %4s %17s %7s %7s %8s\n", "task", "d", "n", "first sampled try", "vote", "any",
+                    "distinct");
+        auto pct = [](int part, int whole) { return 100.0 * part / std::max(1, whole); };
+        for (const auto& [key, s] : r.by_task)
+            std::printf("%-6s %2d %4d %16.1f%% %6.1f%% %6.1f%% %8.2f\n", key.first.c_str(), key.second, s.total,
+                        pct(s.first_correct, s.total), pct(s.vote_correct, s.total), pct(s.any_correct, s.total),
+                        double(s.distinct_answers) / std::max(1, s.total));
+        const LevelScore all = r.overall();
+        std::printf("%-9s %4d %16.1f%% %6.1f%% %6.1f%% %8.2f (first sampled try / vote maj@%d / any try "
+                    "pass@%d / mean distinct answers)\n",
+                    "overall",
+                    all.total, pct(all.first_correct, all.total), pct(all.vote_correct, all.total),
+                    pct(all.any_correct, all.total), double(all.distinct_answers) / std::max(1, all.total),
+                    vote.tries, vote.tries);
+    };
+    // With a calculator, the same problems twice: without it, then with it.
+    const EvalResult r = eval_reasoning(model, test, tok, batch, max_new, 8, false, vote);
     if (tool != calc::Mode::none) std::printf("without tool:\n");
-    print_eval(r, show ? r.failures.size() : 0);
+    report(r);
     if (tool != calc::Mode::none) {
-        const EvalResult assisted = eval_reasoning(model, test, tok, batch, max_new, 8, false, tool);
+        const EvalResult assisted = eval_reasoning(model, test, tok, batch, max_new, 8, false, vote, tool);
         std::printf("with calculator:\n");
-        print_eval(assisted, show ? assisted.failures.size() : 0);
+        report(assisted);
         std::printf("calculator calls: %zu fired, %zu malformed\n",
                     assisted.tool_calls.fired, assisted.tool_calls.malformed);
     }
@@ -1124,7 +1173,7 @@ int cmd_sample(Args& a) {
     const auto out = generate(
         model, {ids}, n,
         [&](const std::vector<int>& g) { return g.back() == kBos || (answer && completion_done(text_of(g))); },
-        temp, &rng, tool, &tok, &counts);
+        temp, &rng, nullptr, tool, &tok, &counts);
     std::vector<int> gen = out[0];
     if (!gen.empty() && gen.back() == kBos) gen.pop_back();
     const std::string text = text_of(gen);
