@@ -331,7 +331,8 @@ token is never pushed down, runs shorter than N may repeat ("9 * 2"),
 and masked text (the question, planted mistakes) never counts, so copying
 the question costs nothing. The log keeps the cross-entropy as `loss` and
 adds `ul` (the term without ALPHA, per trained token) and how often it
-fires. It runs on the CPU engine only for now; the GPU kernels come next.
+fires. It runs on the CPU engine and on the GPU (`train --gpu`), which
+`test_gpu` checks against the CPU engine.
 
 How often it fires (share of trained tokens with a token to push down,
 windows of 512):

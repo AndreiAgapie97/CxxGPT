@@ -254,13 +254,14 @@ runs out. Two fixes, one at each end:
   greedy and maj@8, with the unfinished count.
 - **In training** (#34): `train --unlikelihood ALPHA --ul-ngram N` pushes down
   the token that would repeat a run of N trained tokens wherever the text
-  goes on differently (README, "Loops: unlikelihood training"). CPU engine
-  only so far. It fires on 0.6-2.8% of math tokens at N = 8; on a small
+  goes on differently (README, "Loops: unlikelihood training"), on the CPU
+  and the GPU. It fires on 0.6-2.8% of math tokens at N = 8; on a small
   CPU model it lowered the term 6% at the same validation loss.
 
 Next for #34, in order:
-1. The GPU kernels: the candidates are built on the host (as now), and the
-   term goes into `xent_fwd`/`xent_bwd`. Test it against the CPU engine.
+1. The GPU kernels: done (2026-10-15). The candidates are built on the
+   host, the term computed in `ul_fwd`/`ul_fix`; `test_gpu` checks it
+   against the CPU engine.
 2. Seed pairs (the funnel): small models from scratch on the math mix, with
    and without the term, at least 3 seeds, the same tokens. Judge on the dev
    set *without* the decode-time block: unfinished answers and repeated runs

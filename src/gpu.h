@@ -54,6 +54,10 @@ public:
     void set_params(const float* params);
     void get_params(float* params) const;
     void get_grads(float* grads) const;
+    // A ternary model's weights as the products use them (the GPU's
+    // ternary_quantize), quantized first if the weights changed. Only the
+    // ternary tensors' entries are meaningful. For tests (#40).
+    void get_ternary_weights(float* qparams);
     // AdamW moments and step count. m and v may be null (a fresh optimizer).
     void set_adam_state(long step, const float* m, const float* v);
     void get_adam_state(long* step, float* m, float* v) const;
@@ -64,6 +68,16 @@ public:
     double forward(const int* tokens, const int* targets, int B, int Tn, bool training = false);
     // Accumulates d(loss * loss_scale) into the gradients, as Model::backward.
     void backward(double loss_scale = 1.0);
+    // Unlikelihood training (#34), as Model::unlikelihood: off while alpha is
+    // 0. Training forwards then return ce + alpha * ul; last_parts() has the
+    // last forward's parts, as Model's last_ce, last_ul, last_fired and
+    // last_negatives.
+    void set_unlikelihood(double alpha, int ngram);
+    struct ForwardParts {
+        double ce = 0, ul = 0;
+        size_t fired = 0, negatives = 0;
+    };
+    ForwardParts last_parts() const;
     void zero_grad();
     // Global L2 norm of the gradients.
     double grad_norm();

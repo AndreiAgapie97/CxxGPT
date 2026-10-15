@@ -67,14 +67,17 @@ Reasoning is the first capability we go after.
   given) or other (for a person to judge), with flags for loops and
   numbers from outside the question; one JSON line per problem.
 - `train --unlikelihood ALPHA --ul-ngram N` (#34, off by default, CPU
-  engine only for now): at each trained position, every token that would
+  and GPU): at each trained position, every token that would
   repeat a run of N trained tokens of the same document (the no-repeat
   block's definition, `src/unlikelihood.h`) adds `ALPHA * -log(1 - p)` to
   the loss, never the target, never from masked text. The loss and
   gradient (`ops.h`) are tested against finite differences in double,
   with `1 - p` summed from the other tokens (exact near p = 1). The log
   keeps the cross-entropy as `loss` and adds the term and how often it
-  fires (also as two more CSV columns). The GPU kernels come next.
+  fires (also as two more CSV columns). On the GPU the negatives are
+  found on the host and the term computed in two kernels (`ul_fwd`,
+  `ul_fix`, `src/gpu.cu`); `test_gpu` checks the loss, term and gradient
+  against the CPU engine, a saturated term, and a term that never fires.
 - `src/gpu.cu` (interface `src/gpu.h`): the CUDA training backend, the
   same model op for op, fp32 with cuBLAS. `train --gpu` stores the
   products' inputs in bf16 by default (`--matmul bf16`, fp32 master

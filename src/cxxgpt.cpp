@@ -897,19 +897,32 @@ struct Backend {
     virtual EvalResult reason(const std::vector<Problem>& problems, const Tokenizer& tok, int max_new) = 0;
     // Device memory held, for the GPU; 0 on the CPU.
     virtual size_t device_bytes() const { return 0; }
-    // Unlikelihood training (#34): the CPU engine only, for now. While it is
-    // on, forward() still returns the cross-entropy alone (the curve stays
-    // comparable with runs without it), and the term's own numbers add up in
-    // take_unlikelihood() until it is called.
-    virtual void set_unlikelihood(double alpha, int ngram) {
-        (void)ngram;
-        CHECK(alpha == 0, "--unlikelihood runs on the CPU engine only for now (#34)");
-    }
+    // Unlikelihood training (#34). While it is on, forward() still returns
+    // the cross-entropy alone (the curve stays comparable with runs without
+    // it), and the term's own numbers add up in take_unlikelihood() until it
+    // is called.
+    virtual void set_unlikelihood(double alpha, int ngram) = 0;
     struct UnlikelihoodStats {
         double sum = 0;  // the term (without alpha), summed over trained targets
         size_t targets = 0, fired = 0, negatives = 0;
     };
-    virtual UnlikelihoodStats take_unlikelihood() { return {}; }
+    UnlikelihoodStats take_unlikelihood() { return std::exchange(ul_, {}); }
+
+protected:
+    double ul_alpha_ = 0;
+    // A training forward's parts (means over its targets), for forward():
+    // adds the term's numbers and returns the cross-entropy.
+    double add_unlikelihood(double ce, double ul, size_t fired, size_t negatives, const int* tgt, int N) {
+        const size_t targets = count_targets(tgt, size_t(N));
+        ul_.sum += ul * double(targets);
+        ul_.targets += targets;
+        ul_.fired += fired;
+        ul_.negatives += negatives;
+        return ce;
+    }
+
+private:
+    UnlikelihoodStats ul_;
 };
 
 struct CpuBackend : Backend {
@@ -918,18 +931,14 @@ struct CpuBackend : Backend {
     CpuBackend(Model<float>& m, AdamW& o) : model(m), opt(o) {}
     double forward(const int* inp, const int* tgt, int B, int Tn, bool training) override {
         const double loss = model.forward(inp, tgt, B, Tn, training);
-        if (!training || model.unlikelihood.alpha <= 0 || !tgt) return loss;
-        const size_t targets = count_targets(tgt, size_t(B) * Tn);
-        ul.sum += model.last_ul * double(targets);
-        ul.targets += targets;
-        ul.fired += model.last_fired;
-        ul.negatives += model.last_negatives;
-        return model.last_ce;
+        if (!training || ul_alpha_ <= 0 || !tgt) return loss;
+        return add_unlikelihood(model.last_ce, model.last_ul, model.last_fired, model.last_negatives, tgt, B * Tn);
     }
     void backward(double loss_scale) override { model.backward(loss_scale); }
-    void set_unlikelihood(double alpha, int ngram) override { model.unlikelihood = {alpha, ngram}; }
-    UnlikelihoodStats take_unlikelihood() override { return std::exchange(ul, {}); }
-    UnlikelihoodStats ul;
+    void set_unlikelihood(double alpha, int ngram) override {
+        ul_alpha_ = alpha;
+        model.unlikelihood = {alpha, ngram};
+    }
     void zero_grad() override { model.zero_grad(); }
     double step(double lr, double max_norm) override {
         const double norm = clip_grad_norm(model, max_norm);
@@ -960,9 +969,16 @@ struct GpuBackend : Backend {
         gpu.set_profile(g_profiler.enabled);
     }
     double forward(const int* inp, const int* tgt, int B, int Tn, bool training) override {
-        return gpu.forward(inp, tgt, B, Tn, training);
+        const double loss = gpu.forward(inp, tgt, B, Tn, training);
+        if (!training || ul_alpha_ <= 0) return loss;
+        const GpuTrainer::ForwardParts f = gpu.last_parts();
+        return add_unlikelihood(f.ce, f.ul, f.fired, f.negatives, tgt, B * Tn);
     }
     void backward(double loss_scale) override { gpu.backward(loss_scale); }
+    void set_unlikelihood(double alpha, int ngram) override {
+        ul_alpha_ = alpha;
+        gpu.set_unlikelihood(alpha, ngram);
+    }
     void zero_grad() override { gpu.zero_grad(); }
     double step(double lr, double max_norm) override {
         const double norm = gpu.grad_norm();
@@ -1039,7 +1055,7 @@ int cmd_train(Args& a) {
             "        --sampler random (qa: a window starting inside a question-answer document that fits\n"
             "        in one moves back to its start, so the answer is trained with its question)\n"
             "        --unlikelihood 0 (ALPHA > 0: also push down each token that would repeat a run of\n"
-            "        --ul-ngram 8 trained tokens of the same document; CPU only for now, #34)\n"
+            "        --ul-ngram 8 trained tokens of the same document; #34)\n"
             "start:  --init FILE (FILE's weights and model; new optimizer and schedule; data order from --seed;\n"
             "        with --ternary, the weights turn ternary from here on)\n"
             "output: --out model.ckpt --resume --log FILE.csv --log-every 10\n"

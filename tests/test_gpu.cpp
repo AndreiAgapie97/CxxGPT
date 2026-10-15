@@ -16,8 +16,12 @@
 // are checked alone against a double-precision reference. Then decoding:
 // the GPU's KV-cache decoder against the CPU's, and eval_reasoning() on it
 // (eval-reasoning --gpu) against the CPU, greedy, with a vote and with the
-// calculator. A last check trains on the GPU alone, with TF32 and with
-// bf16, until a toy pattern is learned.
+// calculator. Unlikelihood training (#34) runs the same comparison with
+// the term on, plus a saturated row and a term that never fires. The GPU's
+// ternary codes must be the CPU's, code for code (#40). A last
+// check trains on the GPU alone, with TF32 and with bf16, until a toy
+// pattern is learned.
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <string>
@@ -31,6 +35,7 @@
 #include "attention_ref.h"
 #include "extreme_loss_fixture.h"
 #include "test_accumulation.h"
+#include "test_ternary_codes.h"
 
 namespace {
 
@@ -60,6 +65,10 @@ struct Run {
     double clip = 0;
     bool fused = true;  // the GPU's fused attention kernels
     Matmul matmul = Matmul::fp32;
+    // > 0: unlikelihood training (#34) on both sides, on batches whose
+    // tokens come from 4 values, so runs repeat and the term fires.
+    double ul_alpha = 0;
+    int ul_ngram = 2;
 };
 
 void compare(const char* name, const Config& cfg, double tol_loss, double tol_grad, double tol_param, Run run = {}) {
@@ -77,19 +86,32 @@ void compare(const char* name, const Config& cfg, double tol_loss, double tol_gr
     gpu.set_adam_state(0, nullptr, nullptr);
     gpu.set_router_bias(cpu.router_bias);
     gpu.set_muon(muon, opt.muon_momentum, opt.muon_steps);
+    cpu.unlikelihood = {run.ul_alpha, run.ul_ngram};
+    gpu.set_unlikelihood(run.ul_alpha, run.ul_ngram);
 
     const int B = 3, Tn = cfg.seq_len, N = B * Tn;
     std::vector<int> tok, tgt;
     std::vector<float> g(cpu.num_params()), p(cpu.num_params());
-    double worst_loss = 0, worst_grad = 0, worst_param = 0;
+    double worst_loss = 0, worst_grad = 0, worst_param = 0, worst_ul = 0;
+    size_t fired = 0;
     std::string worst_tensor;
     for (int step = 0; step < 3; ++step) {
         random_batch(rng, cfg.vocab, N, tok, tgt);
+        if (run.ul_alpha > 0)
+            for (int& t : tok) t %= 4;
         cpu.zero_grad();
         gpu.zero_grad();
         const double lc = cpu.forward(tok.data(), tgt.data(), B, Tn, true);
         const double lg = gpu.forward(tok.data(), tgt.data(), B, Tn, true);
         worst_loss = std::max(worst_loss, std::abs(lc - lg) / std::abs(lc));
+        if (run.ul_alpha > 0) {
+            const GpuTrainer::ForwardParts f = gpu.last_parts();
+            EXPECT(f.fired == cpu.last_fired && f.negatives == cpu.last_negatives,
+                   "%s: the GPU found %zu negatives at %zu positions, the CPU %zu at %zu", name, f.negatives,
+                   f.fired, cpu.last_negatives, cpu.last_fired);
+            worst_ul = std::max(worst_ul, std::abs(f.ul - cpu.last_ul) / std::max(cpu.last_ul, 1e-30));
+            fired += cpu.last_fired;
+        }
         cpu.backward(1.0);
         gpu.backward(1.0);
         gpu.get_grads(g.data());
@@ -129,6 +151,11 @@ void compare(const char* name, const Config& cfg, double tol_loss, double tol_gr
         EXPECT(load == cpu.expert_load, "%s: expert loads differ (routing changed)", name);
     std::printf("  %-14s loss %.1e, grads %.1e (worst %s), params %.1e\n", name, worst_loss, worst_grad,
                 worst_tensor.c_str(), worst_param);
+    if (run.ul_alpha > 0) {
+        std::printf("  %-14s unlikelihood term %.1e apart, fired at %zu positions\n", "", worst_ul, fired);
+        EXPECT(fired > 0, "%s: the unlikelihood term never fired", name);
+        EXPECT(worst_ul <= tol_grad, "%s: the unlikelihood term differs by %g", name, worst_ul);
+    }
     EXPECT(worst_loss <= tol_loss, "%s: loss differs by %g", name, worst_loss);
     EXPECT(worst_grad <= tol_grad, "%s: gradient of %s differs by %g", name, worst_tensor.c_str(), worst_grad);
     EXPECT(worst_param <= tol_param, "%s: weights after the optimizer step differ by %g", name, worst_param);
@@ -291,6 +318,143 @@ void extreme_cross_entropy() {
     gpu.backward(1.0); gpu.get_grads(grad.data());
     for (float g : grad) EXPECT(g == 0, "all-ignored GPU gradient nonzero");
     std::printf("  extreme cross-entropy: CPU %.1f GPU %.1f reference %.1f\n", lc, lg, ref);
+}
+
+// Ternary codes (#40): the GPU quantizes with its own kernels (absolute
+// sums in double, one scale per tensor or expert, rintf), which must give
+// every weight the CPU's code, at the thresholds too, and the CPU's scale
+// to within an ulp; then again on weights the GPU itself trained.
+void ternary_codes_on_gpu(const Config& cfg) {
+    Model<float> cpu(cfg);
+    cpu.init(3);
+    Rng rng(4);
+    for (auto& w : cpu.params) w = float(rng.normal() * 0.3);
+    std::vector<std::pair<size_t, std::vector<size_t>>> planted;
+    for (const ParamInfo& p : cpu.infos)
+        if (p.ternary) {
+            const size_t offset = p.offset + (p.count - 1) * (p.size / p.count);  // the last copy
+            planted.push_back({offset, plant_threshold_cases(&cpu.params[offset], p.size / p.count)});
+            break;
+        }
+    CHECK(!planted.empty(), "no ternary tensor");
+    GpuTrainer gpu(cfg, cpu.infos, Matmul::fp32, true);
+    std::vector<float> q(cpu.num_params());
+    // Codes that differ, and values more than an ulp apart.
+    auto mismatches = [&](size_t* values) {
+        size_t codes = 0;
+        *values = 0;
+        for (const ParamInfo& p : cpu.infos)
+            if (p.ternary)
+                for (size_t i = p.offset; i < p.offset + p.size; ++i) {
+                    codes += ternary_sign(q[i]) != ternary_sign(cpu.qparams[i]);
+                    *values += std::abs(q[i] - cpu.qparams[i]) > 1.2e-7f * std::abs(cpu.qparams[i]);
+                }
+        return codes;
+    };
+    gpu.set_params(cpu.params.data());
+    gpu.get_ternary_weights(q.data());
+    cpu.weights_dirty = true;
+    cpu.quantize_weights();
+    size_t values = 0;
+    const size_t codes = mismatches(&values);
+    EXPECT(codes == 0 && values == 0, "ternary codes: %zu codes and %zu values differ from the CPU's", codes,
+           values);
+    const auto cases = threshold_cases();
+    for (size_t c = 0; c < cases.size(); ++c) {
+        const float wq = q[planted[0].first + planted[0].second[c]];
+        EXPECT(ternary_sign(wq) == cases[c].second, "GPU: w = %.9g got code %d, expected %d", cases[c].first,
+               ternary_sign(wq), cases[c].second);
+    }
+
+    // A few AdamW steps on the GPU, then its own weights quantized on the CPU.
+    std::vector<int> tok, tgt;
+    for (int step = 0; step < 3; ++step) {
+        random_batch(rng, cfg.vocab, 2 * cfg.seq_len, tok, tgt);
+        gpu.zero_grad();
+        gpu.forward(tok.data(), tgt.data(), 2, cfg.seq_len, true);
+        gpu.backward(1.0);
+        gpu.adamw_step(1e-3, 0.9, 0.95, 1e-8, 0.1, 1.0);
+    }
+    gpu.get_params(cpu.params.data());
+    // NaN weights would give code 0 on both sides and pass the comparison.
+    const size_t non_finite =
+        size_t(std::count_if(cpu.params.begin(), cpu.params.end(), [](float w) { return !std::isfinite(w); }));
+    EXPECT(non_finite == 0, "ternary codes: %zu weights are not finite after 3 GPU steps", non_finite);
+    gpu.get_ternary_weights(q.data());
+    cpu.weights_dirty = true;
+    cpu.quantize_weights();
+    const size_t trained = mismatches(&values);
+    EXPECT(trained == 0 && values == 0, "ternary codes after training: %zu codes and %zu values differ",
+           trained, values);
+    std::printf("  ternary codes: GPU = CPU for every weight, before and after 3 GPU steps\n");
+}
+
+// Unlikelihood with a saturated softmax: the fixture's logits are about
+// +-3e7, so the negative (token 0, repeating "0 0") has p = 1 and every
+// other probability underflows. Both sides give the floor's loss; the CPU's
+// exponential stops short of 0 where the GPU's reaches it, so only the
+// GPU's gradient being finite is checked. Then a term that never fires
+// (runs longer than the batch) must leave the GPU's gradient as it was, up
+// to rounding: the token embedding's gradient is summed with atomic adds,
+// whose order (and so its last bits) changes from run to run.
+void unlikelihood_edges() {
+    ExtremeLossFixture fixture;
+    auto& cpu = fixture.model;
+    const auto& cfg = cpu.cfg;
+    GpuTrainer gpu(cfg, cpu.infos, /*tf32=*/false);
+    gpu.set_params(cpu.params.data());
+    const int tgt[] = {1, 1, 2};
+    cpu.unlikelihood = {1.0, 2};
+    gpu.set_unlikelihood(1.0, 2);
+    cpu.zero_grad();
+    gpu.zero_grad();
+    const double lc = cpu.forward(fixture.tokens.data(), tgt, 1, 3, true);
+    const double lg = gpu.forward(fixture.tokens.data(), tgt, 1, 3, true);
+    const GpuTrainer::ForwardParts f = gpu.last_parts();
+    const double floor_term = -std::log(kUnlikelihoodFloor) / 3;  // one negative, 3 targets
+    EXPECT(f.negatives == 1 && cpu.last_negatives == 1, "saturated: %zu GPU, %zu CPU negatives", f.negatives,
+           cpu.last_negatives);
+    EXPECT(std::abs(f.ul - floor_term) < 1e-9 && std::abs(cpu.last_ul - floor_term) < 1e-9,
+           "saturated: term %g (GPU), %g (CPU), floor %g", f.ul, cpu.last_ul, floor_term);
+    EXPECT(std::abs(lc - lg) <= 1e-5 * std::abs(lc), "saturated: loss %g (GPU) vs %g (CPU)", lg, lc);
+    gpu.backward(1.0);
+    std::vector<float> grad(cpu.num_params());
+    gpu.get_grads(grad.data());
+    bool finite = true;
+    for (float g : grad) finite = finite && std::isfinite(g);
+    EXPECT(finite, "saturated: non-finite GPU gradient");
+
+    Config dense;
+    dense.vocab = 61;
+    dense.seq_len = 24;
+    dense.d_model = 64;
+    dense.n_layers = 2;
+    dense.n_heads = 4;
+    Model<float> m(dense);
+    m.init(5);
+    Rng rng(9);
+    std::vector<int> tok, t;
+    random_batch(rng, dense.vocab, 3 * dense.seq_len, tok, t);
+    std::vector<float> plain(m.num_params()), quiet(m.num_params());
+    for (const bool on : {false, true}) {
+        GpuTrainer g(dense, m.infos, Matmul::fp32, true);
+        g.set_params(m.params.data());
+        if (on) g.set_unlikelihood(1.0, 50);
+        g.zero_grad();
+        g.forward(tok.data(), t.data(), 3, dense.seq_len, true);
+        EXPECT(!on || g.last_parts().negatives == 0, "runs of 50 tokens repeated in a batch of 24");
+        g.backward(1.0);
+        g.get_grads(on ? quiet.data() : plain.data());
+    }
+    double diff = 0.0, scale = 0.0;
+    for (size_t i = 0; i < plain.size(); ++i) {
+        diff = std::max(diff, double(std::abs(quiet[i] - plain[i])));
+        scale = std::max(scale, double(std::abs(plain[i])));
+    }
+    EXPECT(diff <= 1e-6 * scale, "a term that never fires changed the GPU's gradient by %g (largest %g)", diff,
+           scale);
+    std::printf("  unlikelihood: saturated term %.1f on both, quiet term changes the gradient by %.1e (of %.1e)\n",
+                f.ul, diff, scale);
 }
 
 // Profiling names the parts of a step, with times from CUDA events.
@@ -583,6 +747,7 @@ int main() {
     Config fpa = ours;
     fpa.fp_attention = true;
     compare("ternary moe, fp attention", fpa, 1e-3, 3e-2, 1e-2);
+    ternary_codes_on_gpu(ours);
     Config nope = dense;
     nope.nope_every = 2;
     compare("dense, half NoPE", nope, 1e-5, 1e-4, 1e-4);
@@ -591,6 +756,13 @@ int main() {
     // times more than AdamW does, hence the looser weight tolerance.
     compare("dense muon", dense, 1e-5, 1e-4, 1e-3, {.muon = true});
     compare("moe muon", moe, 1e-5, 1e-4, 1e-3, {.muon = true, .clip = 0.5});
+
+    // Unlikelihood (#34): the term on both sides, exact products and bf16
+    // (whose gradients go through the bf16 copy of the logits' gradient).
+    unlikelihood_edges();
+    compare("dense ul", dense, 1e-5, 1e-4, 1e-4, {.ul_alpha = 0.5});
+    compare("moe ul", moe, 1e-5, 1e-4, 1e-4, {.ul_alpha = 0.5, .ul_ngram = 3});
+    compare("dense ul bf16", dense, 3e-4, 3e-1, 5e-2, {.matmul = Matmul::bf16, .ul_alpha = 0.5});
 
     // Decoding: exact products (summation order and expf against the CPU's
     // fast_exp are the only differences), MoE routing, layers without RoPE,

@@ -22,6 +22,7 @@
 #include "gemm.h"
 #include "profile.h"
 #include "thread_pool.h"
+#include "unlikelihood.h"
 
 // Runs fn over row ranges of [0, n) on the pool.
 inline void for_rows(int n, const std::function<void(int, int)>& fn, int min_per_thread = 4) {
@@ -417,24 +418,6 @@ double cross_entropy_forward(T* probs, T* losses, const int* targets, int N, int
     return count ? total / count : 0.0;
 }
 
-// ---------------------------------------------------------------------------
-// Unlikelihood (#34): besides the right next token, some rows name wrong
-// ones whose probability training should push down (for loops: the tokens
-// that would repeat a run already written). Row n's negative tokens are
-// tokens[offsets[n] .. offsets[n + 1]); their loss is -log(1 - p_c) each,
-// times alpha, added to the row's cross-entropy.
-// ---------------------------------------------------------------------------
-struct NegativeRows {
-    const int* offsets = nullptr;  // N + 1 entries
-    const int* tokens = nullptr;
-    double alpha = 0;
-    bool on() const { return offsets && alpha > 0; }
-};
-
-// 1 - p_c below this counts as this in the loss, which stays finite (at
-// most 69 per negative) when the other probabilities all underflow.
-constexpr double kUnlikelihoodFloor = 1e-30;
-
 // 1 - p[c] for one row of probabilities, summed from the other tokens: when
 // p[c] is close to 1, 1 - p[c] would lose every digit.
 template <class T>
@@ -451,14 +434,7 @@ double one_minus_prob(const T* p, int V, int c) {
 template <class T>
 double unlikelihood_forward(const T* probs, const int* targets, NegativeRows neg, int N, int V) {
     PROFILE("unlikelihood_fwd");
-    for (int n = 0; n < N; ++n)
-        for (int k = neg.offsets[n]; k < neg.offsets[n + 1]; ++k)
-            CHECK(neg.tokens[k] >= 0 && neg.tokens[k] < V && targets[n] >= 0 && neg.tokens[k] != targets[n],
-                  "negative token %d is not a wrong token of a counted row", neg.tokens[k]);
-    for (int n = 0; n < N; ++n)
-        for (int k = neg.offsets[n]; k < neg.offsets[n + 1]; ++k)
-            for (int k2 = neg.offsets[n]; k2 < k; ++k2)
-                CHECK(neg.tokens[k2] != neg.tokens[k], "negative token %d appears twice in a row", neg.tokens[k]);
+    check_negatives(neg, targets, N, V);
     std::vector<double> rows(size_t(N), 0.0);
     for_rows(N, [&](int n0, int n1) {
         for (int n = n0; n < n1; ++n)

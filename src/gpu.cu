@@ -26,6 +26,7 @@
 
 #include "attention.cuh"
 #include "attention_tc.cuh"
+#include "unlikelihood.h"
 
 #define CUDA_CHECK(call)                                                                       \
     do {                                                                                       \
@@ -402,11 +403,63 @@ __global__ void xent_fwd(float* probs, float* losses, const int* targets, int V)
 
 // cross_entropy_backward: d = (p - onehot(target)) * dloss, from the
 // probabilities in d, in place, or into dh in bf16 when dh is not null.
-__global__ void xent_bwd(float* d, __nv_bfloat16* dh, const int* targets, int N, int V, float dloss) {
+// With unlikelihood, p is first scaled by row_scale[n] = 1 - alpha * W (W:
+// the row's sum of p_c / (1 - p_c)), and ul_fix then writes the negatives'
+// own entries.
+__global__ void xent_bwd(float* d, __nv_bfloat16* dh, const int* targets, int N, int V, float dloss,
+                         const float* row_scale) {
     const size_t i = size_t(blockIdx.x) * blockDim.x + threadIdx.x;
     if (i >= size_t(N) * V) return;
     const int n = int(i / V), v = int(i % V), t = targets[n];
-    const float g = t < 0 ? 0.0f : v == t ? d[i] * dloss - dloss : d[i] * dloss;
+    const float p = row_scale ? d[i] * row_scale[n] : d[i];
+    const float g = t < 0 ? 0.0f : v == t ? p * dloss - dloss : p * dloss;
+    if (dh) dh[i] = __float2bfloat16(g);
+    else d[i] = g;
+}
+
+// unlikelihood_forward (ops.h), one block per row, on the probabilities
+// xent_fwd left: for each negative c, 1 - p_c summed in double from the
+// other tokens, its loss (floored), and what the backward pass needs:
+// p_c and w = p_c / (1 - p_c) per negative; per row the sum of w, the
+// scale 1 - alpha * W for xent_bwd, and the row's loss.
+__global__ void ul_fwd(const float* probs, const int* off, const int* tok, float* neg_p, double* neg_w,
+                       double* row_w, float* row_scale, double* row_ul, double alpha, int V) {
+    __shared__ double sh[kWarp + 1];
+    const int n = blockIdx.x;
+    const float* p = probs + size_t(n) * V;
+    double W = 0.0, ul = 0.0;
+    for (int k = off[n]; k < off[n + 1]; ++k) {
+        const int c = tok[k];
+        double q = 0.0;
+        for (int i = threadIdx.x; i < V; i += blockDim.x)
+            if (i != c) q += double(p[i]);
+        q = block_reduce(q, sh, false);
+        const double pc = double(p[c]), w = q > 0 ? pc / q : 0.0;
+        W += w;
+        ul -= log(fmax(q, kUnlikelihoodFloor));
+        if (threadIdx.x == 0) neg_p[k] = p[c], neg_w[k] = w;
+    }
+    if (threadIdx.x == 0) {
+        row_w[n] = W;
+        // At most -FLT_MAX: p_j <= 1 - p_c keeps p_j * scale small, but an
+        // infinite scale would turn p_j = 0 into NaN.
+        row_scale[n] = float(fmax(1.0 - alpha * W, -double(FLT_MAX)));
+        row_ul[n] = ul;
+    }
+}
+
+// The negatives' own gradient entries, after xent_bwd, one thread per
+// negative (cross_entropy_backward in ops.h): p_c (1 - alpha (W - w_c)) +
+// alpha p_c, the second term only where 1 - p_c > 0.
+__global__ void ul_fix(float* d, __nv_bfloat16* dh, const int* tok, const int* row, const float* neg_p,
+                       const double* neg_w, const double* row_w, int K, int V, double alpha, float dloss) {
+    const int k = blockIdx.x * blockDim.x + threadIdx.x;
+    if (k >= K) return;
+    const int n = row[k];
+    const double pc = neg_p[k], wc = neg_w[k];
+    const double self = wc > 0 ? alpha * pc : 0.0;
+    const float g = float((pc * (1 - alpha * (row_w[n] - wc)) + self) * double(dloss));
+    const size_t i = size_t(n) * V + tok[k];
     if (dh) dh[i] = __float2bfloat16(g);
     else d[i] = g;
 }
@@ -848,6 +901,19 @@ struct GpuTrainer::Impl {
     DevBuf<int> tokens, targets, counts;
     int B_ = 0, T_ = 0, B_cur = 0, T_cur = 0, n_valid = 0;
     bool has_targets = false;
+    // Unlikelihood (#34), as Model::unlikelihood: the negatives are found on
+    // the host (unlikelihood.h) in each training forward, the term computed
+    // here (ul_fwd, ul_fix). ul_active: the last forward had negatives.
+    double ul_alpha = 0;
+    int ul_ngram = 8;
+    RepeatNegatives negatives_h;
+    std::vector<int> neg_row_h;
+    std::vector<double> row_ul_h;
+    DevBuf<int> neg_off, neg_tok, neg_row;
+    DevBuf<float> neg_p, row_scale;
+    DevBuf<double> neg_w, row_w, row_ul;
+    bool ul_active = false;
+    GpuTrainer::ForwardParts parts;
     std::vector<float> losses_h;
     // The experts' row counts, copied back to the host (pinned memory, so
     // the copy can run behind other work) once counts_ready has passed.
@@ -1433,7 +1499,49 @@ struct GpuTrainer::Impl {
         double total = 0.0;
         for (int n = 0; n < N; ++n)
             if (targets_h[n] >= 0) total += losses_h[n], ++n_valid;
-        return n_valid ? total / n_valid : 0.0;
+        parts = {};
+        parts.ce = n_valid ? total / n_valid : 0.0;
+        ul_active = false;
+        if (!training || ul_alpha <= 0 || n_valid == 0) return parts.ce;
+        unlikelihood_forward(tokens_h, targets_h, B, Tn);
+        return parts.ce + ul_alpha * parts.ul;
+    }
+
+    void unlikelihood_forward(const int* tokens_h, const int* targets_h, int B, int Tn) {
+        const int N = B * Tn, V = cfg.vocab;
+        find_repeat_negatives(negatives_h, tokens_h, targets_h, B, Tn, ul_ngram);
+        const size_t K = negatives_h.tokens.size();
+        parts.fired = negatives_h.fired;
+        parts.negatives = K;
+        if (K == 0) return;  // the gradient is the cross-entropy's
+        check_negatives(negatives_h.rows(ul_alpha), targets_h, N, V);
+        neg_row_h.resize(K);
+        for (int n = 0; n < N; ++n)
+            for (int k = negatives_h.offsets[size_t(n)]; k < negatives_h.offsets[size_t(n) + 1]; ++k)
+                neg_row_h[size_t(k)] = n;
+        neg_off.resize(size_t(N) + 1);
+        neg_tok.resize(K);
+        neg_row.resize(K);
+        neg_p.resize(K);
+        neg_w.resize(K);
+        row_w.resize(N);
+        row_scale.resize(N);
+        row_ul.resize(N);
+        to_device(neg_off.p, negatives_h.offsets.data(), size_t(N) + 1);
+        to_device(neg_tok.p, negatives_h.tokens.data(), K);
+        to_device(neg_row.p, neg_row_h.data(), K);
+        {
+            Region r(*this, "output layer and loss");
+            ul_fwd<<<N, kBlock>>>(logits.p, neg_off.p, neg_tok.p, neg_p.p, neg_w.p, row_w.p, row_scale.p,
+                                  row_ul.p, ul_alpha, V);
+            LAUNCH_CHECK();
+        }
+        row_ul_h.resize(N);
+        to_host(row_ul_h.data(), row_ul.p, N);
+        double ul = 0.0;
+        for (double r : row_ul_h) ul += r;
+        parts.ul = ul / n_valid;
+        ul_active = true;
     }
 
     // ---- Incremental decoding, as Model::decode_begin / decode_step ----
@@ -1541,9 +1649,17 @@ struct GpuTrainer::Impl {
         dC.zero(size_t(N) * C);
         {
             Region r(*this, "output layer and loss");
-            xent_bwd<<<blocks_for(size_t(N) * V), kBlock>>>(logits.p, dlogitsh.p, targets.p, N, V,
-                                                            float(loss_scale / n_valid));
+            const float dloss = float(loss_scale / n_valid);
+            xent_bwd<<<blocks_for(size_t(N) * V), kBlock>>>(logits.p, dlogitsh.p, targets.p, N, V, dloss,
+                                                            ul_active ? row_scale.p : nullptr);
             LAUNCH_CHECK();
+            if (ul_active) {
+                const int K = int(negatives_h.tokens.size());
+                ul_fix<<<blocks_for(size_t(K)), kBlock>>>(logits.p, dlogitsh.p, neg_tok.p, neg_row.p, neg_p.p,
+                                                          neg_w.p, row_w.p, K, V, ul_alpha, dloss);
+                LAUNCH_CHECK();
+                ul_active = false;
+            }
             linear_backward(dC.p, G(wte), pick(logits, dlogitsh), pick(lnf_out, lnfh), P(wte), N, C, V);
         }
         dresid.zero(size_t(N) * C);
@@ -1708,6 +1824,11 @@ void GpuTrainer::get_grads(float* g) const {
     impl_->check_grads("get_grads()");
     to_host(g, impl_->grads.p, impl_->n_params);
 }
+void GpuTrainer::get_ternary_weights(float* q) {
+    CHECK(impl_->cfg.ternary, "get_ternary_weights() needs a ternary model");
+    if (impl_->weights_dirty) impl_->quantize_weights();
+    to_host(q, impl_->qparams.p, impl_->n_params);
+}
 
 void GpuTrainer::set_adam_state(long step, const float* m, const float* v) {
     impl_->adam_step = step;
@@ -1744,6 +1865,12 @@ double GpuTrainer::forward(const int* tokens, const int* targets, int B, int Tn,
     return impl_->forward(tokens, targets, B, Tn, training);
 }
 void GpuTrainer::backward(double loss_scale) { impl_->backward(loss_scale); }
+void GpuTrainer::set_unlikelihood(double alpha, int ngram) {
+    CHECK(alpha >= 0 && ngram >= 2, "unlikelihood: alpha %g, ngram %d", alpha, ngram);
+    impl_->ul_alpha = alpha;
+    impl_->ul_ngram = ngram;
+}
+GpuTrainer::ForwardParts GpuTrainer::last_parts() const { return impl_->parts; }
 void GpuTrainer::zero_grad() {
     impl_->grads.zero();
     impl_->grads_scratch = false;
