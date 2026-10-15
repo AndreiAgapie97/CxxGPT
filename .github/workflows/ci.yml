@@ -1,8 +1,16 @@
 name: CI
 
 on:
+  # main on every push; other branches through their pull request, so a
+  # PR's push does not start the whole set twice.
   push:
+    branches: [main]
   pull_request:
+
+# A newer push to a pull request cancels its older, unfinished run.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   test:

@@ -131,9 +131,16 @@ Reasoning is the first capability we go after.
 - C++20 (GCC 13 has no `<print>`, so not C++23 yet).
 - Commit directly to `main` (owner's instruction), and push each verified
   step.
-- Before committing, run all of these; CI runs the same set:
-  - build with `-Wall -Wextra -Werror` under both g++ and clang++;
-  - `make test`, `make asan` and `make tsan`.
+- Checks (owner's rule since 2026-10-15; GitHub Actions is free for this
+  public repository):
+  - before pushing, a quick local check: build with `-Wall -Wextra
+    -Werror` (g++ or clang++) and `make test`;
+  - CI runs the full gate on every PR and every push to `main`: g++ and
+    clang++ at three CPU levels, `make asan`, `make tsan`, the CUDA
+    builds and the native Windows build. A PR merges only with CI green;
+    if `main` goes red, fix it next;
+  - GitHub's runners have no GPU: `make gpu-test` on the laptop, once per
+    batch of changes that touch training or `gpu.cu`.
 - The CUDA code cannot run on this VM. CI compiles and links it with nvcc;
   here, compile-check it with clang's CUDA mode (`clang++ -x cuda
   --cuda-gpu-arch=sm_89 --cuda-device-only`, then `--cuda-host-only`)
