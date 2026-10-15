@@ -24,6 +24,8 @@ pyarrow for Parquet files (pip install pyarrow). For gated datasets, set
 HF_TOKEN to a Hugging Face access token.
 """
 import argparse
+import filecmp
+import hashlib
 import http.client
 import io
 import json
@@ -35,6 +37,7 @@ import urllib.request
 
 HF = os.environ.get("HF_ENDPOINT", "https://huggingface.co").rstrip("/")  # or a mirror
 DOC_SEP = "<|endoftext|>"
+DEV_SIZE = 500
 
 
 def log(msg):
@@ -241,8 +244,24 @@ def write_qa(rows, dest):
                 continue
             f.write(json.dumps({"question": q, "answer": f"{sol}\n#### {final}"}, ensure_ascii=False) + "\n")
             n += 1
-    os.replace(dest + ".part", dest)
-    log(f"  {dest}: {n} problems ({skipped} skipped)")
+    same = replace_if_changed(dest + ".part", dest)
+    log(f"  {dest}: {n} problems ({skipped} skipped){', unchanged' if same else ''}")
+
+
+def replace_if_changed(part, dest):
+    """Moves part over dest, unless dest already holds the same bytes.
+
+    An identical rerun then leaves dest and its timestamp alone, so
+    prepare_data.sh does not re-encode token files that are still valid.
+    Returns True when dest was already up to date."""
+    # filecmp remembers results by size and timestamp; a new .part file can
+    # match an earlier one's on a coarse clock, so compare afresh each time.
+    filecmp.clear_cache()
+    if os.path.exists(dest) and filecmp.cmp(part, dest, shallow=False):
+        os.remove(part)
+        return True
+    os.replace(part, dest)
+    return False
 
 
 def write_docs(docs, dest):
@@ -267,13 +286,60 @@ def write_docs(docs, dest):
 # Datasets
 # ---------------------------------------------------------------------------
 
+def normalize_question(question):
+    """Match original problem text, ignoring only whitespace differences."""
+    if not isinstance(question, str):
+        sys.exit("dataset question provenance must be text, not null or another type")
+    return " ".join(question.split())
+
+
+def dev_rows(questions):
+    """The row numbers of the dev problems: the DEV_SIZE questions whose
+    sha256 digest is smallest.
+
+    Each question's digest depends only on its own (whitespace-normalized)
+    text, so the choice does not depend on Python's random module or on the
+    order of the rows in the upstream file. Equal digests would need equal
+    questions, which get_gsm8k rejects; the row number only makes the sort
+    key complete."""
+    def key(i):
+        return hashlib.sha256(questions[i].encode("utf-8")).digest(), i
+    return set(sorted(range(len(questions)), key=key)[:DEV_SIZE])
+
+
 def get_gsm8k(out, args):
-    base = "https://raw.githubusercontent.com/openai/grade-school-math/master/grade_school_math/data"
-    for split in ("train", "test"):
-        if args.check:
+    base = os.environ.get("GSM8K_ENDPOINT",
+                          "https://raw.githubusercontent.com/openai/grade-school-math/master/grade_school_math/data")
+    if args.check:
+        for split in ("train", "test"):
             check_text(f"{base}/{split}.jsonl", 4096, '"question"', '"answer"', "####")
-        else:
-            download(f"{base}/{split}.jsonl", os.path.join(out, f"{split}.jsonl"))
+        return
+    # Keep the unmodified upstream file separately: reruns must never split an
+    # already reduced train.jsonl, including when upgrading old preparations.
+    path = download(f"{base}/train.jsonl", os.path.join(out, "raw", "train.jsonl"))
+    with open(path, encoding="utf-8") as f:
+        rows = [json.loads(line) for line in f if line.strip()]
+    questions = [normalize_question(row["question"]) for row in rows]
+    if len(set(questions)) != len(questions) or len(rows) <= DEV_SIZE:
+        sys.exit("GSM8K train must contain more than 500 distinct questions")
+    held_out = dev_rows(questions)
+    for split in ("train", "dev"):
+        dest = os.path.join(out, f"{split}.jsonl")
+        text = "".join(json.dumps(row, ensure_ascii=False) + "\n" for i, row in enumerate(rows)
+                       if (i in held_out) == (split == "dev"))
+        with open(dest + ".part", "w", encoding="utf-8") as f:
+            f.write(text)
+        replace_if_changed(dest + ".part", dest)
+    log(f"  GSM8K: {len(rows) - DEV_SIZE} train, {DEV_SIZE} dev (smallest sha256 of the question)")
+    download(f"{base}/test.jsonl", os.path.join(out, "test.jsonl"))
+
+
+def dev_questions(args):
+    # Standalone MetaMath/OpenMath preparation must apply the same exclusion.
+    out = os.path.join(args.out, "gsm8k")
+    get_gsm8k(out, args)
+    with open(os.path.join(out, "dev.jsonl"), encoding="utf-8") as f:
+        return {normalize_question(json.loads(line)["question"]) for line in f}
 
 
 def get_tinystories(out, args):
@@ -321,31 +387,48 @@ def get_openmath2(out, args):
         log(f"  {len(files)} files for split {args.split}")
         check_parquet(hf_url(repo, files[0]), cols)
         return
+    dev = dev_questions(args)
+    removed = 0
     sources = set(args.sources.split(",")) if args.sources else None
     paths = [hf_download(repo, p, os.path.join(out, "parquet", os.path.basename(p))) for p in files]
 
     def rows():
+        nonlocal removed
         for path in paths:
             for r in parquet_rows(path, cols):
-                if sources is None or r["problem_source"] in sources:
-                    yield r["problem"], r["generated_solution"], r["expected_answer"]
+                if sources is not None and r["problem_source"] not in sources:
+                    continue
+                # Counted after --sources, so "removed" is only what the dev filter took out.
+                if r["problem_source"] == "gsm8k" and normalize_question(r["problem"]) in dev:
+                    removed += 1
+                    continue
+                yield r["problem"], r["generated_solution"], r["expected_answer"]
 
     write_qa(rows(), os.path.join(out, f"{args.split}.jsonl"))
+    log(f"  OpenMath2 dev filter: removed {removed} rows")
 
 
 def get_metamath(out, args):
     # MetaMathQA: GSM8K and MATH training problems, rephrased and augmented;
     # each response ends with "The answer is: X".
     if args.check:
-        check_text(hf_url("meta-math/MetaMathQA", "MetaMathQA-395K.json"), 4096, '"query"', '"response"')
+        check_text(hf_url("meta-math/MetaMathQA", "MetaMathQA-395K.json"), 4096, '"query"', '"response"', '"original_question"')
         return
+    dev = dev_questions(args)
+    removed = 0
     path = hf_download("meta-math/MetaMathQA", "MetaMathQA-395K.json", os.path.join(out, "MetaMathQA-395K.json"))
     with open(path, encoding="utf-8") as f:
         data = json.load(f)
     marker = "The answer is: "
 
     def rows():
+        nonlocal removed
         for r in data:
+            if "original_question" not in r:
+                sys.exit("MetaMathQA row has no original_question; cannot exclude dev problems")
+            if normalize_question(r["original_question"]) in dev:
+                removed += 1
+                continue
             resp = r.get("response", "")
             k = resp.rfind(marker)
             if k < 0:
@@ -353,6 +436,7 @@ def get_metamath(out, args):
             yield r.get("query", ""), resp[:k], resp[k + len(marker):]
 
     write_qa(rows(), os.path.join(out, "train.jsonl"))
+    log(f"  MetaMathQA dev filter: removed {removed} rows")
 
 
 DATASETS = {

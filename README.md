@@ -124,6 +124,7 @@ during training).
 | `eval-reasoning` | exact-answer accuracy per task and difficulty |
 | `sample` | generates text from a prompt |
 | `bench-infer` | times the ternary inference engine against an fp32 baseline |
+| `leak-check` | finds questions (such as the GSM8K dev set) that share a run of 13 words with training files |
 
 ### Generated word problems
 
@@ -187,6 +188,20 @@ OpenMathInstruct-2 and MetaMathQA (`scripts/get_data.py`, which needs only
 `pyarrow`), trains a 16k-token BPE on a sample, and encodes everything.
 [docs/LAPTOP.md](docs/LAPTOP.md) has the whole setup, from a fresh Windows
 laptop to a night of training.
+
+Settings are chosen on a dev set, not on the GSM8K test set: `get_data.py`
+holds out 500 GSM8K train problems (`data/gsm8k/dev.jsonl`, the 500 with the
+smallest sha256 of their question) and removes them, and the MetaMath and
+OpenMath2 rows made from them, from training; it prints how many rows each
+filter removed. `DEV=1 scripts/night.sh` validates on them. Data prepared
+before the dev set existed needs one more `scripts/prepare_data.sh`, then
+one exact-text check that no dev question is left in training:
+```sh
+./cxxgpt leak-check --questions data/gsm8k/dev.txt \
+  --train data/gsm8k/train.txt,data/metamath/train.txt,data/openmath2/train.txt
+```
+[docs/LAPTOP.md](docs/LAPTOP.md) ("The dev set") gives the counts to
+expect.
 
 ## Reproducible research
 

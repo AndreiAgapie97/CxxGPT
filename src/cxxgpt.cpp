@@ -30,6 +30,7 @@
 #endif
 #include "infer.h"
 #include "json.h"
+#include "leak_check.h"
 #include "load_log.h"
 #include "model.h"
 #include "reasoning.h"
@@ -125,6 +126,41 @@ std::vector<std::string> split(const std::string& s, char sep) {
     for (size_t i; (i = s.find(sep, pos)) != std::string::npos; pos = i + 1) out.push_back(s.substr(pos, i - pos));
     out.push_back(s.substr(pos));
     return out;
+}
+
+// At most max_bytes of text, cut so that no UTF-8 character is split: the
+// bytes that continue a character look like 10xxxxxx in binary.
+std::string utf8_prefix(const std::string& text, size_t max_bytes) {
+    size_t cut = std::min(text.size(), max_bytes);
+    while (cut > 0 && cut < text.size() && (static_cast<unsigned char>(text[cut]) & 0xC0) == 0x80) --cut;
+    return text.substr(0, cut);
+}
+
+int cmd_leak_check(Args& a) {
+    const std::string questions = a.str("questions"), train = a.str("train");
+    a.done();
+    CHECK(!questions.empty() && !train.empty(),
+          "usage: cxxgpt leak-check --questions QUESTIONS.txt --train A.txt,B.txt,...\n"
+          "Questions: prep-qa problem records or one question per line.\n"
+          "Finds exact runs of 13 ASCII letter/digit words, ignoring case.");
+    const leak_check::Index index(leak_check::read_questions(questions));
+    for (const std::string& path : split(train, ',')) {
+        std::ifstream in(path, std::ios::binary);
+        CHECK(in, "cannot open %s", path.c_str());
+        const auto hits = index.scan(in);
+        const size_t count = size_t(std::count(hits.begin(), hits.end(), true));
+        std::printf("%s: %zu / %zu questions share a 13-word run\n", path.c_str(), count, hits.size());
+        size_t shown = 0;
+        for (size_t q = 0; q < hits.size() && shown < 3; ++q) {
+            if (!hits[q]) continue;
+            std::string example = utf8_prefix(index.questions[q], 240);
+            const bool cut = example.size() < index.questions[q].size();
+            for (char& ch : example) if (ch == '\n' || ch == '\r' || ch == '\t') ch = ' ';
+            std::printf("  question %zu: %s%s\n", q + 1, example.c_str(), cut ? "..." : "");
+            ++shown;
+        }
+    }
+    return 0;
 }
 
 // The tokenizer at path, or the byte-level one (no merges) if path is empty.
@@ -1181,6 +1217,7 @@ int main(int argc, char** argv) {
         {"prep-qa", cmd_prep_qa, "turns question/answer JSON Lines into problems and token files"},
         {"eval-reasoning", cmd_eval_reasoning, "exact-answer accuracy on a problems file"},
         {"bench-infer", cmd_bench_infer, "times the ternary inference engine against fp32 decoding"},
+        {"leak-check", cmd_leak_check, "finds questions that share a 13-word run with training files"},
     };
     const std::string cmd = argc > 1 ? argv[1] : "";
     Args a(argc, argv, 2);

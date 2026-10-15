@@ -23,12 +23,18 @@
 #         first, ternary ones at the end.
 #   MIX: the training files, comma-separated, "*N" repeats one N times;
 #        by default web text, stories, OpenMath, MetaMath and GSM8K train x4.
-# Validation is on the GSM8K test set, which training never sees: the loss
+#   DEV=1: use the held-out GSM8K dev files for both validation and exams.
+# Validation defaults to the GSM8K test set, which training never sees: the loss
 # on its worked solutions every 500 steps, and exact answers every 2000.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 DATA=${DATA:-data}
 RUN=${RUN:-night1}
+case "${DEV:-0}" in
+  0) validation="test" ;;
+  1) validation="dev" ;;
+  *) echo "DEV must be 0 or 1"; exit 1 ;;
+esac
 # Keep night1's seed/order unchanged. Later INIT nights get another order;
 # resuming still restores the checkpoint RNG. An explicit --seed overrides this.
 seed=1
@@ -95,8 +101,8 @@ if [ -x "$smi" ]; then
 fi
 # tee -i: Ctrl-C reaches only the trainer, which saves before it stops.
 # shellcheck disable=SC2086
-"$CX" train $GPU --data "$MIX" --val "$DATA/gsm8k/test.tok" --bpe "$DATA/tok.bpe" \
-  --reason-test "$DATA/gsm8k/test.txt" --reason-every 2000 --reason-limit 250 \
+"$CX" train $GPU --data "$MIX" --val "$DATA/gsm8k/$validation.tok" --bpe "$DATA/tok.bpe" \
+  --reason-test "$DATA/gsm8k/$validation.txt" --reason-every 2000 --reason-limit 250 \
   "${model[@]}" $OPT --seq "$SEQ" --batch "$BATCH" --accum "$ACCUM" --steps "$steps" --warmup 500 --lr "$LR" \
   --eval-every 500 --eval-batches "$eval_batches" --save-every 1000 --log-every 50 --time-limit "$minutes" \
   --seed "$seed" --out "runs/$RUN.ckpt" --log "runs/$RUN.csv" --load-log "runs/$RUN.load.csv" "${resume[@]}" "$@" 2>&1 | tee -ia "runs/$RUN.log"

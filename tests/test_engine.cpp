@@ -5,6 +5,7 @@
 #include <thread>
 
 #include "test_attention.h"
+#include "test_leak_check.h"
 #include "test_load_log.h"
 #include "test_model.h"
 #include "test_memory.h"
@@ -30,6 +31,7 @@ int main(int argc, char** argv) {
     struct { const char* name; void (*fn)(); } suites[] = {
         {"ops", test_ops},
         {"portability", test_portability},
+        {"leak check", test_leak_check},
         {"model", test_model},
         {"expert load log", test_load_log},
         {"memory", test_memory},

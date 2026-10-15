@@ -111,6 +111,48 @@ and can do everything else from there.
    every push that these files are still where the script expects them
    (`get_data.py --check`).
 
+### The dev set (`DEV=1`)
+
+We choose settings on a dev set, never on the GSM8K test set (which gives
+the headline numbers only). `get_data.py` holds 500 GSM8K train problems
+out as `data/gsm8k/dev.jsonl` (the 500 whose question text has the smallest
+sha256 digest, so every preparation picks the same ones), and drops them,
+and the MetaMath and OpenMath2 rows made from them, from the training files.
+
+- **Rerun `scripts/prepare_data.sh` once before the first `DEV=1` night.**
+  Data prepared before this change has no `gsm8k/dev.txt` or `dev.tok`, and
+  its MetaMath and OpenMath2 files still contain the dev problems. The rerun
+  downloads only GSM8K train again (4 MB, now kept unchanged as
+  `gsm8k/raw/train.jsonl`), rewrites the filtered files from the downloads
+  it already has, and re-encodes only the token files whose source changed.
+  A second rerun leaves everything as it is.
+- While it runs, `get_data.py` prints how many rows each filter removed:
+  `MetaMathQA dev filter: removed N rows` and `OpenMath2 dev filter:
+  removed N rows`. Expected sizes: 500 is 6.7% of GSM8K train's 7473
+  problems, so about 6.7% of each set's GSM8K-derived rows. MetaMathQA has
+  about 240,000 of those (its other 155,000 come from MATH), so expect
+  roughly 16,000; for OpenMath2, about 6.7% of the `train_1M` rows whose
+  `problem_source` is `gsm8k`. A count near zero means the filter did not
+  match anything: stop and tell me. (TODO: replace these estimates with the
+  counts measured on the laptop's data.)
+- Then check once, by exact text, that no dev question is left in the
+  training files (a few minutes; it streams the files):
+  ```sh
+  ./cxxgpt leak-check --questions data/gsm8k/dev.txt \
+    --train data/gsm8k/train.txt,data/metamath/train.txt,data/openmath2/train.txt
+  ```
+  For each file it prints how many of the 500 dev questions share a run of
+  13 words with it, and up to three of them. Expect 0 or close to 0 for
+  `gsm8k/train.txt`. MetaMath and OpenMath2 can keep a few: their
+  rephrased or augmented problems are new texts that no filter can trace
+  back. (TODO: record the measured numbers here.)
+- `DEV=1 ... scripts/night.sh` then validates and takes its exams on
+  `data/gsm8k/dev.tok` and `dev.txt` instead of the test files. The default
+  stays `DEV=0` (the test set), so the night-1 command is unchanged.
+- Night 1 trained on all of GSM8K train, dev problems included, so the dev
+  set is only clean for a model trained from scratch, not for one that
+  starts from night 1's weights (`INIT=runs/night1.ckpt`).
+
 ### Night 1
 
 ```sh
@@ -120,8 +162,9 @@ TOKS=... BATCH=... ACCUM=... MODEL="..." scripts/night.sh   # the line the probe
 
 `night.sh` sizes the run so its learning-rate schedule ends when the
 night does (7.5 hours by default), trains on web text, stories and worked
-math, and checks itself on the GSM8K test set, which training never sees:
-validation loss every 500 steps, exact answers every 2000. Its settings
+math, and checks itself on the GSM8K test set, which training never sees
+(or on the dev set with `DEV=1`, above): validation loss every 500 steps,
+exact answers every 2000. Its settings
 (model size, optimizer, batch, data mix) are at the top of the script.
 Run the same command again to resume after an interruption. The log is
 `runs/night1.log`; in the morning, `scripts/report.sh night1` sums it up on

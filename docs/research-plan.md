@@ -54,9 +54,21 @@ benchmaxxing by selection, with nothing dishonest intended.
    and one try are not the same test.
 
 **The dev set.**
-- About 500 problems taken out of GSM8K train with a fixed seed, kept in a
-  file, and never trained on. `night.sh` uses them for `--val` and
-  `--reason-test`.
+- `scripts/get_data.py gsm8k` holds out exactly 500 GSM8K train problems:
+  the 500 whose question (with runs of whitespace made single spaces) has the
+  smallest sha256 digest. A question's digest depends only on its own text,
+  so the choice depends neither on Python's random module nor on the order
+  of the upstream file. It keeps the upstream file in
+  `data/gsm8k/raw/train.jsonl`, writes the remaining problems to
+  `train.jsonl` (in upstream order), and writes the held-out problems to
+  `dev.jsonl`. Repeating preparation selects the same problems; the official
+  test file is unchanged. (The first version of PR 5 picked the 500 with
+  `random.sample` and seed `20261014`; that split was never used, and this
+  one replaces it.)
+- `scripts/prepare_data.sh` also writes `gsm8k/dev.txt` and `dev.tok`.
+  `DEV=1 scripts/night.sh` uses those files for both `--val` and
+  `--reason-test`. The default remains `DEV=0`, using the test files so the
+  original night-1 command is unchanged. Use `DEV=1` when choosing settings.
 - MetaMath and OpenMath2 are built from GSM8K train problems, so taking the
   500 out of `gsm8k/train` alone is not enough:
   - MetaMathQA rows carry `original_question`; drop the rows whose original is
@@ -64,9 +76,34 @@ benchmaxxing by selection, with nothing dishonest intended.
   - OpenMath2 rows with `problem_source` `gsm8k` repeat the problem text; drop
     exact matches. Rows from `augmented_gsm8k` are new problems with no link
     back to their source, so a small leak remains. Write it down.
-- `scripts/get_data.py` reads neither `original_question` nor matches problem
-  texts today, so this needs a small change there and in
-  `scripts/prepare_data.sh`, then a fresh data preparation.
+- The downloader now applies both filters after normalizing whitespace and
+  prints the number of excluded rows separately for MetaMathQA and OpenMath2.
+  MetaMath rows without `original_question` stop preparation rather than
+  silently bypassing the filter. Preparing either dataset by itself first
+  creates/loads the same GSM8K dev split.
+- The remaining `augmented_gsm8k` leak is **not removed**: those rows have no
+  original-question link, and exact text matching cannot identify reworded
+  versions of a dev problem. The dev set is therefore not guaranteed free of
+  semantic overlap. The filter deliberately does not discard all augmented
+  problems or try to infer their origins.
+- Rerun `scripts/prepare_data.sh` to replace old, unfiltered math data. It
+  rebuilds question/token pairs when their JSONL source is newer, so an old
+  `train.tok` cannot silently retain the removed problems. No prepared data
+  files are stored in the repository.
+- To audit literal overlap, run
+  `./cxxgpt leak-check --questions data/gsm8k/dev.txt --train A.txt,B.txt`.
+  The question file may
+  be a `prep-qa` five-column problem file (only its question field is used),
+  or plain text with one question per line. Words are ASCII letters/digits,
+  lowercased; punctuation separates words, and so do the stored escapes
+  `\n`, `\t`, `\r` and `\uXXXX` of `.txt` and JSON Lines files. A hit requires 13 consecutive
+  words, including across training-file line breaks. Each training file is
+  scanned separately and reports its number of hit questions and up to three
+  examples (1-based question numbers). Repeated matches count once per
+  question. Shorter questions cannot match. This detects literal overlap,
+  not paraphrases. The scanner stores the question index and hit flags, a
+  fixed 64 KiB read buffer, and at most one question-sized word; training-file
+  length and unbroken training tokens cannot make its memory grow.
 - Night 1 trained on all of GSM8K train. A model that continues from night 1
   has seen the dev problems, so the dev set is only clean for a model trained
   from scratch. If we keep night 1's weights, use a separate word-problem set
@@ -712,11 +749,11 @@ What this says:
    only 20,800 and 7.4 GB. Not for ternary models yet (their quantized
    values are not exact in bf16; int8 tensor cores are the way there).
 3. **Muon in bf16** (16% of the step after item 2). **Done** with
-   `--matmul bf16` (2026-10-14): Newton–Schulz's products take bf16 copies
+   `--matmul bf16` (2026-10-14): Newtonï¿½Schulz's products take bf16 copies
    of X and A, with fp32 sums, X kept in fp32, and cuBLAS adding the b A and
    a X terms in. Muon went from 434 to 288 ms a step; with item 5's first
    step, the night-1 model trains at 25,600 tokens/s (2.55 s a step, steady
-   over a 200-step run). Reference Muon runs Newton–Schulz all in bf16.
+   over a 200-step run). Reference Muon runs Newtonï¿½Schulz all in bf16.
 4. **Exams on the GPU.** Each one runs on the CPU while the GPU waits: about
    5 minutes for 250 problems, about 15 minutes per night with the final
    exam. Run them on the GPU, or less often.
