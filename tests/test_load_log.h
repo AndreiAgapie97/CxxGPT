@@ -73,17 +73,23 @@ inline void check_load_log_rows(std::istream& csv, long step,
         EXPECT(actual_step == step && actual_layer == l, "wrong step/layer in load log");
         double total = 0, maximum = 0;
         for (double count : counts[l]) { total += count; maximum = std::max(maximum, count); }
+        // The CSV keeps six significant digits (%.6g), so each printed number
+        // is off by at most half a unit in the sixth digit: under 5e-7 for a
+        // share (below 1), under 5e-6 for the ratio (below 10 here). In these
+        // tests one wrong token assignment would move a share by over 1e-2.
+        const double share_tolerance = 1e-6, ratio_tolerance = 1e-5;
         double sum = 0;
         for (double count : counts[l]) {
             double share = -1;
             fields >> share;
-            EXPECT(std::abs(share - count / total) < 1e-14, "logged share differs from independent router choices");
+            EXPECT(std::abs(share - count / total) < share_tolerance,
+                   "logged share differs from independent router choices");
             sum += share;
         }
         double ratio = -1;
         fields >> ratio;
-        EXPECT(std::abs(sum - 1) < 1e-14, "layer shares do not sum to one");
-        EXPECT(std::abs(ratio - maximum / total * counts[l].size()) < 1e-14, "wrong layer load ratio");
+        EXPECT(std::abs(sum - 1) < share_tolerance * counts[l].size(), "layer shares do not sum to one");
+        EXPECT(std::abs(ratio - maximum / total * counts[l].size()) < ratio_tolerance, "wrong layer load ratio");
         std::string extra;
         EXPECT(!bool(fields >> extra), "extra load log fields");
     }

@@ -80,7 +80,8 @@ status=0
 [[ "$status" == 1 ]]
 grep -q 'expert load log header differs' "$TEST_DIR/load-invalid.log"
 
-# Run the unchanged report script in a disposable runs directory.
+# Run the unchanged report script in a disposable runs directory. The CSV's
+# %.6g writes tiny shares in exponent form (5e-05); awk must still read them.
 mkdir -p "$TEST_DIR/report/scripts" "$TEST_DIR/report/runs"
 cp scripts/report.sh "$TEST_DIR/report/scripts/report.sh"
 printf 'model: tiny fixture\nstep 40 | loss 1.0 | 100 tok/s\n' > "$TEST_DIR/report/runs/fixture.log"
@@ -89,7 +90,7 @@ step,layer,expert_0,expert_1,max_load_ratio
 10,0,0.5,0.5,1
 10,1,0,1,2
 10,2,0.01,0.99,1.98
-20,0,0.005,0.995,1.99
+20,0,5e-05,0.99995,1.9999
 20,1,0.2,0.8,1.6
 20,2,0.5,0.5,1
 # resumed at step 20

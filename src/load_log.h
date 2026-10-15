@@ -44,9 +44,10 @@ public:
             if (total == 0) continue;
             if (csv) {
                 std::fprintf(csv, "%ld,%zu", step, l);
-                for (double count : counts) std::fprintf(csv, ",%.17g", count / total);
+                // Six significant digits: 0.1, not 0.10000000000000001.
+                for (double count : counts) std::fprintf(csv, ",%.6g", count / total);
                 const double ratio = *std::max_element(counts.begin(), counts.end()) * counts.size() / total;
-                std::fprintf(csv, ",%.17g\n", ratio);
+                std::fprintf(csv, ",%.6g\n", ratio);
             }
             for (size_t e = 0; e < counts.size(); ++e) {
                 if (counts[e] * 100 >= total) continue;  // at least 1%
