@@ -128,7 +128,7 @@ inline void test_calc() {
         r.huge = a.huge || b.huge || std::abs(r.value) > 1.1e19;
         return r;
     };
-    size_t exact = 0, after_odd = 0, repeating = 0, overflow = 0, skipped = 0;
+    size_t exact_cases = 0, after_odd = 0, repeating = 0, overflow = 0, skipped = 0;
     for (int i = 0; i < 4500; ++i) {
         const bool only_times = i >= 4000;
         const Node t = only_times ? tree(3, true) : tree(1 + int(rng.below(4)), false);
@@ -159,16 +159,16 @@ inline void test_calc() {
             ++repeating;
             EXPECT(!result, "calculator must reject a repeating decimal: %s", expr.c_str());
         } else {
-            ++(odd_divisor ? after_odd : exact);
+            ++(odd_divisor ? after_odd : exact_cases);
             EXPECT(result == std::optional<std::string>(calc_format(ref)), "calculator exact reference: %s = %s, got %s",
                    expr.c_str(), calc_format(ref).c_str(), result ? result->c_str() : "nothing");
         }
     }
     // Each kind of case must actually occur (expected counts are several
     // times these bounds), so a broken reference cannot skip everything.
-    EXPECT(exact >= 500 && after_odd >= 20 && repeating >= 50 && overflow >= 50,
+    EXPECT(exact_cases >= 500 && after_odd >= 20 && repeating >= 50 && overflow >= 50,
            "random calculator cases: %zu exact, %zu finite after an odd divisor, %zu repeating, %zu overflow, %zu skipped",
-           exact, after_odd, repeating, overflow, skipped);
+           exact_cases, after_odd, repeating, overflow, skipped);
 
     // The overflow boundary itself, with an exact oracle: products and sums
     // of two integers right around INT64_MAX, with either sign. The
@@ -228,8 +228,8 @@ inline void test_calc() {
     EXPECT(!calc::response("16 * 7 =", calc::Mode::plain), "plain waits for trailing space");
     EXPECT(calc::response("<<48/2=", calc::Mode::notes) == std::optional<std::string>("24>>"), "notes result");
     EXPECT(!calc::response("<<2=2>> then =", calc::Mode::notes), "closed note ignored");
-    const auto open = calc::response("<<5/0=", calc::Mode::notes);
-    EXPECT(open && open->empty(), "an open note is malformed at its first =");
+    const auto open_note = calc::response("<<5/0=", calc::Mode::notes);
+    EXPECT(open_note && open_note->empty(), "an open note is malformed at its first =");
     EXPECT(!calc::response("<<5/0=unknown =", calc::Mode::notes), "an open note is not counted again at a later =");
     EXPECT(!calc::response("<<5/0=unknown, so 2+2=", calc::Mode::notes), "nor at a later = with arithmetic");
 }
