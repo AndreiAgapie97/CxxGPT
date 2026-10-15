@@ -121,7 +121,9 @@ Reasoning is the first capability we go after.
   the Hugging Face endpoints, since huggingface.co is blocked here; CI's
   `data-sources` job checks the real files and columns (`--check`).
 - `scripts/compare.sh`: the architecture comparison on the curriculum.
-- For the laptop: `scripts/setup_wsl.sh` (toolchain, build, all tests),
+- For the laptop (native Windows since 2026-10-15; the scripts run in Git
+  Bash): `scripts/build_windows.cmd` (build, kernel, engine and GPU tests;
+  `scripts/setup_wsl.sh` is the Linux equivalent, kept and run by CI),
   `scripts/probe.sh` (GPU speed and memory per model size; prints the
   night.sh command for each), `scripts/prepare_data.sh` (downloads, our
   tokenizer, token files) and `scripts/night.sh` (one night of training,
@@ -139,7 +141,7 @@ Reasoning is the first capability we go after.
 
 1. CPU, tiny scale (this VM): compare dense, ternary, MoE and ternary MoE
    on the reasoning curriculum; fix what the evals expose.
-2. GPU training on the owner's laptop (RTX 4070 8 GB, under WSL2):
+2. GPU training on the owner's laptop (RTX 4070 8 GB, native Windows):
    - a CUDA backend for the same model, tested op by op against the CPU
      engine;
    - overnight runs on public data (general text plus math and reasoning
@@ -154,11 +156,16 @@ Reasoning is the first capability we go after.
 - This VM: 4 vCPUs (AVX-512 + VNNI), 15 GB RAM, ~30 GB free disk, no GPU.
   huggingface.co is blocked; GitHub raw files and PyPI work.
 - The owner's laptop:
-  - Windows, used through WSL2 Ubuntu 24.04;
+  - Windows 11, used natively (WSL2 was removed on 2026-10-15: native
+    trains the same model 7% faster, without WSL's slow stretches); Visual
+    Studio Build Tools 2022, LLVM clang-cl 23, CUDA 13.3, Git Bash; the
+    clone is `C:\Users\andre\Desktop\CxxGPT`, with `data/` and `runs/`;
   - 8-core/16-thread AMD (Zen 4, AVX-512), 32 GB RAM;
   - RTX 4070 laptop GPU with 8 GB VRAM;
-  - under 200 GB free disk;
-  - available for training overnight only.
+  - about 90 GB free disk;
+  - available for training overnight only. In the day the owner's other
+    project (PAROIKOS) needs the CPU: no heavy CPU runs then without
+    asking, and timings taken while it runs are not clean.
 
 ## Conventions
 
@@ -167,14 +174,18 @@ Reasoning is the first capability we go after.
   step.
 - Checks (owner's rule since 2026-10-15; GitHub Actions is free for this
   public repository):
-  - before pushing, a quick local check: build with `-Wall -Wextra
-    -Werror` (g++ or clang++) and `make test`;
+  - before pushing, a quick local check: on the laptop,
+    `scripts/build_windows.cmd` (clang-cl with `-Werror`, the kernel,
+    engine and GPU tests); on a Linux machine (the VM), build with `-Wall
+    -Wextra -Werror` (g++ or clang++) and `make test`. The shell CLI
+    tests, asan and tsan are Linux-only: from the laptop, CI runs them;
   - CI runs the full gate on every PR and every push to `main`: g++ and
     clang++ at three CPU levels, `make asan`, `make tsan`, the CUDA
     builds and the native Windows build. A PR merges only with CI green;
     if `main` goes red, fix it next;
-  - GitHub's runners have no GPU: `make gpu-test` on the laptop, once per
-    batch of changes that touch training or `gpu.cu`.
+  - GitHub's runners have no GPU: `build\test_gpu.exe` on the laptop
+    (`build_windows.cmd` runs it), once per batch of changes that touch
+    training or `gpu.cu`.
 - The CUDA code cannot run on this VM. CI compiles and links it with nvcc;
   here, compile-check it with clang's CUDA mode (`clang++ -x cuda
   --cuda-gpu-arch=sm_89 --cuda-device-only`, then `--cuda-host-only`)
