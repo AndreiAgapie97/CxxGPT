@@ -5,6 +5,7 @@
 #include <thread>
 
 #include "test_attention.h"
+#include "test_calc.h"
 #include "test_leak_check.h"
 #include "test_load_log.h"
 #include "test_model.h"
@@ -29,6 +30,8 @@ int main(int argc, char** argv) {
     g_pool = &tp;
 
     struct { const char* name; void (*fn)(); } suites[] = {
+        {"calculator", test_calc},
+        {"calculator hook", test_calc_hook},
         {"ops", test_ops},
         {"portability", test_portability},
         {"leak check", test_leak_check},
