@@ -228,6 +228,10 @@ inline void test_wordgen() {
             if (p.shape == WordProblem::part) (p.percentage ? saw_percentage : saw_fraction) = true;
             if (p.shape == WordProblem::rate) for (const std::string unit : {"hour", "day", "week"})
                 if (p.problem.question.find(unit) != std::string::npos) rate_units.insert(unit);
+            // Kept-items stories add items with "keeps" sentences only, never gifts.
+            if (p.shape == WordProblem::part)
+                for (size_t k = 1; k < p.patterns.size(); ++k)
+                    EXPECT(p.patterns[k] / 6 == word_detail::part_extra, "part story adds items without keeping them");
             if (p.problem.steps.find(" as the result.") != std::string::npos) ++inline_steps;
             seen_distractors.insert(p.distractor);
             distractor_positions.insert(p.distractor_position);

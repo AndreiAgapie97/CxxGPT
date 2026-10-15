@@ -110,8 +110,8 @@ Options (see `gen-word --help`):
   distractor wording; a distractor number never appears in the calculation.
 - `--notes on|off`: include or omit GSM8K calculator notes such as
   `<<48/2=24>>24` (default on). This changes only the worked solution.
-- `--split train|test`: 80 training sentence patterns or 40 held-out test
-  patterns, grouped into 20 arithmetic situations. The opening patterns
+- `--split train|test`: 84 training sentence patterns or 42 held-out test
+  patterns, grouped into 21 arithmetic situations. The opening patterns
   differ too, so the splits cannot share a complete question, even with
   different seeds. Each file also omits duplicate questions.
 
@@ -119,6 +119,8 @@ Stories include a running quantity, comparisons between two people, totals
 over two or three people, production per hour/day/week combined with another
 person's contribution, a fraction or percentage of one part combined with
 the rest, and unit prices times quantities followed by change from a payment.
+In the fraction-or-percentage stories, which ask how many items are kept,
+extra items are always described as kept, never as gifts.
 Each shape has both training and held-out sentence patterns. Longer stories
 add more contributions or purchases before the final comparison or total.
 The running-quantity stories still include wages, liquid volumes, gifts,

@@ -83,7 +83,7 @@ inline std::string money(int64_t value) {
 enum Family { boxes, production, earnings, containers, receive, give, share,
               fraction, percent, sell, buy, convert, compare_people, total_two,
               total_three, time_rate, part_fraction, part_percent, shopping,
-              extra_cost, family_count };
+              extra_cost, part_extra, family_count };
 
 // Six distinct question patterns per family: four for train, two held out
 // for test. Every question starts with a split-specific pattern, so even
@@ -209,7 +209,15 @@ inline constexpr std::array<std::array<const char*, 6>, family_count> patterns =
       "{name} adds a gift costing ${a} to the purchase.",
       "Another small purchase costs {name} ${a}.",
       "A further item on the same bill is priced at ${a}.",
-      "The cashier includes another purchase worth ${a}."}}
+      "The cashier includes another purchase worth ${a}."}},
+    // The part shape asks how many items are kept, so its extra items say
+    // plainly that they are kept too (a gift alone would be ambiguous).
+    {{"{name} also keeps {a} more {unit}.",
+      "{name} keeps another {a} {unit} as well.",
+      "On top of that, {name} keeps {a} green {unit}.",
+      "{name} also saves {a} yellow {unit} to keep.",
+      "In addition, {name} retains {a} more {unit} received as a gift.",
+      "{name} sets aside a further {a} {unit} to keep."}}
 }};
 
 // Separate wording in each split, just like the arithmetic sentences.
@@ -460,7 +468,8 @@ inline bool part_story(Story& s, int steps) {
         const size_t product = s.out.values.size() - 1, hundred = s.literal(100 * scale);
         if (!s.operation('/', product, hundred, true, "The red items kept number")) return false;
     } else if (!opening(s, part_fraction, in, '/', "The red items kept number")) return false;
-    if (!add_extras(s, steps - 1 - (percentage ? 2 : 1), receive, "Including the extra items gives")) return false;
+    if (!add_extras(s, steps - 1 - (percentage ? 2 : 1), part_extra, "Including the extra kept items gives"))
+        return false;
     if (!close_with(s, '+', in[2], false, "Combining the two amounts gives")) return false;
     s.question = "How many " + s.object + " does " + s.name + " keep in all?";
     return true;
