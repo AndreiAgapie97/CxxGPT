@@ -837,7 +837,7 @@ int cmd_train(Args& a) {
     }
     ExpertLoadLog load_interval(cfg);
     FILE* load_log = nullptr;
-    if (!load_log_path.empty()) {
+    if (!load_log_path.empty() && cfg.moe()) {  // a dense model has no experts: no file
         const std::string header = ExpertLoadLog::header(cfg.n_experts);
         const bool fresh = !std::filesystem::exists(load_log_path) || std::filesystem::file_size(load_log_path) == 0;
         if (!fresh) {

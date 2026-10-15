@@ -76,9 +76,13 @@ grep -q '^# resumed at step 3$' "$TEST_DIR/load.csv"
 [[ $(grep -c '^4,' "$TEST_DIR/load.csv") == 2 ]]
 printf 'wrong,header\n' > "$TEST_DIR/load-invalid.csv"
 status=0
-"$CXXGPT" train "${COMMON[@]}" --load-log "$TEST_DIR/load-invalid.csv" > "$TEST_DIR/load-invalid.log" 2>&1 || status=$?
+"$CXXGPT" train "${COMMON[@]}" --init "$TEST_DIR/load.ckpt" --load-log "$TEST_DIR/load-invalid.csv" \
+    --out "$TEST_DIR/load-invalid.ckpt" > "$TEST_DIR/load-invalid.log" 2>&1 || status=$?
 [[ "$status" == 1 ]]
 grep -q 'expert load log header differs' "$TEST_DIR/load-invalid.log"
+# A dense model has no experts, so --load-log writes no file.
+"$CXXGPT" train "${COMMON[@]}" --load-log "$TEST_DIR/dense.load.csv" > "$TEST_DIR/dense-load.log"
+[[ ! -e "$TEST_DIR/dense.load.csv" ]]
 
 # Run the unchanged report script in a disposable runs directory. The CSV's
 # %.6g writes tiny shares in exponent form (5e-05); awk must still read them.
