@@ -2,20 +2,21 @@
 
 ## Goal
 
-A highly intelligent AI model on a much more efficient architecture than
-today's Python-based models, built our own way: our own architecture,
-training engine, tokenizer and kernels, in C++ (CUDA allowed). The only
-thing we take from outside is public data. Frontier quality is out of reach
-on one laptop, but we aim at it anyway.
+An experimental language-model project with our own model implementation,
+training engine, tokenizer and kernels in C++ and CUDA, trained on public
+data. The goal is to improve measured math problem-solving accuracy and
+reduce training and inference costs within a laptop's hardware budget.
+Current results do not establish general reasoning ability or an overall
+efficiency advantage over other implementations.
 
-The efficiency levers are:
+The approaches being tested are:
 - ternary (1.58-bit) weights, trained with BitLinear;
 - int8 activations;
 - sparse Mixture-of-Experts;
 - hand-written kernels, with no Python framework anywhere (small Python
   scripts for data handling are fine; no PyTorch).
 
-Reasoning is the first capability we go after.
+Math problem-solving accuracy is the first evaluation focus.
 
 ## Where things stand
 

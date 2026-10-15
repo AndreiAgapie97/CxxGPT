@@ -1,7 +1,7 @@
 # CxxGPT
 
-A native C++20 language-model research engine, aiming at strong reasoning
-and more efficient training and inference:
+An experimental C++20 language-model engine for studying math problem solving
+and measuring training and inference costs, using:
 
 - **ternary weights** (each projection weight is −1, 0 or +1) with int8
   activations, as in BitNet b1.58;

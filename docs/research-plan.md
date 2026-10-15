@@ -1,4 +1,4 @@
-# Research plan: beating scale on one laptop
+# Research plan: experiments on one laptop
 
 Written 2026-10-14, during night 1. This is the plan for what comes after the
 first nights. `docs/research.md` is the log of what was already measured.
@@ -267,6 +267,24 @@ Next for #34, in order:
    set *without* the decode-time block: unfinished answers and repeated runs
    in the answers, accuracy (greedy and maj@8), validation loss. Watch for
    the model avoiding numbers it should reuse, and for shorter answers.
+   First round (2026-10-15): 17M dense (dim 384, 6 layers), 3000 steps of
+   8192 tokens on night 3's clean mix, `--sampler qa`, seeds 1-3, alpha 1,
+   N = 8, each pair on the same batches. No effect either way at this size:
+   - the term fires on 1.06-1.08% of targets (0.55% on GSM8K alone) and
+     costs 5% of the step (63.0 -> 66.1 ms);
+   - held-out loss, with minus without, per seed: textbooks -0.016 / -0.002
+     / +0.011, wiki -0.015 / -0.001 / +0.011, DOAB -0.016 / +0.004 /
+     +0.014, arXiv -0.010 / +0.002 / +0.009: no harm to books and papers,
+     no gain;
+   - GSM8K dev loss 2.947 without, 2.957 with (mean of 3);
+   - unfinished first tries, greedy, without and with: word-dev 41 and 70
+     of 1500, GSM8K dev 395 and 457 of 750; correct: word-dev 14 and 10,
+     GSM8K dev 9 and 8. The seeds disagree (word-dev unfinished 19/0/22
+     without, 67/3/0 with), and a model this small rarely finishes a
+     GSM8K answer at all, loop or not.
+   So it stays off for clean1. The next test needs a model that answers:
+   step 3's continuation from a clean1 checkpoint, with and without the
+   term, rather than more small models.
 3. If it helps: a short continuation from a night checkpoint, with and
    without the term.
 4. The sequence-level form (the model's own decoded answers, penalized where
@@ -484,8 +502,8 @@ what it retrieves.
 - Earlier attempts ("neural arithmetic logic units", 2018) were fragile to
   train.
 
-**When:** only if 1 and 4 leave arithmetic as the bottleneck. A real
-breakthrough if it works.
+**When:** only if 1 and 4 leave arithmetic as the bottleneck. Its accuracy
+and training cost would need to be measured against the existing model.
 
 ## Effort levels: more thinking for harder questions
 
@@ -532,8 +550,8 @@ ways to turn more time into better answers, each with its own effort knob:
 - 1 when scores allow.
 - 3 with the tool path.
 - 2 together with the problem-writing program.
-- 4 as a research bet. It is the most promising for "smart on a laptop",
-  since it adds thinking without adding memory.
+- 4 as a research bet: test whether reusing layers improves accuracy within
+  the same parameter budget, and measure the added computation cost.
 
 ## Our own ideas
 
