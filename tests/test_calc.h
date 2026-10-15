@@ -297,6 +297,27 @@ inline void test_calc_hook() {
     const auto disabled = generate(m, {{kBos}}, 12, [](const auto&) { return false; });
     EXPECT(tok.decode(disabled[0]) == "<<48/2=wrong", "default generation unchanged");
 
+    // The prompt is watched too: "16 x 7 =" at its end fires on the model's
+    // first token, " ". (The prompt's BOS starts the watched text afresh;
+    // kept as a byte, it would make the call malformed.)
+    {
+        std::vector<int> prompt = tok.encode("16 x 7 =");
+        prompt.insert(prompt.begin(), kBos);
+        const size_t L = prompt.size();
+        // Predictions start at position L - 1, after the prompt.
+        std::vector<int> wanted(L - 1, '?');
+        for (int t : tok.encode(" ??? ok\n")) wanted.push_back(t);
+        CalcFakeModel p; p.cfg.vocab = 256; p.cfg.seq_len = 60;
+        p.script = {wanted}; p.prediction = p.script;
+        calc::Counts prompt_calls;
+        const auto out = generate(p, {prompt}, 30, [](const auto& ids) { return ids.back() == '\n'; },
+                                  0, nullptr, calc::Mode::plain, &tok, &prompt_calls);
+        EXPECT(tok.decode(out[0]) == " 112 ok\n" && prompt_calls.fired == 1 && prompt_calls.malformed == 0,
+               "a trigger at the end of the prompt fires, got \"%s\"", tok.decode(out[0]).c_str());
+        EXPECT(std::equal(out[0].begin(), out[0].end() - 1, p.received[0].begin() + ptrdiff_t(L - 1)),
+               "prompt-triggered result fed back");
+    }
+
     // A merged BPE token can hold the trigger and the model's own start of
     // the answer (the tokenizer joins a space to the punctuation after it,
     // so "= $150" arrives as " =", " $"). The calculator keeps `kept`, the

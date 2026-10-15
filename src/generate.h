@@ -63,7 +63,18 @@ std::vector<std::vector<int>> generate(Decoder& model, const std::vector<std::ve
     for (int b = 0; b < B; ++b) start[b] = L - int(prompts[b].size());
     model.decode_begin(B, start);
     std::vector<int> cur(B), finished(B, 0);
+    // The text each slot's calculator watches. It starts with the prompt, so
+    // "16 x 7 =" at the end of a prompt fires on the model's " " (calls are
+    // still only checked after a model token). A BOS starts a new
+    // document, so the watched text starts again after it.
     std::vector<std::string> texts(B);
+    const auto watch = [&](int b, int t) {
+        if (t == kBos) texts[b].clear();
+        else texts[b] += t < tokenizer->vocab_size() ? tokenizer->token_bytes(t) : "?";
+    };
+    if (tool != calc::Mode::none)
+        for (int b = 0; b < B; ++b)
+            for (int t : prompts[b]) watch(b, t);
     std::vector<std::vector<int>> pending(B);
     std::vector<size_t> next(B, 0);
     int n_finished = 0;
@@ -105,8 +116,7 @@ std::vector<std::vector<int>> generate(Decoder& model, const std::vector<std::ve
             cur[b] = t;
             out[b].push_back(t);
             if (done(out[b])) finished[b] = 1, ++n_finished;
-            if (tool != calc::Mode::none)
-                texts[b] += t < tokenizer->vocab_size() ? tokenizer->token_bytes(t) : "?";
+            if (tool != calc::Mode::none) watch(b, t);
         }
         if (n_finished == B) break;
     }
