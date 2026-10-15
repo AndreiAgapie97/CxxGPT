@@ -400,6 +400,12 @@ ways to turn more time into better answers, each with its own effort knob:
      batches.
    - It only helps once the right answer is often the most common one. At
      night 1's 0.8% it cannot. Add it when scores reach a few percent.
+   - **Status: built** (`eval-reasoning --tries N --temp T --seed S`, or
+     `--effort`; README, "Many tries and a vote"). Only finished tries
+     vote, each try has its own seed, and the headline is labelled with
+     its effort (`(greedy)`, `(maj@8, temp 0.7, seed 1)`). Not yet run on
+     a trained checkpoint: measure maj@N against greedy on the dev set
+     once scores reach a few percent.
 2. **Many tries and a judge.**
    - A second small model reads a solution and scores how likely it is right;
      keep its favorite of N.
@@ -712,11 +718,11 @@ What this says:
    only 20,800 and 7.4 GB. Not for ternary models yet (their quantized
    values are not exact in bf16; int8 tensor cores are the way there).
 3. **Muon in bf16** (16% of the step after item 2). **Done** with
-   `--matmul bf16` (2026-10-14): Newton–Schulz's products take bf16 copies
+   `--matmul bf16` (2026-10-14): Newtonï¿½Schulz's products take bf16 copies
    of X and A, with fp32 sums, X kept in fp32, and cuBLAS adding the b A and
    a X terms in. Muon went from 434 to 288 ms a step; with item 5's first
    step, the night-1 model trains at 25,600 tokens/s (2.55 s a step, steady
-   over a 200-step run). Reference Muon runs Newton–Schulz all in bf16.
+   over a 200-step run). Reference Muon runs Newtonï¿½Schulz all in bf16.
 4. **Exams on the GPU.** Each one runs on the CPU while the GPU waits: about
    5 minutes for 250 problems, about 15 minutes per night with the final
    exam. Run them on the GPU, or less often.
