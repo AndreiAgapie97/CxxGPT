@@ -3,6 +3,75 @@
 #include "../src/generate.h"
 #include "test_util.h"
 
+// An exact reference for the calculator that never uses fractions: the
+// value n / 10^k, with n in 64 bits. fits turns false once a step does not
+// fit (n beyond 64 bits, or k above 18). That says nothing about the
+// calculator, whose reduced fractions can be much smaller (1.0 * 1.0 is
+// 100 / 10^2 here but 1/1 there); such cases are skipped. When the
+// reference fits, every numerator and denominator the calculator meets is
+// at most the reference's, so the calculator must give the same answer.
+// Like the calculator, it never keeps INT64_MIN. No 128-bit arithmetic, as
+// the tests also build with clang-cl on Windows.
+struct CalcDecimal {
+    int64_t n = 0;
+    int k = 0;
+    bool fits = true;
+};
+
+inline CalcDecimal calc_no_fit() { return CalcDecimal{0, 0, false}; }
+
+inline CalcDecimal calc_scaled(CalcDecimal x, int k) {  // the same value with k >= x.k decimals
+    if (!x.fits || k > 18) return calc_no_fit();
+    int64_t n = x.n;
+    for (int i = x.k; i < k; ++i)
+        if (__builtin_mul_overflow(n, int64_t(10), &n)) return calc_no_fit();
+    return CalcDecimal{n, k, true};
+}
+
+inline CalcDecimal calc_negate(CalcDecimal x) { return CalcDecimal{-x.n, x.k, x.fits}; }
+
+inline CalcDecimal calc_add(CalcDecimal a, CalcDecimal b) {
+    const int k = std::max(a.k, b.k);
+    a = calc_scaled(a, k);
+    b = calc_scaled(b, k);
+    int64_t n = 0;
+    if (!a.fits || !b.fits || __builtin_add_overflow(a.n, b.n, &n) || n == std::numeric_limits<int64_t>::min())
+        return calc_no_fit();
+    return CalcDecimal{n, k, true};
+}
+
+inline CalcDecimal calc_times(CalcDecimal a, CalcDecimal b) {
+    int64_t n = 0;
+    if (!a.fits || !b.fits || a.k + b.k > 18 || __builtin_mul_overflow(a.n, b.n, &n) ||
+        n == std::numeric_limits<int64_t>::min())
+        return calc_no_fit();
+    return CalcDecimal{n, a.k + b.k, true};
+}
+
+// x / d for a d made only of 2s and 5s: find the smallest power of 10 that
+// d divides, 10^m, and multiply by 10^m / d with m more decimals.
+inline CalcDecimal calc_divide(CalcDecimal x, int64_t d) {
+    int64_t p = 1;
+    int m = 0;
+    while (p % d != 0) p *= 10, ++m;
+    return calc_times(x, CalcDecimal{p / d, m, true});
+}
+
+// Like the calculator's output: no trailing decimal zeros, no "." alone.
+inline std::string calc_format(CalcDecimal x) {
+    int64_t p = 1;
+    for (int i = 0; i < x.k; ++i) p *= 10;
+    const uint64_t a = uint64_t(x.n < 0 ? -x.n : x.n);
+    std::string out = (x.n < 0 ? "-" : "") + std::to_string(a / uint64_t(p));
+    if (x.k > 0) {
+        std::string digits = std::to_string(a % uint64_t(p));
+        digits = std::string(size_t(x.k) - digits.size(), '0') + digits;  // leading zeros, as in 0.05
+        while (!digits.empty() && digits.back() == '0') digits.pop_back();
+        if (!digits.empty()) out += "." + digits;
+    }
+    return out;
+}
+
 inline void test_calc() {
     const std::pair<const char*, const char*> exact[] = {
         {"\r1\t+2\n", "3"}, {"\f1 + 2\v", "3"}, {"48/2", "24"}, {"7/2*2", "7"}, {"1/3*3", "1"}, {"0.1+0.2", "0.3"},
@@ -20,25 +89,108 @@ inline void test_calc() {
     EXPECT(!calc::evaluate(std::string(129, '(') + "1" + std::string(129, ')')), "calculator depth bound");
     EXPECT(!calc::evaluate(std::string(4097, '1')), "calculator length bound");
 
-    // Build expression trees while separately calculating their values in
-    // double precision. This reference never parses or uses Rational.
+    // Random expression trees against an exact reference that never uses
+    // fractions (see CalcDecimal). The calculator's answer must be exactly
+    // the reference's string, rejected when some value in the tree is far
+    // too big for 64 bits, and rejected for a repeating decimal.
     Rng rng(9182);
-    std::function<std::pair<std::string, double>(int)> tree = [&](int depth) -> std::pair<std::string, double> {
-        const int n = int(rng.uniform() * 101);
-        if (!depth) return {std::to_string(n / 10) + "." + std::to_string(n % 10), double(n) / 10};
-        auto [left, a] = tree(depth - 1);
-        auto [right, b] = tree(depth - 1);
-        const int op = int(rng.uniform() * 4);
-        if (op == 3) { const int ds[] = {1,2,4,5,10}; const int d = ds[int(rng.uniform() * 5)]; right = std::to_string(d); b = d; }
-        const double ref = op == 0 ? a + b : op == 1 ? a - b : op == 2 ? a * b : a / b;
-        return {"(" + left + "+-*/"[op] + right + ")", ref};
+    struct Node {
+        std::string text;
+        CalcDecimal exact;
+        double value = 0;   // only to see when a value is far beyond 64 bits
+        bool huge = false;  // some value in this tree is above 1.1e19 > 2^63
     };
-    for (int i = 0; i < 1000; ++i) {
-        const auto [expr, ref] = tree(3);
+    // only_times: every operation multiplies, to reach overflow often.
+    std::function<Node(int, bool)> tree = [&](int depth, bool only_times) -> Node {
+        if (!depth) {
+            // A leaf: tenths with 1 to 7 digits, from 0.0 to 999999.9.
+            const int digits = 1 + int(rng.below(7));
+            int64_t n = 0;
+            for (int i = 0; i < digits; ++i) n = n * 10 + int64_t(rng.below(10));
+            return {std::to_string(n / 10) + "." + std::to_string(n % 10), CalcDecimal{n, 1, true}, double(n) / 10, false};
+        }
+        const Node a = tree(depth - 1, only_times);
+        Node b = tree(depth - 1, only_times);
+        const int op = only_times ? 2 : int(rng.below(4));
+        if (op == 3) {
+            // Inner divisors are made of 2s and 5s, so every value stays a
+            // finite decimal.
+            const int64_t ds[] = {1, 2, 4, 5, 8, 10, 16, 20, 25, 40, 125};
+            const int64_t d = ds[rng.below(11)];
+            b = {std::to_string(d), CalcDecimal{d, 0, true}, double(d), false};
+        }
+        Node r;
+        r.text = "(" + a.text + "+-*/"[op] + b.text + ")";
+        r.exact = op == 0 ? calc_add(a.exact, b.exact) : op == 1 ? calc_add(a.exact, calc_negate(b.exact)) :
+                  op == 2 ? calc_times(a.exact, b.exact) : calc_divide(a.exact, b.exact.n);
+        r.value = op == 0 ? a.value + b.value : op == 1 ? a.value - b.value : op == 2 ? a.value * b.value :
+                  a.value / b.value;
+        r.huge = a.huge || b.huge || std::abs(r.value) > 1.1e19;
+        return r;
+    };
+    size_t exact = 0, after_odd = 0, repeating = 0, overflow = 0, skipped = 0;
+    for (int i = 0; i < 4500; ++i) {
+        const bool only_times = i >= 4000;
+        const Node t = only_times ? tree(3, true) : tree(1 + int(rng.below(4)), false);
+        std::string expr = t.text;
+        CalcDecimal ref = t.exact;
+        bool odd_divisor = false, repeats = false;
+        if (!only_times && rng.below(10) < 3) {
+            // Divide the whole tree by a number with a prime factor other
+            // than 2 and 5: q = odd * two_five, with odd coprime to 10. The
+            // answer is a finite decimal only if odd divides the numerator.
+            const int64_t qs[] = {3, 6, 7, 9, 11, 12, 13, 15, 21};
+            const int64_t q = qs[rng.below(9)];
+            expr += "/" + std::to_string(q);
+            int64_t odd = q, two_five = 1;
+            while (odd % 2 == 0) odd /= 2, two_five *= 2;
+            while (odd % 5 == 0) odd /= 5, two_five *= 5;
+            odd_divisor = true;
+            if (ref.fits && ref.n % odd != 0) repeats = true;
+            else if (ref.fits) ref = calc_divide(CalcDecimal{ref.n / odd, ref.k, true}, two_five);
+        }
         const auto result = calc::evaluate(expr);
-        EXPECT(result && std::abs(std::stod(*result) - ref) <= 1e-10 * std::max(1.0, std::abs(ref)),
-               "calculator random independent double reference: %s", expr.c_str());
+        if (t.huge) {
+            ++overflow;
+            EXPECT(!result, "calculator must reject overflow: %s", expr.c_str());
+        } else if (!ref.fits) {
+            ++skipped;  // the unreduced reference overflowed: it cannot judge
+        } else if (repeats) {
+            ++repeating;
+            EXPECT(!result, "calculator must reject a repeating decimal: %s", expr.c_str());
+        } else {
+            ++(odd_divisor ? after_odd : exact);
+            EXPECT(result == std::optional<std::string>(calc_format(ref)), "calculator exact reference: %s = %s, got %s",
+                   expr.c_str(), calc_format(ref).c_str(), result ? result->c_str() : "nothing");
+        }
     }
+    // Each kind of case must actually occur (expected counts are several
+    // times these bounds), so a broken reference cannot skip everything.
+    EXPECT(exact >= 500 && after_odd >= 20 && repeating >= 50 && overflow >= 50,
+           "random calculator cases: %zu exact, %zu finite after an odd divisor, %zu repeating, %zu overflow, %zu skipped",
+           exact, after_odd, repeating, overflow, skipped);
+
+    // The overflow boundary itself, with an exact oracle: products and sums
+    // of two integers right around INT64_MAX, with either sign. The
+    // calculator never keeps INT64_MIN, so it counts as overflow here too.
+    constexpr int64_t limit = std::numeric_limits<int64_t>::max();
+    size_t fit = 0, over = 0;
+    for (int i = 0; i < 1000; ++i) {
+        const bool product = i % 2 == 0, negative = rng.below(2) == 1;
+        const int64_t a = product ? 2 + int64_t(rng.below(4000000000u)) : (int64_t(1) << 61) + int64_t(rng.next() >> 2);
+        const int64_t b = (product ? limit / a : limit - a) + int64_t(rng.below(3)) - 1;
+        const int64_t sa = negative ? -a : a, sb = !product && negative ? -b : b;
+        int64_t value = 0;
+        const bool overflows = (product ? __builtin_mul_overflow(sa, b, &value) : __builtin_add_overflow(sa, sb, &value)) ||
+                               value == std::numeric_limits<int64_t>::min();
+        const std::string expr = std::string(negative ? "-" : "") + std::to_string(a) +
+                                 (product ? "*" : negative ? "-" : "+") + std::to_string(b);
+        const auto result = calc::evaluate(expr);
+        ++(overflows ? over : fit);
+        if (overflows) EXPECT(!result, "calculator boundary overflow: %s", expr.c_str());
+        else EXPECT(result == std::optional<std::string>(std::to_string(value)), "calculator boundary: %s", expr.c_str());
+    }
+    EXPECT(fit >= 200 && over >= 200, "calculator boundary cases: %zu fit, %zu overflow", fit, over);
 
     for (const char* expr : {"16 x 7 = ", "16 * 7 = ", "16 × 7 = ", "She has 16 x 7 = ", "Then: 16 * 7 = ", "next; 16 * 7 = "})
         EXPECT(calc::response(expr, calc::Mode::plain) == std::optional<std::string>("112"), "plain multiplication: %s", expr);
