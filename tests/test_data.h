@@ -96,6 +96,32 @@ inline void test_token_writer() {
            "mixing masked and plain writer calls lost mask alignment");
 }
 
+// A zero-problem split is a valid header-only token file. Saving or reading
+// it must not pass the empty vectors' possibly null data() to stdio.
+inline void test_empty_token_data() {
+    const std::string path = test_path("empty_tokens.tok");
+    TokenData empty;
+    empty.vocab = 256;
+    empty.save(path);
+    const auto header = TokenData::peek(path);
+    EXPECT(std::filesystem::file_size(path) == 24 && header.vocab == 256 &&
+           header.n == 0 && header.has_mask == 0, "empty token file header changed");
+    const auto loaded = TokenData::load(path);
+    EXPECT(loaded.vocab == 256 && loaded.tokens.empty() && loaded.mask.empty(),
+           "empty token data failed to round trip");
+
+    // The reader also accepts an existing empty file whose mask flag is set.
+    FILE* f = std::fopen(path.c_str(), "r+b");
+    CHECK(f, "cannot open empty token fixture");
+    const uint32_t has_mask = 1;
+    CHECK(std::fseek(f, 12, SEEK_SET) == 0 && std::fwrite(&has_mask, 4, 1, f) == 1 &&
+          std::fclose(f) == 0, "cannot set empty token fixture's mask flag");
+    const auto masked = TokenData::load(path);
+    EXPECT(masked.vocab == 256 && masked.tokens.empty() && masked.mask.empty(),
+           "empty masked token data failed to load");
+    std::remove(path.c_str());
+}
+
 // Files mixed with repeats: tokens in order, masks kept, files without a
 // mask trained on everywhere, the largest vocabulary, and the header peek.
 inline void test_token_list() {
@@ -130,5 +156,6 @@ inline void test_data() {
     test_json();
     test_problem_file();
     test_token_writer();
+    test_empty_token_data();
     test_token_list();
 }

@@ -210,8 +210,11 @@ struct TokenData {
         std::fwrite(&vocab, 4, 1, f);
         std::fwrite(&has_mask, 4, 1, f);
         std::fwrite(&n, 8, 1, f);
-        std::fwrite(tokens.data(), 2, n, f);
-        if (has_mask) std::fwrite(mask.data(), 1, n, f);
+        // Empty splits still have a header, but their vector data may be null.
+        if (n > 0) {
+            std::fwrite(tokens.data(), 2, n, f);
+            if (has_mask) std::fwrite(mask.data(), 1, n, f);
+        }
         const bool failed = std::ferror(f) != 0;
         CHECK(std::fclose(f) == 0 && !failed, "error writing %s", path.c_str());
     }
@@ -238,10 +241,10 @@ struct TokenData {
         TokenData d;
         d.vocab = h.vocab;
         d.tokens.resize(n);
-        CHECK(std::fread(d.tokens.data(), 2, n, f) == n, "truncated tokens in %s", path.c_str());
+        CHECK(n == 0 || std::fread(d.tokens.data(), 2, n, f) == n, "truncated tokens in %s", path.c_str());
         if (h.has_mask) {
             d.mask.resize(n);
-            CHECK(std::fread(d.mask.data(), 1, n, f) == n, "truncated mask in %s", path.c_str());
+            CHECK(n == 0 || std::fread(d.mask.data(), 1, n, f) == n, "truncated mask in %s", path.c_str());
         }
         std::fclose(f);
         for (uint16_t t : d.tokens) CHECK(t < d.vocab, "token %u >= vocab %u in %s", t, d.vocab, path.c_str());
