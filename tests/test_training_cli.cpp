@@ -14,6 +14,12 @@ int main(int argc, char** argv) {
         load_checkpoint(argv[2], model, nullptr, nullptr);
         const TokenData data = TokenData::load(argv[3]);
         std::vector<int> inputs(8), targets(8), first, last;
+        // Rebuild by hand the batches test_cli.sh's `train --steps 3 --accum 2
+        // --batch 1 --seq 8` drew. This mirrors cmd_train in src/cxxgpt.cpp
+        // (data_rng is Rng(seed + 1), seed 1 by default; every step calls
+        // group.sample over the whole file) and AccumulationBatch::sample in
+        // src/train.h (one sample_batch per micro-batch). If sampling changes
+        // there, change it here too: the rows below would no longer match.
         Rng rng(2);
         for (int step = 1; step <= 3; ++step) {
             for (int micro = 0; micro < 2; ++micro) {

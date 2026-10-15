@@ -137,8 +137,11 @@ logging interval that lists every expert below 1% of its layer, in layer
 order, e.g. `under 1%: layer 2 expert 5 (0.0%), layer 7 expert 3 (0.2%)`; after 12
 experts it ends with "and N more".
 `report.sh` shows each layer's final shares and the first logged step
-with a share below 1%. Resuming appends rows to the same file; use a new
-file for a different run. Nothing is written for dense models: they have
+with a share below 1%. Resuming appends rows to the same file, after a
+`# resumed at step N` line; use a new file for a different run. As with
+`--log`, training restarts from the last checkpoint, so the steps after it
+are run again and their rows appear twice: the rows after the `# resumed`
+line are the ones the model kept. Nothing is written for dense models: they have
 no experts, so `--load-log` creates no file.
 
 To ask the model a question
