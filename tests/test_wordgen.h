@@ -6,6 +6,7 @@
 #include <limits>
 #include <numeric>
 #include <sstream>
+#include <utility>
 
 #include "../src/wordgen.h"
 #include "test_util.h"
@@ -261,6 +262,7 @@ inline void test_wordgen() {
     std::set<int> seen_distractors, distractor_positions;
     std::set<int> shapes_by_length;
     std::set<std::string> rate_units;
+    std::set<std::pair<std::string, std::string>> name_pairs;
     bool saw_two_people = false, saw_three_people = false, saw_fraction = false, saw_percentage = false;
     std::array<std::set<int>, WordProblem::shape_count> wordings;  // solution wordings used per shape
     int converted_stories = 0;
@@ -280,6 +282,8 @@ inline void test_wordgen() {
             if (p.shape == WordProblem::part)
                 for (size_t k = 1; k < p.patterns.size(); ++k)
                     EXPECT(p.patterns[k] / 6 == word_detail::part_extra, "part story adds items without keeping them");
+            EXPECT(p.name != p.other && p.third != p.name && p.third != p.other, "a person appears twice");
+            name_pairs.insert({p.name, p.other});
             seen_distractors.insert(p.distractor);
             distractor_positions.insert(p.distractor_position);
             EXPECT((p.distractor >= 12) == test, "distractor wording leaked across splits");
@@ -314,6 +318,8 @@ inline void test_wordgen() {
            "missing a story subtype or time unit");
     for (const auto& used : wordings) EXPECT(used.size() == 5, "a shape never used one of the five solution wordings");
     EXPECT(converted_stories > 0, "converted units not exercised");
+    // Names are drawn independently, so all 12 * 11 ordered pairs show up.
+    EXPECT(name_pairs.size() == 132, "only %zu name pairs seen", name_pairs.size());
     for (int shape = 0; shape < WordProblem::shape_count; ++shape) {
         EXPECT(!shape_patterns[0][shape].empty() && !shape_patterns[1][shape].empty(), "missing story shape");
         for (int id : shape_patterns[1][shape])

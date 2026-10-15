@@ -276,10 +276,11 @@ struct Story {
         static const std::array<const char*, 8> objects = {
             "stickers", "cards", "beads", "pencils", "candles", "toy cars", "bookmarks", "paper flowers"};
         static const std::array<const char*, 3> times = {"hour", "day", "week"};
-        const size_t name_index = rng.below(names.size());
-        name = names[name_index];
-        other = names[(name_index + 1) % names.size()];
-        third = names[(name_index + 2) % names.size()];
+        // Each person is drawn separately, redrawn on a clash, so any two
+        // names can appear together (132 ordered pairs, not 12 fixed ones).
+        name = names[rng.below(names.size())];
+        do other = names[rng.below(names.size())]; while (other == name);
+        do third = names[rng.below(names.size())]; while (third == name || third == other);
         object = objects[rng.below(objects.size())];
         start = int(rng.below(4));
         kind = start == earnings ? Kind::money : start == containers ? Kind::liters : Kind::objects;
