@@ -277,6 +277,29 @@ one exact-text check that no dev question is left in training:
 [docs/LAPTOP.md](docs/LAPTOP.md) ("The dev set") gives the counts to
 expect.
 
+**Answers with their questions.** Training windows start at random
+offsets, so a window often begins in the middle of a math problem: the
+answer is trained while its question is out of view. `./cxxgpt qa-context
+--data data/gsm8k/train.tok,data/metamath/train.tok,data/openmath2/train.tok`
+counts it exactly. `train --sampler qa` (`scripts/night.sh --sampler qa`)
+moves such a window back to the start of its problem, when the whole
+problem fits in a window. At `--seq 512`, the share of answer tokens that
+see their whole question:
+
+| Source | `--sampler random` (default) | `--sampler qa` |
+|---|---|---|
+| GSM8K | 74% | 100% |
+| MetaMath | 63% | 92% |
+| OpenMath2 | 40% | 54% |
+
+OpenMath2 stays low because 37% of its problems are longer than a window;
+those keep random starts, or the end of their answers would never be
+trained. Windows that start with a question train 3-7% fewer answer tokens
+each (GSM8K: 277 instead of 297 per window). Web text and stories are not
+affected, and validation keeps random windows. Whether it helps accuracy
+is not measured yet (docs/research-plan.md, "Answers with their
+questions").
+
 ## Reproducible research
 
 ```sh

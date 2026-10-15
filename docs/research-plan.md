@@ -201,7 +201,41 @@ night 1's default `MIX` in `night.sh`:
   little compared with fresh data (Muennighoff et al., 2023), and today's ×4
   gives less than one pass per night.
 
-**How to test.**
+**3. Answers with their questions (issue #15).**
+- Random training windows often start inside a math problem, so the answer
+  is trained without the question that says what to compute. `cxxgpt
+  qa-context` measured it: about 44% of the nights' trained math tokens see
+  none of their question (OpenMath2 48%, MetaMath 23%, GSM8K 11%). That may
+  be why the model often does correct arithmetic on the wrong quantity.
+- `train --sampler qa` starts such windows at the problem's beginning when
+  the problem fits in a window: whole question in view for GSM8K 74% -> 100%,
+  MetaMath 63% -> 92%, OpenMath2 40% -> 54% (its long problems keep random
+  starts). Each math window then trains 3-7% fewer answer tokens.
+- The A/B, before any night uses it:
+  1. From scratch, a small model (the smallest `probe.sh` size) on a math
+     mix with the dev set held out (`leak-check` first: data prepared before
+     the dev set existed still holds it), validated on it (`DEV=1`), 1-2
+     hours on the GPU per run, `--sampler random` against `--sampler qa`, 3 seeds each, the
+     same steps and tokens per step. Same data order: the sampler draws the
+     same random numbers, so each pair differs only in where windows start.
+  2. Judge on the GSM8K dev set (500 problems none of these runs has seen):
+     greedy and maj@8 accuracy, the unfinished count, the validation loss
+     (random windows for both, so it is the same test), and 50 failures per
+     run sorted by hand into wrong quantity, wrong operation, arithmetic slip
+     and other (#16). The bet wins only if "wrong quantity" falls and
+     accuracy rises in all three seed pairs.
+  3. Report the answer tokens trained per step for both (the qa sampler
+     trains fewer). If qa wins at equal steps, it wins at equal answer
+     tokens too; if it loses narrowly, rerun at equal answer tokens.
+  4. Only then a night: a continuation of the latest night with `--sampler
+     qa` against one without, 1-2 hours each first. Those weights have
+     seen the dev questions, so judge on the GSM8K test, sparingly, per the
+     measurement rules.
+- Not covered: OpenMath2's long problems (38% of its answer tokens still
+  see none of their question). They need longer windows (`--seq 1024`, with
+  the position encoding stretched) or shorter solutions; a later step.
+
+**How to test 1 and 2.**
 - Two continuations from the same checkpoint, same length and `LR`: one with
   the same mix, one with the math mix. Short runs (1-2 hours) first, a night
   only if the gap is clear.

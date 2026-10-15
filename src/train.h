@@ -198,6 +198,8 @@ inline double lr_at(int64_t step, int64_t warmup, int64_t total_steps, double ma
 // File layout: "CXTOKEN1", uint32 vocab, uint32 has_mask, uint64 n,
 // then n uint16 tokens, then (if has_mask) n uint8 mask bytes.
 // ---------------------------------------------------------------------------
+class QaStarts;
+
 struct TokenData {
     uint32_t vocab = 0;
     std::vector<uint16_t> tokens;
@@ -298,20 +300,84 @@ private:
 
 public:
     // B windows of Tn + 1 tokens starting at random offsets in [lo, hi - Tn - 1].
-    // Targets that the mask excludes become -1.
-    void sample_batch(Rng& rng, int B, int Tn, size_t lo, size_t hi, int* inputs, int* targets) const {
-        CHECK(B > 0 && Tn > 0 && lo <= hi && hi <= tokens.size(), "invalid data sampling range or shape");
-        CHECK(hi - lo >= size_t(Tn) + 1, "data range of %zu tokens is shorter than a sequence", hi - lo);
-        for (int b = 0; b < B; ++b) {
-            const size_t s = lo + rng.below(hi - lo - Tn);
-            for (int t = 0; t < Tn; ++t) {
-                inputs[b * Tn + t] = tokens[s + t];
-                const bool train = mask.empty() || mask[s + t + 1];
-                targets[b * Tn + t] = train ? tokens[s + t + 1] : -1;
+    // Targets that the mask excludes become -1. With `qa` (train --sampler
+    // qa), a start inside a question-answer document that fits in a window
+    // moves back to that document's BOS (QaStarts); the random numbers drawn
+    // are the same either way.
+    void sample_batch(Rng& rng, int B, int Tn, size_t lo, size_t hi, int* inputs, int* targets,
+                      const QaStarts* qa = nullptr) const;
+};
+
+// Where the question-answer documents start, for train --sampler qa. A
+// document runs from a BOS to the next one (or the end); it is a
+// question-answer document when its first token after the BOS is not
+// trained: a question, masked out so that only the answer is learned.
+//
+// Random windows often start inside such a document, so its answer is
+// trained without its question in view (cxxgpt qa-context: about 44% of
+// the nights' math tokens). With this sampler a start inside a QA
+// document moves back to its BOS, so every answer token of a document that
+// fits in one window (Tn + 1 tokens) is trained with its whole question.
+// Longer documents keep random starts: moving those back would never train
+// the end of their answers. Text without a mask (web text, stories) keeps
+// random starts too. The one loss: a document whose BOS lies within a
+// window of the end of the training range cannot start a window, and the
+// windows that reached it from earlier starts now begin at earlier BOSes,
+// so the last such document may go untrained (cxxgpt qa-context counts it).
+class QaStarts {
+public:
+    QaStarts(const TokenData& d, int Tn, int bos) {
+        CHECK(Tn > 0, "window length must be positive");
+        if (d.mask.empty()) return;  // nothing is masked: no questions
+        const size_t n = d.tokens.size();
+        size_t begin = n;  // the current document's BOS (n: none yet)
+        auto close = [&](size_t end) {
+            if (begin + 1 < end && !d.mask[begin + 1] && end - begin <= size_t(Tn) + 1) {
+                begin_.push_back(begin);
+                end_.push_back(end);
             }
+        };
+        for (size_t i = 0; i < n; ++i) {
+            if (d.tokens[i] != bos) continue;
+            if (begin < n) close(i);
+            begin = i;
+        }
+        if (begin < n) close(n);
+    }
+
+    // The window start for a drawn start s: the BOS of the QA document that
+    // s falls in, if that document fits in a window and starts at or after
+    // lo (the training range); s otherwise.
+    size_t start(size_t s, size_t lo) const {
+        const auto it = std::upper_bound(begin_.begin(), begin_.end(), s);
+        if (it == begin_.begin()) return s;
+        const size_t k = size_t(it - begin_.begin()) - 1;
+        return s < end_[k] && begin_[k] >= lo ? begin_[k] : s;
+    }
+
+    // The documents it moves starts to: [begin(k), end(k)), in order.
+    size_t documents() const { return begin_.size(); }
+    size_t begin(size_t k) const { return begin_[k]; }
+    size_t end(size_t k) const { return end_[k]; }
+
+private:
+    std::vector<size_t> begin_, end_;
+};
+
+inline void TokenData::sample_batch(Rng& rng, int B, int Tn, size_t lo, size_t hi, int* inputs, int* targets,
+                                    const QaStarts* qa) const {
+    CHECK(B > 0 && Tn > 0 && lo <= hi && hi <= tokens.size(), "invalid data sampling range or shape");
+    CHECK(hi - lo >= size_t(Tn) + 1, "data range of %zu tokens is shorter than a sequence", hi - lo);
+    for (int b = 0; b < B; ++b) {
+        const size_t drawn = lo + rng.below(hi - lo - Tn);
+        const size_t s = qa ? qa->start(drawn, lo) : drawn;  // never later than drawn
+        for (int t = 0; t < Tn; ++t) {
+            inputs[b * Tn + t] = tokens[s + t];
+            const bool train = mask.empty() || mask[s + t + 1];
+            targets[b * Tn + t] = train ? tokens[s + t + 1] : -1;
         }
     }
-};
+}
 
 // Count loss-bearing positions; the model treats every negative target as
 // ignored. Use the same denominator for training and validation metrics.
@@ -362,9 +428,9 @@ public:
             total_valid += valid[micro];
         }
     }
-    void sample(const TokenData& data, Rng& rng, size_t lo, size_t hi) {
+    void sample(const TokenData& data, Rng& rng, size_t lo, size_t hi, const QaStarts* qa = nullptr) {
         for (int micro = 0; micro < micros; ++micro)
-            data.sample_batch(rng, batch, seq, lo, hi, input(micro), target(micro));
+            data.sample_batch(rng, batch, seq, lo, hi, input(micro), target(micro), qa);
         refresh_counts();
     }
 

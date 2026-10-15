@@ -217,9 +217,26 @@ grep -q '3 problems (4 without a usable answer skipped)' "$TEST_DIR/numeric.log"
 awk -F '\t' 'NR==1 && $5!="9007199254740993" {exit 1} NR==2 && $5!="1200" {exit 1} NR==3 && $5!="-0.0012" {exit 1} END {if(NR!=3)exit 1}' "$TEST_DIR/numeric.txt"
 # qa-context: prep-qa's masked problems, and a file without a mask.
 "$CXXGPT" qa-context --data "$TEST_DIR/numeric.tok,$TEST_DIR/bos.tok" --seq 4 > "$TEST_DIR/qa-context.log"
-grep -q 'numeric.tok: 3 documents' "$TEST_DIR/qa-context.log"
-grep -q '^  windows of 4: whole question in view .*%, part of it .*%, none of it .*%$' "$TEST_DIR/qa-context.log"
+grep -q 'numeric.tok: 3 documents.*; windows of 4$' "$TEST_DIR/qa-context.log"
+grep -q '^  random: whole question in view .*%, part of it .*%, none of it .*%; .* per window, 0 trained tokens in no window$' "$TEST_DIR/qa-context.log"
+grep -q '^  qa:     whole question in view .*%, part of it .*%, none of it .*%; .* per window, 0 trained tokens in no window$' "$TEST_DIR/qa-context.log"
 grep -q 'bos.tok: no mask' "$TEST_DIR/qa-context.log"
+# train --sampler qa: short problems that fit in a window start their windows.
+for i in $(seq 20); do printf '{"question":"%d+1","answer":"so\\n#### %d"}\n' "$i" "$((i + 1))"; done \
+    > "$TEST_DIR/short-qa.jsonl"
+"$CXXGPT" prep-qa --in "$TEST_DIR/short-qa.jsonl" --out "$TEST_DIR/short-qa" > "$TEST_DIR/short-qa.log"
+SHORT=(--data "$TEST_DIR/short-qa.tok" --val "$TEST_DIR/short-qa.tok" --seq 32 --dim 8 --heads 2 --ffn 12
+       --layers 1 --batch 2 --steps 2 --warmup 0 --eval-every 2 --eval-batches 1 --save-every 0 --threads 2
+       --out "$TEST_DIR/short-qa.ckpt")
+"$CXXGPT" train "${SHORT[@]}" --sampler qa > "$TEST_DIR/sampler-qa.log"
+grep -q '^sampler: qa (20 question-answer documents that fit in a window start their windows)$' \
+    "$TEST_DIR/sampler-qa.log"
+"$CXXGPT" train "${SHORT[@]}" > "$TEST_DIR/sampler-random.log"
+require_absent -q '^sampler:' "$TEST_DIR/sampler-random.log"
+status=0
+"$CXXGPT" train "${SHORT[@]}" --sampler docs > "$TEST_DIR/sampler-bad.log" 2>&1 || status=$?
+[[ "$status" == 1 ]]
+grep -q 'sampler takes random or qa' "$TEST_DIR/sampler-bad.log"
 # Cross the streaming block size without a newline; threaded cuts preserve bytes.
 python3 - "$TEST_DIR/one-line.txt" <<'PYLINE'
 import pathlib,sys

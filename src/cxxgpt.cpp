@@ -216,8 +216,9 @@ int cmd_leak_check(Args& a) {
     return 0;
 }
 
-// How often a random training window trains an answer without its whole
-// question in view (qa_context.h, issue #15), for each token file.
+// How often a training window trains an answer without its whole question
+// in view (qa_context.h, issue #15), for each token file, with today's
+// random windows and with train --sampler qa.
 int cmd_qa_context(Args& a) {
     const std::string data = a.str("data");
     const int seq = a.integer_int("seq", 512);
@@ -225,22 +226,31 @@ int cmd_qa_context(Args& a) {
     CHECK(!data.empty() && seq > 0,
           "usage: cxxgpt qa-context --data A.tok,B.tok,... [--seq 512]\n"
           "For every trained (masked-in) token: the share of training windows of --seq tokens\n"
-          "that show its whole question, part of it, or none of it.");
+          "that show its whole question, part of it, or none of it, for --sampler random and qa.");
     for (const std::string& path : split(data, ',')) {
         const TokenData d = TokenData::load(path);
-        const QaContext q = qa_context(d, seq);
         if (d.mask.empty()) {
             std::printf("%s: no mask (every token is trained): no questions to lose\n", path.c_str());
             continue;
         }
-        auto pct = [&](uint64_t part) { return 100.0 * double(part) / double(std::max<uint64_t>(1, q.pairs)); };
-        std::printf("%s: %llu documents (mean %.0f tokens, %llu longer than %d), %llu trained tokens\n", path.c_str(),
-                    static_cast<unsigned long long>(q.documents),
-                    double(q.doc_tokens) / double(std::max<uint64_t>(1, q.documents)),
-                    static_cast<unsigned long long>(q.too_long), seq + 1,
-                    static_cast<unsigned long long>(q.trained));
-        std::printf("  windows of %d: whole question in view %.1f%%, part of it %.1f%%, none of it %.1f%%\n", seq,
-                    pct(q.whole), pct(q.partial), pct(q.none));
+        const QaStarts starts(d, seq, kBos);
+        const QaContext random = qa_context(d, seq), qa = qa_context(d, seq, &starts);
+        std::printf("%s: %llu documents (mean %.0f tokens, %llu longer than %d), %llu trained tokens; "
+                    "windows of %d\n",
+                    path.c_str(), static_cast<unsigned long long>(random.documents),
+                    double(random.doc_tokens) / double(std::max<uint64_t>(1, random.documents)),
+                    static_cast<unsigned long long>(random.too_long), seq + 1,
+                    static_cast<unsigned long long>(random.trained), seq);
+        auto line = [](const char* name, const QaContext& q) {
+            auto pct = [&](uint64_t part) { return 100.0 * double(part) / double(std::max<uint64_t>(1, q.pairs)); };
+            std::printf("  %-7s whole question in view %.1f%%, part of it %.1f%%, none of it %.1f%%; "
+                        "%.1f trained targets per window, %llu trained tokens in no window\n",
+                        name, pct(q.whole), pct(q.partial), pct(q.none),
+                        double(q.pairs) / double(std::max<uint64_t>(1, q.windows)),
+                        static_cast<unsigned long long>(q.unreached));
+        };
+        line("random:", random);
+        line("qa:", qa);
     }
     return 0;
 }
@@ -982,6 +992,8 @@ int cmd_train(Args& a) {
             "train:  --batch 16 --accum 1 --steps 2000 --lr 1e-3 --min-lr-frac 0.1\n"
             "        --warmup 100 --wd 0.1 --clip 1.0 --bias-rate 1e-3 --seed 1\n"
             "        --muon (Muon instead of AdamW for the matrices in the blocks)\n"
+            "        --sampler random (qa: a window starting inside a question-answer document that fits\n"
+            "        in one moves back to its start, so the answer is trained with its question)\n"
             "start:  --init FILE (FILE's weights and model; new optimizer and schedule; data order from --seed;\n"
             "        with --ternary, the weights turn ternary from here on)\n"
             "output: --out model.ckpt --resume --log FILE.csv --log-every 10\n"
@@ -1054,6 +1066,8 @@ int cmd_train(Args& a) {
     AdamW opt;
     opt.weight_decay = a.real("wd", 0.1);
     opt.muon = a.flag("muon");
+    const std::string sampler = a.str("sampler", "random");
+    CHECK(sampler == "random" || sampler == "qa", "--sampler takes random or qa");
     a.done();
     CHECK(cfg.vocab >= int(data.vocab), "model vocab %d < data vocab %u", cfg.vocab, data.vocab);
     CHECK(val_path.empty() || cfg.vocab >= int(val_data.vocab),
@@ -1117,6 +1131,14 @@ int cmd_train(Args& a) {
               "training range contains no predictable targets");
     }
     std::printf("data sources: %s\n", data_path.c_str());
+    // --sampler qa: training windows start at question-answer documents
+    // (QaStarts); validation keeps random windows, comparable across runs.
+    std::unique_ptr<QaStarts> qa;
+    if (sampler == "qa") {
+        qa = std::make_unique<QaStarts>(data, Tn, kBos);
+        std::printf("sampler: qa (%zu question-answer documents that fit in a window start their windows)\n",
+                    qa->documents());
+    }
     std::printf("data: %zu train tokens, %zu val tokens; %d x %d x %d = %zu tokens per step\n",
                 train_end, val_hi - val_lo, B, Tn, accum, group.inputs.size());
 
@@ -1182,7 +1204,7 @@ int cmd_train(Args& a) {
     long saved_step = resume ? first_step : -1;  // what --out holds
     for (; step < steps && !g_stop;) {
         const double t0 = now_seconds();
-        group.sample(data, data_rng, 0, train_end);
+        group.sample(data, data_rng, 0, train_end, qa.get());
         if (!group.total_valid) {
             if (++empty_groups == 1) std::printf("skipping sampled groups with no predictable targets\n");
             if (time_limit > 0 && now_seconds() - t_start > time_limit) {

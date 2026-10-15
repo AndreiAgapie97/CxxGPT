@@ -119,8 +119,14 @@ Reasoning is the first capability we go after.
   74/15/11%, MetaMath 63/14/23%, OpenMath2 40/12/48% (37% of its
   documents are longer than a window). OpenMath2 gives 399M of the mix's
   ~474M trained math tokens, so about 44% of them train with no question
-  in view. Whether that hurts accuracy needs an A/B with a question-aware
-  sampler; not tested yet.
+  in view. `train --sampler qa` (`QaStarts`, `src/train.h`; default
+  `random`) moves a window that starts inside a problem back to the
+  problem's BOS when the problem fits in a window: whole question 74 -> 100%
+  (GSM8K), 63 -> 92% (MetaMath), 40 -> 54% (OpenMath2, whose long problems
+  keep random starts), at 3-7% fewer answer tokens per window. Same random
+  draws as `random`; validation keeps random windows. Accuracy effect not
+  measured: the A/B is in docs/research-plan.md ("Answers with their
+  questions").
 - `train --load-log FILE`: each layer's share per expert over every log
   interval, with a warning for an expert under 1%; `night.sh` writes
   `runs/$RUN.load.csv` and `report.sh` sums it up. `cxxgpt clone-experts`
