@@ -592,6 +592,44 @@ budget. A gain here must still pass the dev-set funnel before a laptop night.
 - **Test:** the 50-minute runs of the night-1 model from "Expert balance",
   with and without cloning. Read the biases afterwards.
 
+The offline CPU command is now available; it does not run training:
+
+```sh
+./cxxgpt clone-experts --ckpt runs/night1.ckpt --out runs/night1-repaired.ckpt \
+    --layer 4 --from 0 --to 2 --noise 0.01 --seed 1
+# Or use the saved bias rankings in every layer:
+./cxxgpt clone-experts --ckpt runs/night1.ckpt --out runs/night1-repaired.ckpt \
+    --auto --noise 0.01 --seed 1
+# The owner runs the later GPU experiment on the laptop:
+INIT=runs/night1-repaired.ckpt RUN=night2 bash scripts/night.sh
+```
+
+Expert and layer indices start at zero. Choose either all three explicit
+indices or `--auto`. The copy includes the expert's input/output matrices
+(`efc`, `eproj`) and its router row. Noise is independent Gaussian noise
+with standard deviation `S` times the RMS of each source slice; the default
+`S=0.01` is 1% of that slice's weight scale. A zero slice stays zero;
+`--noise 0` makes an exact copy. The seed controls only this noise, leaving
+the checkpoint's data-sampling RNG unchanged.
+
+`--auto` selects the lowest-bias expert as the source and every expert tied
+at the largest bias as a target, independently in each layer. Source ties
+use the smallest expert index; equal biases throughout a layer mean no
+clone. This is a ranking heuristic, with no starvation threshold: biases
+record past balancing nudges, not measured token counts. Inspect the printed
+choices before using a repaired checkpoint; an unequal but healthy layer
+also receives a clone. Explicit indices allow repairing only known bad
+layers from the load log.
+
+For each copied pair, both biases become the layer's original mean, and
+both experts' optimizer `m` and `v` slices (including router rows) become
+zero. Other weights, biases and optimizer entries keep exactly their bits.
+The optimizer step, AdamW/Muon kind and sampler state are retained; a
+weights-only checkpoint stays weights-only. Loading and saving use the
+existing checkpoint format. `night.sh INIT=...` remains its usual warm
+start, so it starts fresh optimizer state even when the repaired checkpoint
+contains saved moments.
+
 ### D. A generator at the edge of ability
 
 - The generator has knobs: number of steps, size of numbers, distractor

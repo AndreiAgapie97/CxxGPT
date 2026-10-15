@@ -17,6 +17,32 @@ require_absent() {
 cd "$(dirname "$0")/.."
 TEST_DIR=$(mktemp -d)
 trap 'rm -rf -- "$TEST_DIR"' EXIT
+"$CXXGPT_TRAINING_CLI" clone-fixture "$TEST_DIR"
+for kind in adam muon weights; do
+    for mode in explicit auto; do
+        CLONE_OPTIONS=(--layer 0 --from 0 --to 2)
+        if [[ "$mode" == auto ]]; then CLONE_OPTIONS=(--auto); fi
+        "$CXXGPT" clone-experts --ckpt "$TEST_DIR/clone-$kind.ckpt" --out "$TEST_DIR/repaired.ckpt" \
+            "${CLONE_OPTIONS[@]}" --noise 0.01 --seed 31 > "$TEST_DIR/clone.log"
+        "$CXXGPT_TRAINING_CLI" clone-reference "$TEST_DIR/clone-$kind.ckpt" "$TEST_DIR/repaired.ckpt" "$mode" 0.01
+    done
+done
+"$CXXGPT" clone-experts --ckpt "$TEST_DIR/clone-adam.ckpt" --out "$TEST_DIR/exact.ckpt" \
+    --layer 0 --from 0 --to 2 --noise 0 --seed 31 > "$TEST_DIR/clone.log"
+"$CXXGPT_TRAINING_CLI" clone-reference "$TEST_DIR/clone-adam.ckpt" "$TEST_DIR/exact.ckpt" explicit 0
+for options in '--auto --layer 0' '--layer 0 --from 0' '--layer -1 --from 0 --to 2' \
+               '--layer 2 --from 0 --to 2' '--layer 0 --from 0 --to 0' '--layer 0 --from 4 --to 2' \
+               '--auto --noise -1' '--auto --noise nan' '--auto --seed -1'; do
+    status=0
+    # Fixed literal cases, no user-supplied option splitting.
+    # shellcheck disable=SC2086
+    "$CXXGPT" clone-experts --ckpt "$TEST_DIR/clone-adam.ckpt" --out "$TEST_DIR/exact.ckpt" \
+        $options > "$TEST_DIR/clone-invalid.log" 2>&1 || status=$?
+    [[ "$status" == 1 ]]
+    grep -q 'check failed' "$TEST_DIR/clone-invalid.log"
+    "$CXXGPT_TRAINING_CLI" clone-reference "$TEST_DIR/clone-adam.ckpt" "$TEST_DIR/exact.ckpt" explicit 0
+done
+printf 'CLI: explicit/automatic cloning preserves unrelated checkpoint state, optimizer kind and RNG\n'
 printf 'abcdefghi' > "$TEST_DIR/text.txt"
 "$CXXGPT" text2tok --in "$TEST_DIR/text.txt" --out "$TEST_DIR/data.tok" > "$TEST_DIR/data.log"
 COMMON=(--data "$TEST_DIR/data.tok" --val "$TEST_DIR/data.tok" --seq 8 --dim 8 --heads 2

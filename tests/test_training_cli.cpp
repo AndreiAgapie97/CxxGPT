@@ -4,6 +4,7 @@
 #include <iterator>
 #include <set>
 #include "test_accumulation.h"
+#include "test_clone_experts.h"
 #include "test_load_log.h"
 #include "../src/reasoning.h"
 #include "../src/tokenizer.h"
@@ -35,6 +36,29 @@ int main(int argc, char** argv) {
         check_load_log_rows(csv, 2, reference_load_counts(model, first));
         check_load_log_rows(csv, 3, reference_load_counts(model, last));
         EXPECT(!std::getline(csv, header), "unexpected load log rows");
+        return g_failures ? 1 : 0;
+    }
+    if (argc == 3 && std::string(argv[1]) == "clone-fixture") {
+        Model<float> model(clone_test_config()); AdamW opt; Rng rng(93);
+        clone_test_fixture(model, opt); rng.next();
+        const std::string dir = argv[2];
+        save_checkpoint(dir + "/clone-adam.ckpt", model, opt, rng);
+        opt.muon = true;
+        save_checkpoint(dir + "/clone-muon.ckpt", model, opt, rng);
+        opt.m.clear(); opt.v.clear();
+        save_checkpoint(dir + "/clone-weights.ckpt", model, opt, rng);
+        return 0;
+    }
+    if (argc == 6 && std::string(argv[1]) == "clone-reference") {
+        Model<float> before(peek_checkpoint_config(argv[2])), after(peek_checkpoint_config(argv[3]));
+        AdamW old, now; Rng a, b;
+        load_checkpoint(argv[2], before, &old, &a, true);
+        load_checkpoint(argv[3], after, &now, &b, true);
+        const bool automatic = std::string(argv[4]) == "auto";
+        const std::vector<ExpertClone> edits = automatic ?
+            std::vector<ExpertClone>{{0, 0, 2}, {1, 0, 1}, {1, 0, 3}} : std::vector<ExpertClone>{{0, 0, 2}};
+        clone_reference(before, old, after, now, edits, std::stod(argv[5]), 31);
+        for (int i = 0; i < 4; ++i) EXPECT(a.state()[i] == b.state()[i], "CLI clone changed sampler state");
         return g_failures ? 1 : 0;
     }
     if (argc == 5 && std::string(argv[1]) == "bpe-stream-reference") {

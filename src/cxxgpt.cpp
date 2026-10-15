@@ -25,6 +25,7 @@
 #include <utility>
 
 #include "args.h"
+#include "clone_experts.h"
 #include "common.h"
 #include "generate.h"
 #ifdef CXXGPT_CUDA
@@ -93,6 +94,36 @@ void print_config(const Config& c, const Model<float>& m) {
     std::printf("\n");
     std::printf("params: %.3f M total, %.3f M active per token\n", m.num_params() / 1e6,
                 m.active_params() / 1e6);
+}
+
+int cmd_clone_experts(Args& a) {
+    const std::string in = a.str("ckpt"), out = a.str("out");
+    const bool automatic = a.flag("auto");
+    const bool has_layer = a.has("layer"), has_from = a.has("from"), has_to = a.has("to");
+    const int layer = a.integer_int("layer", -1), from = a.integer_int("from", -1), to = a.integer_int("to", -1);
+    const double noise = a.real("noise", 0.01);
+    const long seed = a.integer("seed", 1);
+    a.done();
+    CHECK(!in.empty() && !out.empty(), "usage: cxxgpt clone-experts --ckpt IN --out OUT --auto | --layer L --from A --to B");
+    CHECK(automatic ? !(has_layer || has_from || has_to) : has_layer && has_from && has_to,
+          "choose either --auto or all of --layer, --from, --to");
+    CHECK(noise >= 0 && seed >= 0, "--noise and --seed must be nonnegative");
+    Model<float> model(peek_checkpoint_config(in));
+    CHECK(model.cfg.moe(), "clone-experts needs an MoE checkpoint");
+    AdamW opt; Rng data_rng;
+    load_checkpoint(in, model, &opt, &data_rng, true);
+    const auto edits = automatic ? automatic_expert_clones(model) : std::vector<ExpertClone>{{layer, from, to}};
+    if (automatic) {
+        for (int l = 0; l < model.cfg.n_layers; ++l) {
+            const bool changed = std::any_of(edits.begin(), edits.end(), [&](const ExpertClone& e) { return e.layer == l; });
+            if (!changed) std::printf("layer %d: no clone; router biases are equal\n", l);
+        }
+    }
+    repair_experts(model, opt, edits, noise, uint64_t(seed), true);
+    if (edits.empty()) std::printf("no experts cloned: each layer's router biases are equal\n");
+    save_checkpoint(out, model, opt, data_rng);
+    std::printf("%zu expert(s) cloned -> %s (optimizer step %ld preserved)\n", edits.size(), out.c_str(), opt.step);
+    return 0;
 }
 
 int cmd_bpe_train(Args& a) {
@@ -1389,6 +1420,7 @@ int main(int argc, char** argv) {
         {"bpe-train", cmd_bpe_train, "learns a BPE tokenizer from a text file"},
         {"text2tok", cmd_text2tok, "encodes text into a token file"},
         {"train", cmd_train, "trains a model, or resumes training"},
+        {"clone-experts", cmd_clone_experts, "repairs saved MoE experts by copying a busy expert"},
         {"sample", cmd_sample, "generates text from a prompt"},
         {"gen-reasoning", cmd_gen_reasoning, "writes the synthetic reasoning curriculum"},
         {"gen-word", cmd_gen_word, "writes exact word problems with held-out sentence patterns"},

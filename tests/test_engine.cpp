@@ -6,6 +6,7 @@
 
 #include "test_attention.h"
 #include "test_calc.h"
+#include "test_clone_experts.h"
 #include "test_leak_check.h"
 #include "test_load_log.h"
 #include "test_model.h"
@@ -47,6 +48,7 @@ int main(int argc, char** argv) {
         {"numerics", test_numerics},
         {"policy gradient", test_policy_gradient_expectation},
         {"train", test_train},
+        {"clone experts", test_clone_experts},
         {"optim", test_optim},
         {"generated traces", test_reasoning_traces},
         {"vote", test_vote},
