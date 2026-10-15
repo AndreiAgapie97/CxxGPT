@@ -332,6 +332,16 @@ static void test_moe() {
 
 static void run_tests() {
     printf("Correctness tests\n");
+    // Which kernels this build runs on this CPU, so a test log (CI's
+    // included) shows what was actually checked.
+    printf("  kernels tested:");
+    for (const auto& k : all_kernels()) printf(" [%s]", k.name);
+    printf("\n  MoE default kernel: %s\n", default_int8_kernel().name);
+#ifdef CXXGPT_RUNTIME_SIMD
+    const CpuFeatures cpu = cpu_features();
+    printf("  CPU features (runtime check): avx2 %d, avx512f %d, avx512bw %d, avx-vnni %d, avx512-vnni %d\n",
+           cpu.avx2, cpu.avx512f, cpu.avx512bw, cpu.avxvnni, cpu.avx512vnni);
+#endif
     constexpr int M = 8, K = 64;
     const std::vector<float> X = random_activations(K, 4242);
 

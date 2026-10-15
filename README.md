@@ -71,6 +71,13 @@ widest available int8 kernel, using the same preference as Linux. The rest
 of the binary uses baseline x86-64 instructions, so an older CPU can use the
 scalar kernels safely. The Linux Makefile and its `-march` choices are unchanged.
 
+One kernel differs from WSL. This build compiles B6 (int8 VNNI 256-bit) for
+AVX-VNNI, the encoding of Intel's newer CPUs, so on a CPU that has AVX512-VNNI
+but not AVX-VNNI, such as the laptop's Zen 4, it leaves B6 out. WSL's
+`-march=native` build has B6 there, in its AVX-512 encoding. The MoE layer
+uses B6b (512-bit) on Zen 4 either way. `ternary_moe --tests` prints the CPU
+features it found and the kernels it tested.
+
 ## Quick start
 
 Train a small model on the reasoning curriculum, then test it on held-out

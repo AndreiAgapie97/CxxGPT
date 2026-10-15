@@ -42,8 +42,10 @@ jobs:
           cmake -S . -B build -G $generator -T ClangCL -A x64 "-DCMAKE_GENERATOR_INSTANCE=$($installation.installationPath)"
       - name: Build CPU engine and tests
         run: cmake --build build --config Release --parallel
+      # -V shows every test's output, including the CPU features and
+      # kernels that ternary_moe --tests found on the runner.
       - name: Test
-        run: ctest --test-dir build -C Release --output-on-failure
+        run: ctest --test-dir build -C Release -V
 
   # ISA paths the runner may not be able to execute still have to compile.
   compile-only:
