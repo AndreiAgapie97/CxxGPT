@@ -733,6 +733,8 @@ struct Backend {
     // Brings the weights and optimizer state into the host Model and AdamW,
     // for checkpoints and evaluations.
     virtual void sync() = 0;
+    // The reasoning exam on the current weights: greedy, exact answers.
+    virtual EvalResult reason(const std::vector<Problem>& problems, const Tokenizer& tok, int max_new) = 0;
     // Device memory held, for the GPU; 0 on the CPU.
     virtual size_t device_bytes() const { return 0; }
 };
@@ -755,6 +757,9 @@ struct CpuBackend : Backend {
         return balance_with_load_log(model, rate, interval);
     }
     void sync() override {}
+    EvalResult reason(const std::vector<Problem>& problems, const Tokenizer& tok, int max_new) override {
+        return eval_reasoning(model, problems, tok, 64, max_new);
+    }
 };
 
 #ifdef CXXGPT_CUDA
@@ -801,6 +806,24 @@ struct GpuBackend : Backend {
         opt.m.resize(model.params.size());
         opt.v.resize(model.params.size());
         gpu.get_adam_state(&opt.step, opt.m.data(), opt.v.data());
+    }
+    // On the GPU, in the memory training leaves free: as many answers at a
+    // time as their caches fit, up to the CPU's 64 (the batch does not
+    // change greedy answers). The GPU exam scores the model as training
+    // computes it (bf16 products by default), so a CPU eval-reasoning of
+    // the checkpoint can differ by a problem or two.
+    EvalResult reason(const std::vector<Problem>& problems, const Tokenizer& tok, int max_new) override {
+        const int batch = gpu.decode_capacity(64);
+        if (batch == 0) {
+            std::printf("reasoning eval: the GPU decoder needs %zu MB per answer, and the gradient buffer and %zu "
+                        "MB of free GPU memory are not enough; on the CPU instead\n",
+                        gpu.decode_bytes_per_sequence() >> 20, GpuTrainer::free_device_bytes() >> 20);
+            sync();
+            return eval_reasoning(model, problems, tok, 64, max_new);
+        }
+        std::printf("reasoning eval on the GPU, %d answers at a time\n", batch);
+        GpuDecoder dec{model.cfg, gpu};
+        return eval_reasoning(dec, problems, tok, batch, max_new);
     }
     size_t device_bytes() const override { return gpu.device_bytes(); }
 };
@@ -1007,9 +1030,8 @@ int cmd_train(Args& a) {
     }
     auto reason_eval = [&](long at_step) {
         if (reason_test.empty()) return;
-        be.sync();
         const double t0 = now_seconds();
-        const EvalResult r = eval_reasoning(model, reason_test, tok, 64, max_new);
+        const EvalResult r = be.reason(reason_test, tok, max_new);
         std::printf("reasoning eval at step %ld (%.1f s):\n", at_step, now_seconds() - t0);
         print_eval(r, 1);  // one wrong answer, to see what the model writes
         if (log) {

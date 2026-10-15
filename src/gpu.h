@@ -78,6 +78,25 @@ public:
     // Tokens routed to each expert since the last call, [layer][expert].
     std::vector<std::vector<double>> take_expert_load();
 
+    // Incremental decoding with a KV cache on the GPU, as Model::decode_begin
+    // and decode_step (generate.h runs it through GpuDecoder, below): B
+    // sequences, one token each per step, sequence b's real tokens starting
+    // at start[b]. Products are as in training (Matmul), attention over the
+    // cache in fp32. The caches go in the gradient buffer when they fit
+    // (between steps it holds nothing: each step starts with zero_grad(),
+    // and until then backward, grad_norm, adamw_step and get_grads refuse
+    // to run), else in memory of their own, freed by the next forward().
+    void decode_begin(int B, const std::vector<int>& start);
+    // Feeds tokens[b] at position pos (0, 1, 2, ... in order); returns the
+    // logits for the next token, [B, vocab], in host memory, valid until the
+    // next call.
+    const float* decode_step(const int* tokens, int pos);
+    // How many sequences' caches fit (in the gradient buffer or the GPU
+    // memory free now), at most max_batch; 0 if not even one does.
+    int decode_capacity(int max_batch) const;
+    size_t decode_bytes_per_sequence() const;  // the caches of one sequence
+    static size_t free_device_bytes();         // as the GPU reports it now
+
     // Profiling, off by default: the GPU time of each part of the step
     // (attention, matrix products, MoE routing, optimizer, ...), measured
     // with CUDA events. take_profile returns seconds per part since its last
@@ -92,6 +111,16 @@ public:
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;
+};
+
+// A GpuTrainer as generate() and eval_reasoning() (generate.h) take a model:
+// its Config and the two decoding calls. So the evaluation code is the same
+// on the CPU's Model and on the GPU.
+struct GpuDecoder {
+    Config cfg;
+    GpuTrainer& gpu;
+    void decode_begin(int B, const std::vector<int>& start) { gpu.decode_begin(B, start); }
+    const float* decode_step(const int* tokens, int pos) { return gpu.decode_step(tokens, pos); }
 };
 
 // Whether the fused attention kernels take this head size (up to 128).

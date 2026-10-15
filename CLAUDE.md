@@ -67,7 +67,10 @@ Reasoning is the first capability we go after.
   with them), in exact fp32 otherwise (`src/attention.cuh`, also tested on
   a CPU emulator, `tests/cuda_emu.h`).
   `--profile` times each part of a step. `tests/test_gpu.cpp` compares it
-  with the CPU engine. Build with `make gpu`, giving `cxxgpt-gpu` (`train
+  with the CPU engine. Training's reasoning exams run on the GPU too
+  (`GpuTrainer::decode_begin/decode_step`, a KV cache kept in the gradient
+  buffer between steps; tested against `Model::decode_step`): 16 s instead
+  of 5 minutes for 250 problems on the night-1 model. Build with `make gpu`, giving `cxxgpt-gpu` (`train
   --gpu`) and `test_gpu`. On the laptop's RTX 4070, everything passes
   except two checks, neither on what the nights run, both on a norm
   weight's gradient: the fp32 fused kernels at `heads of 64` (70 tokens,

@@ -229,9 +229,10 @@ __global__ void add_partials(float* dw, const float* partial, int blocks, int C)
     dw[c] = s;
 }
 
-// rope_apply on q and k of qkv[N, 3C]; row n is at position n % Tn.
+// rope_apply on q and k of qkv[N, 3C]; row n is at position n % Tn + pos0
+// (pos0: incremental decoding's position).
 __global__ void rope(float* qkv, const float* cos_t, const float* sin_t, int N, int Tn, int C, int NH, int half,
-                     bool inverse) {
+                     bool inverse, int pos0) {
     const size_t i = size_t(blockIdx.x) * blockDim.x + threadIdx.x;
     if (i >= size_t(N) * 2 * NH * half) return;
     const int k = int(i % half);
@@ -239,13 +240,64 @@ __global__ void rope(float* qkv, const float* cos_t, const float* sin_t, int N, 
     const int h = int(r % NH);
     r /= NH;
     const int part = int(r % 2);
-    const int n = int(r / 2), t = n % Tn;
+    const int n = int(r / 2), t = n % Tn + pos0;
     float* x = qkv + size_t(n) * 3 * C + part * C + h * 2 * half;
     const float cs = cos_t[size_t(t) * half + k];
     const float sn = inverse ? -sin_t[size_t(t) * half + k] : sin_t[size_t(t) * half + k];
     const float x0 = x[k], x1 = x[k + half];
     x[k] = x0 * cs - x1 * sn;
     x[k + half] = x0 * sn + x1 * cs;
+}
+
+// Incremental decoding (Model::decode_step): the k and v of each sequence's
+// new token, from qkv[B, 3C], into the caches kc, vc [B, S, C] at pos.
+__global__ void kv_store(float* kc, float* vc, const float* qkv, int B, int S, int C, int pos) {
+    const size_t i = size_t(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (i >= size_t(B) * C) return;
+    const size_t b = i / C, c = i % C, at = (b * S + pos) * C + c;
+    kc[at] = qkv[b * 3 * C + C + c];
+    vc[at] = qkv[b * 3 * C + 2 * C + c];
+}
+
+// Incremental decoding's attention: block b * NH + h is head h of sequence
+// b, whose new query (in qkv[B, 3C]) attends to its cached keys and values
+// at positions start[b]..pos (left padding comes before start[b]). The
+// scores live in dynamic shared memory, pos + 1 floats.
+__global__ void decode_attn(float* out, const float* qkv, const float* kc, const float* vc, const int* start,
+                            int S, int C, int NH, int HS, int pos, float scale) {
+    extern __shared__ float p[];
+    __shared__ float red[kWarp + 1];
+    const int b = blockIdx.x / NH, h = blockIdx.x % NH, s0 = start[b];
+    // A padding position (before the sequence starts) attends to nothing:
+    // zeros, as on the CPU, rather than 0/0, which could reach the router.
+    if (pos < s0) {
+        for (int i = threadIdx.x; i < HS; i += blockDim.x) out[size_t(b) * C + h * HS + i] = 0.0f;
+        return;
+    }
+    const int lane = threadIdx.x % kWarp, wid = threadIdx.x / kWarp, nw = blockDim.x / kWarp;
+    const float* q = qkv + size_t(b) * 3 * C + h * HS;
+    const size_t base = size_t(b) * S * C + size_t(h) * HS;
+    // One warp per cached position: its score q·k.
+    for (int s = s0 + wid; s <= pos; s += nw) {
+        const float* k = kc + base + size_t(s) * C;
+        float d = 0.0f;
+        for (int i = lane; i < HS; i += kWarp) d += q[i] * k[i];
+        d = warp_sum(d);
+        if (lane == 0) p[s] = d * scale;
+    }
+    __syncthreads();
+    float mx = -INFINITY;
+    for (int s = s0 + threadIdx.x; s <= pos; s += blockDim.x) mx = fmaxf(mx, p[s]);
+    mx = block_reduce(mx, red, true);
+    float sum = 0.0f;
+    for (int s = s0 + threadIdx.x; s <= pos; s += blockDim.x) sum += p[s] = expf(p[s] - mx);
+    sum = block_reduce(sum, red, false);  // its barriers also make every p[s] visible
+    const float inv = 1.0f / sum;
+    for (int i = threadIdx.x; i < HS; i += blockDim.x) {
+        float y = 0.0f;
+        for (int s = s0; s <= pos; ++s) y += p[s] * vc[base + size_t(s) * C + i];
+        out[size_t(b) * C + h * HS + i] = y * inv;
+    }
 }
 
 // attention_forward's softmax: each row of att[B, NH, Tn, Tn] holds raw
@@ -801,6 +853,20 @@ struct GpuTrainer::Impl {
     // the copy can run behind other work) once counts_ready has passed.
     int* counts_h = nullptr;
     cudaEvent_t counts_ready = nullptr;
+    // Incremental decoding (decode_begin, decode_step): the k and v caches
+    // [layer][B, S, C], each sequence's first real position, and the logits
+    // copied back for the host to pick the next token. The caches live in
+    // the gradient buffer when they fit there: between training steps it
+    // holds nothing (each step starts with zero_grad()), and training leaves
+    // little other memory free. grads_scratch says the gradients were
+    // overwritten; zero_grad() clears it. kv_own: the caches' own memory
+    // when the gradient buffer is too small.
+    std::vector<float*> kcache, vcache;
+    DevBuf<float> kv_own;
+    DevBuf<int> kv_start;
+    int kv_B = 0;
+    bool grads_scratch = false;
+    std::vector<float> logits_h;
 
     Impl(const Config& c, const std::vector<ParamInfo>& in, Matmul matmul, bool fused)
         : cfg(c), infos(in), fused_attn(fused) {
@@ -1045,11 +1111,11 @@ struct GpuTrainer::Impl {
         LAUNCH_CHECK();
     }
 
-    void rope_apply(float* qkv, int B, int Tn, bool inverse) {
+    void rope_apply(float* qkv, int B, int Tn, bool inverse, int pos0 = 0) {
         const int C = cfg.d_model, NH = cfg.n_heads, half = cfg.head_size() / 2;
         const size_t n = size_t(B) * Tn * 2 * NH * half;
         Region r(*this, "norms, rope, adds");
-        rope<<<blocks_for(n), kBlock>>>(qkv, rope_cos.p, rope_sin.p, B * Tn, Tn, C, NH, half, inverse);
+        rope<<<blocks_for(n), kBlock>>>(qkv, rope_cos.p, rope_sin.p, B * Tn, Tn, C, NH, half, inverse, pos0);
         LAUNCH_CHECK();
     }
 
@@ -1321,6 +1387,7 @@ struct GpuTrainer::Impl {
 
     double forward(const int* tokens_h, const int* targets_h, int B, int Tn, bool training) {
         CHECK(targets_h, "GpuTrainer::forward needs targets");
+        release_decode();  // training never runs with less memory than without decoding
         allocate(B, Tn);
         B_cur = B;
         T_cur = Tn;
@@ -1364,8 +1431,105 @@ struct GpuTrainer::Impl {
         return n_valid ? total / n_valid : 0.0;
     }
 
+    // ---- Incremental decoding, as Model::decode_begin / decode_step ----
+    //
+    // One token per sequence per step, all at the same position, sequences
+    // left-padded to start[b]. A step runs forward()'s layers on B rows,
+    // with attention over the caches instead of the whole sequence.
+
+    // The caches' size for one sequence: k and v, every layer, the whole context.
+    size_t decode_bytes_per_sequence() const {
+        return size_t(2) * cfg.n_layers * cfg.seq_len * cfg.d_model * sizeof(float);
+    }
+
+    void release_decode() {
+        kv_own.release();
+        kcache.clear();
+        vcache.clear();
+        kv_B = 0;
+    }
+
+    // Before reading the gradients: decoding must not have overwritten them.
+    void check_grads(const char* what) const {
+        CHECK(!grads_scratch, "%s after decoding, which used the gradient buffer: zero_grad() first", what);
+    }
+
+    void decode_begin(int B, const std::vector<int>& start) {
+        CHECK(B > 0 && int(start.size()) == B, "decode_begin: %zu starts for %d sequences", start.size(), B);
+        // Decoding uses the first B rows of the training buffers; allocate()
+        // for B rows would free and rebuild them all (B > B_ there).
+        if (size_t(B_) * T_ == 0) allocate(B, 1);
+        CHECK(size_t(B) <= size_t(B_) * T_, "decode batch %d > the %d rows allocated", B, B_ * T_);
+        CHECK(size_t(cfg.seq_len) * sizeof(float) <= 48 * 1024, "decode attention keeps a context of %d scores in "
+              "shared memory: at most 12288", cfg.seq_len);
+        has_targets = false;  // decoding overwrites the activations backward() would read
+        const size_t per = size_t(B) * cfg.seq_len * cfg.d_model, need = 2 * size_t(cfg.n_layers) * per;
+        float* base = nullptr;
+        if (need <= grads.n) {
+            base = grads.p;
+            grads_scratch = true;
+        } else {
+            kv_own.resize(need);  // grows only: one exam's generate() calls share it
+            base = kv_own.p;
+        }
+        kcache.resize(cfg.n_layers);
+        vcache.resize(cfg.n_layers);
+        for (int l = 0; l < cfg.n_layers; ++l) {
+            kcache[l] = base + size_t(2 * l) * per;
+            vcache[l] = base + size_t(2 * l + 1) * per;
+        }
+        kv_start.resize(B);
+        to_device(kv_start.p, start.data(), B);
+        kv_B = B;
+        logits_h.resize(size_t(B) * cfg.vocab);
+    }
+
+    const float* decode_step(const int* tokens_h, int pos) {
+        const int B = kv_B, N = B, C = cfg.d_model, V = cfg.vocab, NH = cfg.n_heads, HS = cfg.head_size();
+        const int S = cfg.seq_len;
+        CHECK(B > 0, "decode_step without decode_begin");
+        CHECK(pos >= 0 && pos < S, "decode position %d outside the context of %d", pos, S);
+        for (int n = 0; n < N; ++n) CHECK(tokens_h[n] >= 0 && tokens_h[n] < V, "token %d out of range", tokens_h[n]);
+        if (weights_dirty) quantize_weights();
+        to_device(tokens.p, tokens_h, N);
+        embedding_fwd<<<blocks_for(size_t(N) * C), kBlock>>>(x0.p, tokens.p, P(wte), N, C);
+        LAUNCH_CHECK();
+        const float scale = 1.0f / std::sqrt(float(HS));
+        const float* x = x0.p;
+        for (int l = 0; l < cfg.n_layers; ++l) {
+            auto& a = acts[l];
+            const auto& o = layer[l];
+            rmsnorm_forward(a.ln1.p, a.ln1h.p, a.rstd1.p, x, P(o.ln1), N, C);
+            proj_forward(a.qkv.p, pick(a.ln1, a.ln1h), o.wqkv, N, C, 3 * C, attn_ternary());
+            if (cfg.rope_layer(l)) rope_apply(a.qkv.p, B, 1, false, pos);
+            {
+                Region r(*this, "attention fwd");
+                kv_store<<<blocks_for(size_t(N) * C), kBlock>>>(kcache[l], vcache[l], a.qkv.p, N, S, C, pos);
+                LAUNCH_CHECK();
+                decode_attn<<<N * NH, kBlock, size_t(pos + 1) * sizeof(float)>>>(
+                    a.atty.p, a.qkv.p, kcache[l], vcache[l], kv_start.p, S, C, NH, HS, pos, scale);
+                LAUNCH_CHECK();
+            }
+            if (bf16_ops) to_bf16_region(a.attyh.p, a.atty.p, size_t(N) * C);
+            proj_forward(out_tmp.p, pick(a.atty, a.attyh), o.wo, N, C, C, attn_ternary());
+            add(a.resid1.p, x, out_tmp.p, size_t(N) * C);
+            rmsnorm_forward(a.ln2.p, a.ln2h.p, a.rstd2.p, a.resid1.p, P(o.ln2), N, C);
+            ffn_forward(l, out_tmp.p, N, false);
+            add(a.resid2.p, a.resid1.p, out_tmp.p, size_t(N) * C);
+            x = a.resid2.p;
+        }
+        rmsnorm_forward(lnf_out.p, lnfh.p, rstdf.p, x, P(lnf), N, C);
+        {
+            Region r(*this, "output layer and loss");
+            linear_forward(logits.p, pick(lnf_out, lnfh), P(wte), N, C, V);  // tied head
+        }
+        to_host(logits_h.data(), logits.p, size_t(N) * V);
+        return logits_h.data();
+    }
+
     void backward(double loss_scale) {
         CHECK(has_targets, "backward() needs a forward() first");
+        check_grads("backward()");
         const int B = B_cur, Tn = T_cur, N = B * Tn, C = cfg.d_model, V = cfg.vocab;
         if (n_valid == 0) return;
         const float* xL = acts.back().resid2.p;
@@ -1400,6 +1564,7 @@ struct GpuTrainer::Impl {
     }
 
     double grad_norm() {
+        check_grads("grad_norm()");
         std::optional<Region> r(std::in_place, *this, "gradient norm");
         partial_sums<<<dim3(kPartials, 1), kBlock>>>(norm_partial.p, grads.p, all_off.p, all_len.p, false);
         LAUNCH_CHECK();
@@ -1412,6 +1577,7 @@ struct GpuTrainer::Impl {
     }
 
     void adamw_step(double lr, double beta1, double beta2, double eps, double weight_decay, double grad_scale) {
+        check_grads("adamw_step()");
         ++adam_step;
         const float c1 = float(1.0 / (1.0 - std::pow(beta1, double(adam_step))));
         const float c2 = float(1.0 / (1.0 - std::pow(beta2, double(adam_step))));
@@ -1533,7 +1699,10 @@ void GpuTrainer::set_params(const float* p) {
     impl_->weights_dirty = true;
 }
 void GpuTrainer::get_params(float* p) const { to_host(p, impl_->params.p, impl_->n_params); }
-void GpuTrainer::get_grads(float* g) const { to_host(g, impl_->grads.p, impl_->n_params); }
+void GpuTrainer::get_grads(float* g) const {
+    impl_->check_grads("get_grads()");
+    to_host(g, impl_->grads.p, impl_->n_params);
+}
 
 void GpuTrainer::set_adam_state(long step, const float* m, const float* v) {
     impl_->adam_step = step;
@@ -1570,7 +1739,34 @@ double GpuTrainer::forward(const int* tokens, const int* targets, int B, int Tn,
     return impl_->forward(tokens, targets, B, Tn, training);
 }
 void GpuTrainer::backward(double loss_scale) { impl_->backward(loss_scale); }
-void GpuTrainer::zero_grad() { impl_->grads.zero(); }
+void GpuTrainer::zero_grad() {
+    impl_->grads.zero();
+    impl_->grads_scratch = false;
+}
+
+void GpuTrainer::decode_begin(int B, const std::vector<int>& start) { impl_->decode_begin(B, start); }
+const float* GpuTrainer::decode_step(const int* tokens, int pos) { return impl_->decode_step(tokens, pos); }
+int GpuTrainer::decode_capacity(int max_batch) const {
+    const Impl& m = *impl_;
+    const size_t per = m.decode_bytes_per_sequence();
+    // In the gradient buffer (decode_begin), or else in free memory: keep a
+    // margin there for cuBLAS and the buffers a first decode allocates when
+    // nothing is allocated yet. Caches already held count as free.
+    const size_t in_grads = m.grads.n * sizeof(float) / per;
+    size_t free_b = 0, total_b = 0;
+    CUDA_CHECK(cudaMemGetInfo(&free_b, &total_b));
+    constexpr size_t kMargin = size_t(256) << 20;
+    const size_t avail = free_b + m.kv_own.n * sizeof(float);
+    size_t fit = std::max(in_grads, avail > kMargin ? (avail - kMargin) / per : 0);
+    if (size_t(m.B_) * m.T_ > 0) fit = std::min(fit, size_t(m.B_) * m.T_);  // decode uses the training rows
+    return int(std::min(fit, size_t(std::max(0, max_batch))));
+}
+size_t GpuTrainer::decode_bytes_per_sequence() const { return impl_->decode_bytes_per_sequence(); }
+size_t GpuTrainer::free_device_bytes() {
+    size_t free_b = 0, total_b = 0;
+    CUDA_CHECK(cudaMemGetInfo(&free_b, &total_b));
+    return free_b;
+}
 double GpuTrainer::grad_norm() { return impl_->grad_norm(); }
 void GpuTrainer::adamw_step(double lr, double beta1, double beta2, double eps, double weight_decay,
                             double grad_scale) {

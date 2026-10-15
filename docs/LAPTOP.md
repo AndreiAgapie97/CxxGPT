@@ -160,7 +160,13 @@ TOKS=... BATCH=... ACCUM=... MODEL="..." scripts/night.sh   # the line the probe
 night does (7.5 hours by default), trains on web text, stories and worked
 math, and checks itself on the GSM8K test set, which training never sees
 (or on the dev set with `DEV=1`, above): validation loss every 500 steps,
-exact answers every 2000. Its settings
+exact answers every 2000. The exact-answer exams run on the GPU (16 s for
+250 problems on the night-1 model, against 5 minutes on the CPU, which
+left the GPU idle): `reasoning eval on the GPU, 28 answers at a time` in
+the log. They score the model as training computes it (bf16 products), so
+`cxxgpt eval-reasoning` on the CPU can differ by a problem or two. If the
+GPU has no room for the answers' caches, the log says so and the exam
+runs on the CPU as before. Its settings
 (model size, optimizer, batch, data mix) are at the top of the script.
 Run the same command again to resume after an interruption. The log is
 `runs/night1.log`; in the morning, `scripts/report.sh night1` sums it up on

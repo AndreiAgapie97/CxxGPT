@@ -21,6 +21,7 @@
 #include <string>
 #include <vector>
 
+#include "../src/generate.h"
 #include "../src/gpu.h"
 #include "../src/model.h"
 #include "../src/train.h"
@@ -329,6 +330,76 @@ void profile_regions() {
     std::printf("  profile: %zu parts, %.2f ms in all\n", prof.size(), total * 1e3);
 }
 
+// Incremental decoding on the GPU (decode_begin / decode_step, what training
+// takes its reasoning exams with) against the CPU's Model: the same tokens
+// into both, prompts of 9, 1 and 5 tokens (left-padded), every step's logits
+// compared, to the end of the context; then generate() on both, and a
+// training forward() after decoding, which must see the same loss and
+// memory as before it (the caches are freed, the training buffers kept).
+void decode(const char* name, const Config& cfg, double tol, Matmul matmul = Matmul::fp32) {
+    Model<float> cpu(cfg);
+    cpu.init(9);
+    Rng rng(10);
+    for (auto& layer : cpu.router_bias)
+        for (auto& b : layer) b = float(0.01 * rng.normal());
+    GpuTrainer gpu(cfg, cpu.infos, matmul, true);
+    gpu.set_params(cpu.params.data());
+    gpu.set_router_bias(cpu.router_bias);
+    EXPECT(gpu.decode_capacity(64) >= 3, "%s: decode capacity %d", name, gpu.decode_capacity(64));
+    const std::vector<int> lens = {9, 1, 5};
+    const int B = int(lens.size()), L = 9, V = cfg.vocab;
+    std::vector<int> start(B);
+    std::vector<std::vector<int>> prompts(B);
+    for (int b = 0; b < B; ++b) {
+        start[b] = L - lens[b];
+        for (int i = 0; i < lens[b]; ++i) prompts[b].push_back(int(rng.below(V)));
+    }
+    // Twice: with nothing allocated yet (as eval-reasoning starts), then
+    // after a training forward() (as the exams during training run).
+    std::vector<int> tok(size_t(B) * cfg.seq_len), tgt(tok.size());
+    for (size_t i = 0; i < tok.size(); ++i) tok[i] = tgt[i] = int(rng.below(V));
+    double worst = 0, loss_before = 0;
+    size_t bytes_before = 0;
+    for (int round = 0; round < 2; ++round) {
+        if (round == 1) {
+            loss_before = gpu.forward(tok.data(), tgt.data(), B, cfg.seq_len, false);
+            bytes_before = gpu.device_bytes();
+        }
+        cpu.decode_begin(B, start);
+        gpu.decode_begin(B, start);
+        std::vector<int> cur(B);
+        for (int pos = 0; pos < cfg.seq_len; ++pos) {
+            for (int b = 0; b < B; ++b)
+                if (pos < L) cur[b] = pos < start[b] ? prompts[b][0] : prompts[b][pos - start[b]];
+            const float* lc = cpu.decode_step(cur.data(), pos);
+            const float* lg = gpu.decode_step(cur.data(), pos);
+            for (int b = 0; b < B; ++b) {
+                const float* rc = lc + size_t(b) * V;
+                if (pos >= start[b]) worst = std::max(worst, rel_l2(lg + size_t(b) * V, rc, size_t(V)));
+                cur[b] = int(std::max_element(rc, rc + V) - rc);  // the CPU's greedy choice feeds both
+            }
+        }
+    }
+    const double loss_after = gpu.forward(tok.data(), tgt.data(), B, cfg.seq_len, false);
+    EXPECT(loss_after == loss_before && gpu.device_bytes() == bytes_before,
+           "%s: training after decoding saw loss %.9g and %zu bytes, before %.9g and %zu", name, loss_after,
+           gpu.device_bytes(), loss_before, bytes_before);
+    // The whole generation loop, greedy: the same tokens, with exact products.
+    auto never = [](const std::vector<int>&) { return false; };
+    GpuDecoder dec{cfg, gpu};
+    const auto gc = generate(cpu, prompts, cfg.seq_len, never);
+    const auto gg = generate(dec, prompts, cfg.seq_len, never);
+    if (matmul == Matmul::fp32) EXPECT(gc == gg, "%s: generate() picked different tokens", name);
+    // The caches lived in the gradient buffer; zero_grad() gives it back.
+    gpu.zero_grad();
+    std::vector<float> g(cpu.num_params(), 1.0f);
+    gpu.get_grads(g.data());
+    EXPECT(std::all_of(g.begin(), g.end(), [](float x) { return x == 0.0f; }),
+           "%s: zero_grad() after decoding left gradients", name);
+    std::printf("  decode %-17s logits %.1e\n", name, worst);
+    EXPECT(worst <= tol, "%s: decode logits differ by %g", name, worst);
+}
+
 }  // namespace
 
 int main() {
@@ -415,6 +486,18 @@ int main() {
     // times more than AdamW does, hence the looser weight tolerance.
     compare("dense muon", dense, 1e-5, 1e-4, 1e-3, {.muon = true});
     compare("moe muon", moe, 1e-5, 1e-4, 1e-3, {.muon = true, .clip = 0.5});
+
+    // Decoding: exact products (summation order and expf against the CPU's
+    // fast_exp are the only differences), MoE routing, layers without RoPE,
+    // ternary weights, and bf16 products as the nights run. The RTX 4070
+    // measured 1.6e-7 to 2.2e-7 with exact products and 1.4e-2 with bf16;
+    // the bounds are 5x and 2x that (ternary 1e-3: an int8 rounding flip
+    // is allowed, as in compare()).
+    decode("dense", dense, 1e-6);
+    decode("moe+shared", moe, 1e-6);
+    decode("half NoPE", nope, 1e-6);
+    decode("ternary moe", ours, 1e-3);
+    decode("moe bf16", moe, 3e-2, Matmul::bf16);
 
     learns_pattern(false);
     learns_pattern(true);
