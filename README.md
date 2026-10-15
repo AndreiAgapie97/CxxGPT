@@ -48,7 +48,7 @@ C++20; builds warning-free under g++ and clang++. CI builds with both
 compilers on several `-march` targets, runs every test under the
 sanitizers, and compiles the CUDA backend with nvcc 12.8 and 13.0.
 
-### Native Windows CPU build
+### Native Windows build
 
 Install Visual Studio's C++ tools, LLVM/clang-cl, CMake and Ninja. From an
 **x64 Native Tools Command Prompt for VS**, run:
@@ -61,8 +61,22 @@ ctest --test-dir build --output-on-failure
 
 This builds `build\cxxgpt.exe`, `build\ternary_moe.exe` and
 `build\test_engine.exe`. The tests run directly on Windows; the shell CLI
-tests stay on Linux. This is a CPU build; the CUDA build and laptop training
-scripts continue to use WSL2.
+tests stay on Linux.
+
+With the CUDA toolkit installed, add `-DCXXGPT_CUDA=ON` to the first
+command for `build\cxxgpt-gpu.exe` (`train --gpu`) and `build\test_gpu.exe`
+(`-DCXXGPT_CUDA_ARCH=sm_89` names the GPU; the default, `native`, is the one
+in the machine). nvcc compiles `src/gpu.cu` with Visual Studio's `cl.exe`,
+the only host compiler it takes on Windows, and clang-cl compiles the rest;
+both use the same C++ runtime (`/MD`). The laptop's command, with CUDA 13.3:
+
+```bat
+cmake -S . -B build -G Ninja -DCMAKE_CXX_COMPILER=clang-cl -DCMAKE_BUILD_TYPE=Release ^
+  -DCXXGPT_MARCH=native -DCXXGPT_CUDA=ON -DCXXGPT_CUDA_ARCH=sm_89
+```
+
+CI does not build the CUDA half on Windows (its runner has no CUDA); the
+Linux CUDA jobs compile the same `gpu.cu`.
 
 Windows CI builds the same targets another way: it finds Visual Studio with
 `vswhere`, configures with that Visual Studio generator and its clang-cl

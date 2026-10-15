@@ -35,7 +35,41 @@ find_package(Threads REQUIRED)
 add_executable(cxxgpt src/cxxgpt.cpp)
 add_executable(ternary_moe ternary_moe.cpp)
 add_executable(test_engine tests/test_engine.cpp)
-foreach(target cxxgpt ternary_moe test_engine)
+set(cpu_targets cxxgpt ternary_moe test_engine)
+
+# The CUDA training backend, as the Makefile's `make gpu` builds it:
+# cxxgpt-gpu (train --gpu) and test_gpu. Off by default, since CI's Windows
+# runner has no CUDA; -DCXXGPT_CUDA=ON on the laptop. nvcc compiles gpu.cu
+# with Microsoft's cl.exe, the only host compiler it takes on Windows; the
+# rest stays clang-cl. Both halves must use the same C++ runtime (/MD), since
+# std::string and std::vector cross gpu.h.
+option(CXXGPT_CUDA "Build cxxgpt-gpu and test_gpu (needs the CUDA toolkit and an NVIDIA GPU to run)" OFF)
+if(CXXGPT_CUDA)
+    set(CXXGPT_CUDA_ARCH "native" CACHE STRING "nvcc -arch value, e.g. sm_89; native targets this machine's GPU")
+    find_program(CXXGPT_NVCC nvcc HINTS "$ENV{CUDA_PATH}/bin" REQUIRED)
+    find_program(CXXGPT_HOST_CL cl REQUIRED)
+    cmake_path(GET CXXGPT_NVCC PARENT_PATH cuda_bin)
+    cmake_path(GET cuda_bin PARENT_PATH cuda_root)
+    cmake_path(GET CXXGPT_HOST_CL PARENT_PATH host_dir)
+    set(gpu_obj "${CMAKE_CURRENT_BINARY_DIR}/gpu.obj")
+    add_custom_command(OUTPUT "${gpu_obj}"
+        COMMAND "${CXXGPT_NVCC}" -O3 -std=c++20 -arch=${CXXGPT_CUDA_ARCH} -ccbin "${host_dir}"
+                -Werror all-warnings -Xcompiler "$<IF:$<CONFIG:Debug>,/MDd,/MD>,/W3,/WX"
+                -DNOMINMAX -D_CRT_SECURE_NO_WARNINGS
+                -c "${CMAKE_CURRENT_SOURCE_DIR}/src/gpu.cu" -o "${gpu_obj}"
+        DEPENDS src/gpu.cu src/gpu.h src/attention.cuh src/attention_tc.cuh src/config.h src/common.h
+        COMMENT "nvcc src/gpu.cu"
+        VERBATIM)
+    add_executable(cxxgpt-gpu src/cxxgpt.cpp "${gpu_obj}")
+    add_executable(test_gpu tests/test_gpu.cpp "${gpu_obj}")
+    target_compile_definitions(cxxgpt-gpu PRIVATE CXXGPT_CUDA)
+    foreach(target cxxgpt-gpu test_gpu)
+        target_link_libraries(${target} PRIVATE "${cuda_root}/lib/x64/cublas.lib" "${cuda_root}/lib/x64/cudart.lib")
+    endforeach()
+    list(APPEND cpu_targets cxxgpt-gpu test_gpu)
+endif()
+
+foreach(target ${cpu_targets})
     target_link_libraries(${target} PRIVATE Threads::Threads)
     target_compile_definitions(${target} PRIVATE _CRT_SECURE_NO_WARNINGS NOMINMAX)
     target_compile_options(${target} PRIVATE /clang:-Wall /clang:-Wextra /clang:-Werror /clang:-Wno-unused-command-line-argument)

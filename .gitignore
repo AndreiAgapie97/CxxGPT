@@ -18,3 +18,4 @@ reasoning_traces
 reasoning_curriculum
 memory_probe
 __pycache__/
+build/
