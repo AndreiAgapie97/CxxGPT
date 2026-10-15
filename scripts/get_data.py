@@ -393,11 +393,13 @@ def get_openmath2(out, args):
         nonlocal removed
         for path in paths:
             for r in parquet_rows(path, cols):
+                if sources is not None and r["problem_source"] not in sources:
+                    continue
+                # Counted after --sources, so "removed" is only what the dev filter took out.
                 if r["problem_source"] == "gsm8k" and normalize_question(r["problem"]) in dev:
                     removed += 1
                     continue
-                if sources is None or r["problem_source"] in sources:
-                    yield r["problem"], r["generated_solution"], r["expected_answer"]
+                yield r["problem"], r["generated_solution"], r["expected_answer"]
 
     write_qa(rows(), os.path.join(out, f"{args.split}.jsonl"))
     log(f"  OpenMath2 dev filter: removed {removed} rows")

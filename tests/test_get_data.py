@@ -141,6 +141,13 @@ class DatasetTest(unittest.TestCase):
         self.assertIn("OpenMath2 dev filter: removed 2 rows", output.getvalue())
         self.assertEqual([r["question"] for r in self.read("openmath2/train_1M.jsonl")],
                          [train, dev, dev + " Changed", dev])
+        # Rows that --sources drops anyway do not count as removed by the dev filter.
+        output = io.StringIO()
+        only = types.SimpleNamespace(**dict(vars(self.args), sources="augmented_gsm8k,math"))
+        with patch.object(data, "parquet_rows", fake_parquet_rows), contextlib.redirect_stdout(output):
+            data.get_openmath2(str(self.root / "openmath2"), only)
+        self.assertIn("OpenMath2 dev filter: removed 0 rows", output.getvalue())
+        self.assertEqual([r["question"] for r in self.read("openmath2/train_1M.jsonl")], [dev, dev])
         # Repeated conversion also applies the filter to cached raw downloads.
         with contextlib.redirect_stdout(io.StringIO()):
             data.get_metamath(str(self.root / "metamath"), self.args)
