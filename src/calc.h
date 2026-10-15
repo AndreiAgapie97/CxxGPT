@@ -197,6 +197,10 @@ inline std::optional<std::string> response(std::string_view text, Mode mode) {
         const size_t begin = text.rfind("<<");
         if (begin == std::string_view::npos || text.find(">>", begin) != std::string_view::npos) return {};
         expr = text.substr(begin + 2, text.size() - begin - 3);
+        // A note is a call only at its first "=". A note left open
+        // ("<<5/0=unknown ...") was already counted as malformed there;
+        // a later "=" must not count it again.
+        if (expr.find('=') != std::string::npos) return {};
     } else {
         // " = $" is a trigger too: in "$50 x 3 = $150" the number goes
         // after the "$".

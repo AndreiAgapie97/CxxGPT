@@ -228,6 +228,10 @@ inline void test_calc() {
     EXPECT(!calc::response("16 * 7 =", calc::Mode::plain), "plain waits for trailing space");
     EXPECT(calc::response("<<48/2=", calc::Mode::notes) == std::optional<std::string>("24>>"), "notes result");
     EXPECT(!calc::response("<<2=2>> then =", calc::Mode::notes), "closed note ignored");
+    const auto open = calc::response("<<5/0=", calc::Mode::notes);
+    EXPECT(open && open->empty(), "an open note is malformed at its first =");
+    EXPECT(!calc::response("<<5/0=unknown =", calc::Mode::notes), "an open note is not counted again at a later =");
+    EXPECT(!calc::response("<<5/0=unknown, so 2+2=", calc::Mode::notes), "nor at a later = with arithmetic");
 }
 
 // At each decode position the fake predicts the next scripted token. Poison
@@ -256,7 +260,7 @@ inline void test_calc_hook() {
     for (const auto mode : {calc::Mode::notes, calc::Mode::plain}) {
         const bool notes = mode == calc::Mode::notes;
         const std::vector<std::string> expected = notes ?
-            std::vector<std::string>{"<<48/2=24>> continue\n", "bad <<5/0=unknown; <<7/2*2=7>> ok\n"} :
+            std::vector<std::string>{"<<48/2=24>> continue\n", "bad <<5/0=unknown = 1; <<7/2*2=7>> ok\n"} :
             std::vector<std::string>{"16 x 7 = 112 continue\n", "bad 5/0 = unknown; 13 * 13 = 169 ok\n"};
         CalcFakeModel m; m.cfg.vocab = 256; m.cfg.seq_len = 180;
         for (const auto& text : expected) m.script.push_back(tok.encode(text));
