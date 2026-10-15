@@ -54,6 +54,16 @@ jobs:
       # kernels that ternary_moe --tests found on the runner.
       - name: Test
         run: ctest --test-dir build -C Release -V
+      # The CLI itself, which ctest does not run: every command answers
+      # --help, and a tiny curriculum trains, saves and is evaluated.
+      - name: CLI smoke test
+        run: |
+          $cx = "build\Release\cxxgpt.exe"
+          function Run { & $cx @args; if ($LASTEXITCODE -ne 0) { throw "cxxgpt $($args[0]) exited with $LASTEXITCODE" } }
+          foreach ($c in 'bpe-train','text2tok','train','sample','gen-reasoning','prep-qa','eval-reasoning','bench-infer') { Run $c --help > $null }
+          Run gen-reasoning --out ci\r --train 2000 --val 100 --test-per-cell 2
+          Run train --data ci\r.train.tok --val ci\r.val.tok --seq 64 --dim 32 --layers 1 --heads 2 --batch 4 --steps 5 --log-every 5 --out ci\m.ckpt
+          Run eval-reasoning --ckpt ci\m.ckpt --test ci\r.test.txt --limit 8 --max-new 20
 
   # ISA paths the runner may not be able to execute still have to compile.
   compile-only:
