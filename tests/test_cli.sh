@@ -272,6 +272,12 @@ for options in '--tries 2' '--tries 0 --temp 1.0' '--tries 1junk --temp 1.0' '--
     [[ "$status" == 1 ]]
     grep -q 'check failed' "$TEST_DIR/invalid-tries.log"
 done
+# One problem's tries are generated together, so they must fit in --batch.
+status=0
+"$CXXGPT" eval-reasoning --ckpt "$TEST_DIR/audit.ckpt" --test "$TEST_DIR/audit.txt" \
+    --tries 4 --temp 1.0 --batch 2 --threads 2 > "$TEST_DIR/tries-batch.log" 2>&1 || status=$?
+[[ "$status" == 1 ]]
+grep -q -- '--tries 4 is more than --batch 2' "$TEST_DIR/tries-batch.log"
 "$CXXGPT" eval-reasoning --ckpt "$TEST_DIR/audit.ckpt" --test "$TEST_DIR/audit.txt" \
     --tries 4 --temp 0.9 --seed 3 --max-new 6 --threads 2 > "$TEST_DIR/vote-a.log"
 "$CXXGPT" eval-reasoning --ckpt "$TEST_DIR/audit.ckpt" --test "$TEST_DIR/audit.txt" \

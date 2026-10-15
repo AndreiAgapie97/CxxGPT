@@ -226,6 +226,8 @@ EvalResult eval_reasoning(M& model, const std::vector<Problem>& problems, const 
                           bool keep_completions = false, const VoteOpts& vote = {}) {
     CHECK(batch > 0 && max_new > 0, "evaluation batch and max_new must be positive");
     CHECK(vote.tries > 0, "--tries must be positive");
+    CHECK(vote.tries <= batch, "--tries %d is more than --batch %d: one problem's tries are generated together",
+          vote.tries, batch);
     CHECK(vote.tries == 1 || (vote.temperature > 0 && vote.rng),
           "sampling more than one try needs --temp above 0 and a seed");
     CHECK(model.cfg.vocab >= tok.vocab_size(), "model vocab %d < tokenizer vocab %d", model.cfg.vocab,
@@ -241,9 +243,10 @@ EvalResult eval_reasoning(M& model, const std::vector<Problem>& problems, const 
     // them has to answer in. A prompt that fills the whole context cannot be
     // answered and counts as wrong. With tries > 1, a batch holds as many
     // whole problems as fit: each contributes `tries` copies of its prompt,
-    // so one generate() call samples every try of those problems together.
+    // so one generate() call samples every try of those problems together,
+    // and never more than `batch` sequences at once.
     const size_t n = problems.size();
-    const size_t group_problems = std::max<size_t>(1, size_t(batch) / size_t(vote.tries));
+    const size_t group_problems = size_t(batch) / size_t(vote.tries);  // at least 1: tries <= batch
     std::vector<std::vector<int>> prompts(n);
     std::vector<size_t> order;
     for (size_t i = 0; i < n; ++i) {
