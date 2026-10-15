@@ -875,6 +875,11 @@ struct GpuTrainer::Impl {
         const cudaError_t err = cudaGetDeviceCount(&devices);
         CHECK(err == cudaSuccess && devices > 0, "no CUDA GPU available (%s)",
               err == cudaSuccess ? "no devices" : cudaGetErrorString(err));
+        // While the host waits for the GPU (expert counts, losses, logits),
+        // it sleeps instead of spinning, CUDA's default, which kept a whole
+        // CPU core busy all night. It must be set before the GPU is first
+        // used; for a later trainer in the same process it is already set.
+        if (cudaSetDeviceFlags(cudaDeviceScheduleBlockingSync) != cudaSuccess) (void)cudaGetLastError();
         for (const auto& p : infos) n_params = std::max(n_params, p.offset + p.size);
         CUBLAS_CHECK(cublasCreate(&blas));
         // With bf16 products, the products left in fp32 (cuBLAS attention's)

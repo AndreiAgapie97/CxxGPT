@@ -72,10 +72,13 @@ Reasoning is the first capability we go after.
   buffer between steps; tested against `Model::decode_step`): 16 s instead
   of 5 minutes for 250 problems on the night-1 model. Build with `make gpu`, giving `cxxgpt-gpu` (`train
   --gpu`) and `test_gpu`. On the laptop's RTX 4070, everything passes
-  except two checks, neither on what the nights run, both on a norm
-  weight's gradient: the fp32 fused kernels at `heads of 64` (70 tokens,
-  where cuBLAS also misses the bound) and `head of 128` (about 3x
-  cuBLAS's error); docs/LAPTOP.md "GPU options".
+  except two checks, neither on what the nights run, both on a gradient
+  (a norm weight's, or since 2026-10-15 `l1.wproj` for the second): the
+  fp32 fused kernels at `heads of 64` (70 tokens, where cuBLAS also
+  misses the bound) and `head of 128` (about 2-3x cuBLAS's error);
+  docs/LAPTOP.md "GPU options". While the host waits for the GPU it
+  sleeps (`cudaDeviceScheduleBlockingSync`): a quarter of a core instead
+  of a whole one during training, at the same speed.
 - `docs/research.md`: the research log from the merged `gpt/research`
   branch (stable cross-entropy, token-weighted accumulation, optimizer
   grids, digit curricula), with raw results under `docs/results/`.

@@ -291,8 +291,11 @@ without `all passed` until they are fixed:
 - `head of 128` (fused fp32): 1.3e-4, and 1.9e-4 at 128 tokens, about
   three times the cuBLAS attention's error (5e-5 to 6e-5) at every length
   tried. No night size uses head 128 (all have head 64).
-Both miss on a norm weight's gradient, the tensor most sensitive to
-rounding, and neither is what the nights run (TF32 with the tensor-core
+Both missed on a norm weight's gradient, the tensor most sensitive to
+rounding. On 2026-10-15 (main at 4e9499b) they measured 1.5e-4 (`l0.ln1`)
+and 1.1e-4, the latter now worst on an attention output matrix
+(`l1.wproj`): the sizes move a little from build to build, the worst tensor
+with them. Neither is what the nights run (TF32 with the tensor-core
 kernels). Those kernels pass their own checks: alone, within 2e-4 to 1e-3
 of an exact reference (TF32 keeps 11 significant bits), and in a TF32
 model as close to the CPU as the cuBLAS attention is (gradients 7.0e-2
