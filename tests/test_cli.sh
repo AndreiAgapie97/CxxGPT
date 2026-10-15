@@ -466,11 +466,24 @@ printf 'gsm8k\t1\tOne two three four five six seven eight nine ten eleven twelve
 printf 'ONE two three four five six\nseven eight nine ten eleven twelve 13\n' > "$TEST_DIR/leak-hit.txt"
 printf 'One two three four five six seven eight nine ten eleven twelve\n' > "$TEST_DIR/leak-miss.txt"
 printf 'Solution words never count as question words in a training overlap search ever\n' > "$TEST_DIR/leak-answer.txt"
-"$CXXGPT" leak-check "$TEST_DIR/leak-questions.txt" "$TEST_DIR/leak-hit.txt" "$TEST_DIR/leak-miss.txt" "$TEST_DIR/leak-answer.txt" > "$TEST_DIR/leak.log"
+# A stored line break (the two characters \n, as in prep-qa .txt files) separates words too.
+printf 'ONE two three four five six\\nseven eight nine ten eleven twelve 13\n' > "$TEST_DIR/leak-escaped.txt"
+"$CXXGPT" leak-check --questions "$TEST_DIR/leak-questions.txt" \
+    --train "$TEST_DIR/leak-hit.txt,$TEST_DIR/leak-miss.txt,$TEST_DIR/leak-answer.txt,$TEST_DIR/leak-escaped.txt" > "$TEST_DIR/leak.log"
 grep -q 'leak-hit.txt: 1 / 1' "$TEST_DIR/leak.log"
 grep -q 'leak-miss.txt: 0 / 1' "$TEST_DIR/leak.log"
 grep -q 'leak-answer.txt: 0 / 1' "$TEST_DIR/leak.log"
+grep -q 'leak-escaped.txt: 1 / 1' "$TEST_DIR/leak.log"
 grep -q 'question 1: One two' "$TEST_DIR/leak.log"
+# The example is cut at 240 bytes without splitting a UTF-8 character: here
+# bytes 239-240 are one two-byte character, so the cut moves back to 239.
+printf 'One two three four five six seven eight nine ten eleven twelve 13 %s\xc3\xa9 end\n' \
+    "$(head -c 173 /dev/zero | tr '\0' a)" > "$TEST_DIR/leak-utf8.txt"
+"$CXXGPT" leak-check --questions "$TEST_DIR/leak-utf8.txt" --train "$TEST_DIR/leak-hit.txt" > "$TEST_DIR/leak-utf8.log"
+grep -q 'aaaa\.\.\.$' "$TEST_DIR/leak-utf8.log"
+if "$CXXGPT" leak-check --questions "$TEST_DIR/leak-utf8.txt" > /dev/null 2>&1; then
+    echo "leak-check without --train must fail"; exit 1
+fi
 for dev in 0 1; do
     run="dev-check-${BASHPID}"
     MOCK_ARGS="$TEST_DIR/night.args" DEV="$dev" RUN="$run" TOKS=100 MIX=unused \

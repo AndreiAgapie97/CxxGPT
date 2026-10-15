@@ -91,10 +91,12 @@ benchmaxxing by selection, with nothing dishonest intended.
   `train.tok` cannot silently retain the removed problems. No prepared data
   files are stored in the repository.
 - To audit literal overlap, run
-  `./cxxgpt leak-check data/gsm8k/dev.txt TRAIN.txt...`. The question file may
+  `./cxxgpt leak-check --questions data/gsm8k/dev.txt --train A.txt,B.txt`.
+  The question file may
   be a `prep-qa` five-column problem file (only its question field is used),
   or plain text with one question per line. Words are ASCII letters/digits,
-  lowercased; punctuation separates words. A hit requires 13 consecutive
+  lowercased; punctuation separates words, and so do the stored escapes
+  `\n`, `\t`, `\r` and `\uXXXX` of `.txt` and JSON Lines files. A hit requires 13 consecutive
   words, including across training-file line breaks. Each training file is
   scanned separately and reports its number of hit questions and up to three
   examples (1-based question numbers). Repeated matches count once per
