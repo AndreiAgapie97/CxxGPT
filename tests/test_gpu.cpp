@@ -13,9 +13,11 @@
 // --nope-every. One run multiplies in bf16, against looser tolerances, and
 // two in TF32, where attention runs on cuBLAS and on the tensor-core fused
 // kernels (attention_tc.cuh). Before all that, both sets of fused kernels
-// are checked alone against a double-precision reference. A last check
-// trains on the GPU alone, with TF32 and with bf16, until a toy pattern is
-// learned.
+// are checked alone against a double-precision reference. Then decoding:
+// the GPU's KV-cache decoder against the CPU's, and eval_reasoning() on it
+// (eval-reasoning --gpu) against the CPU, greedy, with a vote and with the
+// calculator. A last check trains on the GPU alone, with TF32 and with
+// bf16, until a toy pattern is learned.
 #include <cmath>
 #include <cstdio>
 #include <string>
@@ -400,6 +402,103 @@ void decode(const char* name, const Config& cfg, double tol, Matmul matmul = Mat
     EXPECT(worst <= tol, "%s: decode logits differ by %g", name, worst);
 }
 
+// eval-reasoning --gpu: eval_reasoning() on GpuDecoder (exact fp32 products)
+// against the CPU's Model, greedy, with 4 sampled tries and a vote, and
+// with the calculator. A freshly initialized model would never finish an
+// answer or call the calculator, so a tiny byte-level MoE model first
+// learns, on the GPU, to answer "Q: 12*34" with "<<12*34=408>>408\n#### 408":
+// a calculator note (calc-notes mode finishes it) and an answer line. Then
+// both sides must give the same EvalResult: every level's scores, the first
+// tries' texts, the shown failures and the calculator calls, with different
+// batches (12 answers at a time on the CPU, 8 on the GPU), as the CLI runs.
+void eval_on_gpu() {
+    Config cfg;
+    cfg.vocab = Tokenizer{}.vocab_size();
+    cfg.seq_len = 64;
+    cfg.d_model = 64;
+    cfg.n_layers = 2;
+    cfg.n_heads = 4;
+    cfg.n_experts = 4;
+    cfg.top_k = 2;
+    cfg.expert_hidden = 64;
+    Model<float> cpu(cfg);
+    cpu.init(11);
+    GpuTrainer gpu(cfg, cpu.infos, Matmul::fp32, false);
+    gpu.set_params(cpu.params.data());
+    Rng rng(12);
+    auto problem = [&](int digits) {
+        const int lo = digits == 1 ? 2 : 10, hi = digits == 1 ? 9 : 49;
+        const int x = lo + int(rng.below(uint64_t(hi - lo + 1))), y = lo + int(rng.below(uint64_t(hi - lo + 1)));
+        const std::string q = std::to_string(x) + "*" + std::to_string(y), c = std::to_string(x * y);
+        return Problem{"mul", digits, q, "<<" + q + "=" + c + ">>" + c, c};
+    };
+    // Training: sequences of [BOS] "Q: ...\nA: ...\n#### c\n", padded.
+    const Tokenizer tok;
+    const int B = 32, Tn = cfg.seq_len;
+    std::vector<int> inp(size_t(B) * Tn), tgt(inp.size());
+    double first = 0, last = 0;
+    for (int step = 0; step < 400; ++step) {
+        std::fill(inp.begin(), inp.end(), 0);
+        std::fill(tgt.begin(), tgt.end(), -1);
+        for (int b = 0; b < B; ++b) {
+            const Problem p = problem(1 + b % 2);
+            std::vector<int> t = tok.encode(p.prompt() + p.completion());
+            t.insert(t.begin(), kBos);
+            for (size_t i = 0; i < t.size() && int(i) < Tn; ++i) {
+                inp[size_t(b) * Tn + i] = t[i];
+                if (i + 1 < t.size()) tgt[size_t(b) * Tn + i] = t[i + 1];
+            }
+        }
+        gpu.zero_grad();
+        last = gpu.forward(inp.data(), tgt.data(), B, Tn, true);
+        if (step == 0) first = last;
+        gpu.backward(1.0);
+        const double norm = gpu.grad_norm();
+        gpu.adamw_step(3e-3, 0.9, 0.95, 1e-8, 0.0, norm > 1.0 ? 1.0 / norm : 1.0);
+    }
+    gpu.get_params(cpu.params.data());
+    cpu.weights_dirty = true;
+    for (auto& layer : cpu.router_bias)
+        for (auto& b : layer) b = float(0.01 * rng.normal());
+    gpu.set_router_bias(cpu.router_bias);
+    std::vector<Problem> test;
+    for (int i = 0; i < 24; ++i) test.push_back(problem(1 + i % 2));
+
+    GpuDecoder dec{cfg, gpu};
+    auto check = [&](const char* name, const VoteOpts& vote, calc::Mode tool) {
+        const EvalResult c = eval_reasoning(cpu, test, tok, 12, 40, 8, true, vote, tool);
+        const EvalResult g = eval_reasoning(dec, test, tok, 8, 40, 8, true, vote, tool);
+        bool same = c.correct == g.correct && c.total == g.total && c.completions == g.completions &&
+                    c.tool_calls.fired == g.tool_calls.fired && c.tool_calls.malformed == g.tool_calls.malformed &&
+                    c.by_task.size() == g.by_task.size() && c.failures.size() == g.failures.size();
+        for (auto ic = c.by_task.begin(), ig = g.by_task.begin(); same && ic != c.by_task.end(); ++ic, ++ig) {
+            const LevelScore &x = ic->second, &y = ig->second;
+            same = ic->first == ig->first && x.total == y.total && x.first_correct == y.first_correct &&
+                   x.vote_correct == y.vote_correct && x.any_correct == y.any_correct &&
+                   x.distinct_answers == y.distinct_answers;
+        }
+        for (size_t i = 0; same && i < c.failures.size(); ++i) same = c.failures[i].second == g.failures[i].second;
+        const size_t finished = size_t(std::count_if(c.completions.begin(), c.completions.end(), completion_done));
+        std::printf("  eval on the GPU, %-15s %2d / %d right, %zu / %zu finished, %zu calculator calls\n", name,
+                    c.correct, c.total, finished, c.completions.size(), c.tool_calls.fired);
+        EXPECT(same, "eval on the GPU, %s: the EvalResult differs from the CPU's (%d / %d right against %d)", name,
+               g.correct, g.total, c.correct);
+        // The comparison means something only if answers were finished.
+        EXPECT(finished * 2 > c.completions.size(), "eval on the GPU, %s: only %zu of %zu answers finished", name,
+               finished, c.completions.size());
+        if (tool != calc::Mode::none) EXPECT(c.tool_calls.fired > 0, "eval on the GPU, %s: no calculator calls", name);
+    };
+    std::printf("  eval on the GPU: trained loss %.3f -> %.3f\n", first, last);
+    VoteOpts votes;
+    votes.tries = 4;
+    votes.temperature = 0.7;
+    votes.seed = 3;
+    check("greedy", {}, calc::Mode::none);
+    check("maj@4, temp 0.7", votes, calc::Mode::none);
+    check("greedy, calc", {}, calc::Mode::notes);
+    check("maj@4, calc", votes, calc::Mode::notes);
+}
+
 }  // namespace
 
 int main() {
@@ -498,6 +597,7 @@ int main() {
     decode("half NoPE", nope, 1e-6);
     decode("ternary moe", ours, 1e-3);
     decode("moe bf16", moe, 3e-2, Matmul::bf16);
+    eval_on_gpu();
 
     learns_pattern(false);
     learns_pattern(true);

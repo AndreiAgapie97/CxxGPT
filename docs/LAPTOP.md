@@ -159,12 +159,13 @@ TOKS=... BATCH=... ACCUM=... MODEL="..." scripts/night.sh   # the line the probe
 `night.sh` sizes the run so its learning-rate schedule ends when the
 night does (7.5 hours by default), trains on web text, stories and worked
 math, and checks itself on the GSM8K test set, which training never sees
-(or on the dev set with `DEV=1`, above): validation loss every 500 steps,
-exact answers every 2000. The exact-answer exams run on the GPU (16 s for
+(or on the dev set with `DEV=1`, above): validation loss and exact answers
+every 500 steps. The exact-answer exams run on the GPU (16 s for
 250 problems on the night-1 model, against 5 minutes on the CPU, which
 left the GPU idle): `reasoning eval on the GPU, 28 answers at a time` in
 the log. They score the model as training computes it (bf16 products), so
-`cxxgpt eval-reasoning` on the CPU can differ by a problem or two. If the
+`cxxgpt eval-reasoning` (on the CPU, or with `--gpu` and its exact
+products, below) can differ by a problem or two. If the
 GPU has no room for the answers' caches, the log says so and the exam
 runs on the CPU as before. Its settings
 (model size, optimizer, batch, data mix) are at the top of the script.
@@ -202,6 +203,25 @@ yourself (`--temp 0`: its most likely answer; `--answer`: stop after the
 ./cxxgpt sample --ckpt runs/night1.ckpt --bpe data/tok.bpe --temp 0 --answer \
   --prompt $'Q: A pen costs $3. How much do 7 pens cost?\nA: '
 ```
+
+To score a checkpoint on the whole GSM8K test (1319 problems) in a
+minute or two, on the GPU (`--gpu`, with `cxxgpt-gpu`):
+```sh
+build/cxxgpt-gpu.exe eval-reasoning --gpu --ckpt runs/night1.ckpt --test data/gsm8k/test.txt --bpe data/tok.bpe
+build/cxxgpt-gpu.exe eval-reasoning --gpu --ckpt runs/night1.ckpt --test data/gsm8k/test.txt --bpe data/tok.bpe \
+  --tries 8 --temp 0.7
+```
+The products are exact fp32 by default, so the scores are the CPU's
+(night 1: 20 / 250 with `--limit 250` on both, 14 s on the GPU against
+about 5 minutes on the CPU). On night 1: greedy 90 / 1319 (6.8%) in 71 s,
+64 answers at a time; 8 tries and a vote (maj@8) 103 / 1319 (7.8%) in
+13.5 minutes (one sampled try alone: 4.8%; any of the 8 right: 20.7%).
+`--batch` caps the answers decoded together (64 by default; each takes
+75 MB of GPU memory on the night-1 model, and the GPU fits about 75).
+`--matmul tf32` or `bf16` scores the model as training computes it, which
+can differ by a problem or two. Another program on the GPU (a training
+run, a second eval) slows it down several times: a greedy run alongside a
+training run took 447 s.
 
 ### Following nights
 

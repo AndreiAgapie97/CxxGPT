@@ -335,6 +335,16 @@ status=0
 "$CXXGPT" eval-reasoning --ckpt "$TEST_DIR/audit.ckpt" --test "$TEST_DIR/audit.txt" --max-new 0 > "$TEST_DIR/bad-cap.log" 2>&1 || status=$?
 [[ "$status" == 1 ]]
 grep -q 'max-new must be positive' "$TEST_DIR/bad-cap.log"
+# --gpu needs the CUDA build (cxxgpt-gpu); this one says so. --matmul
+# without --gpu is refused too.
+status=0
+"$CXXGPT" eval-reasoning --ckpt "$TEST_DIR/audit.ckpt" --test "$TEST_DIR/audit.txt" --gpu > "$TEST_DIR/no-gpu.log" 2>&1 || status=$?
+[[ "$status" == 1 ]]
+grep -q 'built without CUDA; use cxxgpt-gpu' "$TEST_DIR/no-gpu.log"
+status=0
+"$CXXGPT" eval-reasoning --ckpt "$TEST_DIR/audit.ckpt" --test "$TEST_DIR/audit.txt" --matmul tf32 > "$TEST_DIR/no-gpu.log" 2>&1 || status=$?
+[[ "$status" == 1 ]]
+grep -q 'matmul needs --gpu' "$TEST_DIR/no-gpu.log"
 
 # The vote: --tries N with --temp samples each problem N times and reports
 # first-sampled-try, vote and any-try accuracies; --effort is a shorthand for N.

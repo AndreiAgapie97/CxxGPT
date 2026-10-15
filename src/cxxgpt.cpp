@@ -658,11 +658,47 @@ int cmd_eval_reasoning(Args& a) {
     const bool as_engine = a.flag("as-engine");
     const std::string bpe = a.str("bpe");
     const calc::Mode tool = calculator_mode(a);
+    // On the GPU (cxxgpt-gpu): exact fp32 products by default, so the
+    // scores are the CPU's; --matmul tf32 or bf16 scores the model as
+    // training computes it.
+    const bool use_gpu = a.flag("gpu");
+    CHECK(use_gpu || !a.has("matmul"), "--matmul needs --gpu");
+    const std::string matmul = a.str("matmul", "fp32");
+    CHECK(matmul == "fp32" || matmul == "tf32" || matmul == "bf16", "--matmul takes fp32, tf32 or bf16");
     a.done();
+#ifndef CXXGPT_CUDA
+    CHECK(!use_gpu, "this cxxgpt was built without CUDA; use cxxgpt-gpu (make gpu) for --gpu");
+#endif
     const Tokenizer tok = load_tokenizer(bpe);
     Model<float> model(peek_checkpoint_config(ckpt));
     load_checkpoint(ckpt, model, nullptr, nullptr);
     if (as_engine) round_to_engine_int8(model);
+#ifdef CXXGPT_CUDA
+    // The weights (as rounded by --as-engine) and router biases go to the
+    // GPU once; both runs (without and with the calculator) decode there.
+    // Each answer's KV cache takes GPU memory, so the batch is as many as
+    // fit, up to --batch. With too little room, the CPU runs it instead.
+    std::unique_ptr<GpuTrainer> gpu;
+    int gpu_batch = 0;
+    if (use_gpu) {
+        const Matmul mm = matmul == "fp32" ? Matmul::fp32 : matmul == "bf16" ? Matmul::bf16 : Matmul::tf32;
+        gpu = std::make_unique<GpuTrainer>(model.cfg, model.infos, mm, false);
+        gpu->set_params(model.params.data());
+        gpu->set_router_bias(model.router_bias);
+        gpu_batch = gpu->decode_capacity(batch);
+        if (gpu_batch < vote.tries) {
+            // One problem's tries are decoded together, so they must fit at once.
+            std::printf("gpu: room for %d answers at a time (%zu MB each, %zu MB free), fewer than --tries %d; "
+                        "on the CPU instead\n",
+                        gpu_batch, gpu->decode_bytes_per_sequence() >> 20, GpuTrainer::free_device_bytes() >> 20,
+                        vote.tries);
+            gpu.reset();
+        } else {
+            std::printf("gpu: %s, %s matmuls, %d answers at a time\n", GpuTrainer::device_name().c_str(),
+                        matmul.c_str(), gpu_batch);
+        }
+    }
+#endif
     std::vector<Problem> test = load_problems(test_path);
     if (limit > 0 && size_t(limit) < test.size()) {
         // An even sample across the file, which is ordered by task. Each
@@ -676,6 +712,16 @@ int cmd_eval_reasoning(Args& a) {
         }
         test = std::move(sub);
     }
+    // The same evaluation on whichever of the two decodes.
+    auto evaluate = [&](calc::Mode t) {
+#ifdef CXXGPT_CUDA
+        if (gpu) {
+            GpuDecoder dec{model.cfg, *gpu};
+            return eval_reasoning(dec, test, tok, gpu_batch, max_new, 8, false, vote, t);
+        }
+#endif
+        return eval_reasoning(model, test, tok, batch, max_new, 8, false, vote, t);
+    };
     const double t0 = now_seconds();
     // The scores, and with more than one try the effort report: per level
     // (task, difficulty) and overall, the first sampled try's accuracy (a
@@ -702,11 +748,11 @@ int cmd_eval_reasoning(Args& a) {
                     vote.tries, vote.tries);
     };
     // With a calculator, the same problems twice: without it, then with it.
-    const EvalResult r = eval_reasoning(model, test, tok, batch, max_new, 8, false, vote);
+    const EvalResult r = evaluate(calc::Mode::none);
     if (tool != calc::Mode::none) std::printf("without tool:\n");
     report(r);
     if (tool != calc::Mode::none) {
-        const EvalResult assisted = eval_reasoning(model, test, tok, batch, max_new, 8, false, vote, tool);
+        const EvalResult assisted = evaluate(tool);
         std::printf("with calculator:\n");
         report(assisted);
         std::printf("calculator calls: %zu fired, %zu malformed\n",
