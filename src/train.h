@@ -392,7 +392,7 @@ double accumulated_backward(Engine& engine, const AccumulationBatch& group) {
     return loss.value();
 }
 
-// Writes a token file (TokenData's format, without a mask) piece by piece,
+// Writes a token file (TokenData's format, with an optional mask) piece by piece,
 // for data too big to hold in memory. The count goes into the header last.
 class TokenWriter {
 public:
@@ -410,8 +410,24 @@ public:
     TokenWriter(const TokenWriter&) = delete;
     TokenWriter& operator=(const TokenWriter&) = delete;
 
-    void write(const std::vector<uint16_t>& t) {
-        if (t.empty()) return;  // fwrite must not see the null data() of an empty vector
+    void write(const std::vector<uint16_t>& t) { write(t, {}); }
+
+    // Masks are spooled separately because the existing file format puts all
+    // token ids before all mask bytes. An empty mask trains on every token.
+    // Unmarked files keep their old bytes, even when overloads are mixed.
+    void write(const std::vector<uint16_t>& t, const std::vector<uint8_t>& mask) {
+        CHECK(mask.empty() || t.size() == mask.size(), "token/mask length mismatch");
+        if (!mask_ && std::find(mask.begin(), mask.end(), uint8_t(0)) != mask.end()) {
+            mask_ = std::tmpfile();
+            CHECK(mask_, "cannot create token-mask temporary file");
+            write_ones(n_);
+        }
+        if (t.empty()) return;  // fwrite must not see an empty vector's null data()
+        if (mask_) {
+            if (mask.empty()) write_ones(t.size());
+            else CHECK(std::fwrite(mask.data(), 1, mask.size(), mask_) == mask.size(),
+                       "error writing token mask");
+        }
         CHECK(std::fwrite(t.data(), 2, t.size(), f_) == t.size(), "error writing %s", path_.c_str());
         n_ += t.size();
     }
@@ -419,6 +435,22 @@ public:
 
     void close() {
         if (!f_) return;
+        if (mask_) {
+            CHECK(std::fflush(mask_) == 0 && std::fseek(mask_, 0, SEEK_SET) == 0,
+                  "error reading token mask");
+            std::vector<uint8_t> block(65536);
+            for (uint64_t left = n_; left;) {
+                const size_t n = size_t(std::min(left, uint64_t(block.size())));
+                CHECK(std::fread(block.data(), 1, n, mask_) == n &&
+                      std::fwrite(block.data(), 1, n, f_) == n, "error appending token mask");
+                left -= n;
+            }
+            CHECK(std::fclose(mask_) == 0, "error closing token mask");
+            mask_ = nullptr;
+            const uint32_t has_mask = 1;
+            CHECK(std::fseek(f_, 12, SEEK_SET) == 0 && std::fwrite(&has_mask, 4, 1, f_) == 1,
+                  "error writing token-mask header");
+        }
         CHECK(std::fseek(f_, 16, SEEK_SET) == 0 && std::fwrite(&n_, 8, 1, f_) == 1, "error writing %s",
               path_.c_str());
         CHECK(std::fclose(f_) == 0, "error writing %s", path_.c_str());
@@ -426,9 +458,18 @@ public:
     }
 
 private:
+    void write_ones(uint64_t count) {
+        const std::vector<uint8_t> ones(65536, 1);
+        while (count) {
+            const size_t n = size_t(std::min(count, uint64_t(ones.size())));
+            CHECK(std::fwrite(ones.data(), 1, n, mask_) == n, "error writing token mask");
+            count -= n;
+        }
+    }
     std::string path_;
     FILE* f_ = nullptr;
     uint64_t n_ = 0;
+    FILE* mask_ = nullptr;
 };
 
 // ---------------------------------------------------------------------------

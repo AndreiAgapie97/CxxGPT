@@ -75,13 +75,51 @@ inline void test_token_writer() {
     std::remove(path.c_str());
     EXPECT(d.vocab == 1000 && d.mask.empty() && d.tokens == all, "token file read back wrongly (%zu tokens)",
            d.tokens.size());
-    // An empty file (gen-reasoning --val 0 writes one) saves and loads too.
-    TokenData empty;
-    empty.vocab = 50;
-    empty.save(path);
-    const TokenData e = TokenData::load(path);
+    // A plain write before or after a masked write must insert mask ones.
+    // Empty pieces and explicitly empty masks also use the old plain semantics.
+    {
+        TokenWriter w(path, 256);
+        w.write({10, 11});
+        w.write({12, 13}, {0, 1});
+        w.write({});
+        w.write({14, 15});
+        w.write({16}, {});
+        w.write({17}, {0});
+        w.write({18}, {1});
+        w.close();
+        w.close();
+    }
+    const TokenData mixed = TokenData::load(path);
     std::remove(path.c_str());
-    EXPECT(e.vocab == 50 && e.tokens.empty() && e.mask.empty(), "empty token file read back wrongly");
+    EXPECT(mixed.tokens == std::vector<uint16_t>({10, 11, 12, 13, 14, 15, 16, 17, 18}) &&
+           mixed.mask == std::vector<uint8_t>({1, 1, 0, 1, 1, 1, 1, 0, 1}),
+           "mixing masked and plain writer calls lost mask alignment");
+}
+
+// A zero-problem split is a valid header-only token file. Saving or reading
+// it must not pass the empty vectors' possibly null data() to stdio.
+inline void test_empty_token_data() {
+    const std::string path = test_path("empty_tokens.tok");
+    TokenData empty;
+    empty.vocab = 256;
+    empty.save(path);
+    const auto header = TokenData::peek(path);
+    EXPECT(std::filesystem::file_size(path) == 24 && header.vocab == 256 &&
+           header.n == 0 && header.has_mask == 0, "empty token file header changed");
+    const auto loaded = TokenData::load(path);
+    EXPECT(loaded.vocab == 256 && loaded.tokens.empty() && loaded.mask.empty(),
+           "empty token data failed to round trip");
+
+    // The reader also accepts an existing empty file whose mask flag is set.
+    FILE* f = std::fopen(path.c_str(), "r+b");
+    CHECK(f, "cannot open empty token fixture");
+    const uint32_t has_mask = 1;
+    CHECK(std::fseek(f, 12, SEEK_SET) == 0 && std::fwrite(&has_mask, 4, 1, f) == 1 &&
+          std::fclose(f) == 0, "cannot set empty token fixture's mask flag");
+    const auto masked = TokenData::load(path);
+    EXPECT(masked.vocab == 256 && masked.tokens.empty() && masked.mask.empty(),
+           "empty masked token data failed to load");
+    std::remove(path.c_str());
 }
 
 // Files mixed with repeats: tokens in order, masks kept, files without a
@@ -118,5 +156,6 @@ inline void test_data() {
     test_json();
     test_problem_file();
     test_token_writer();
+    test_empty_token_data();
     test_token_list();
 }

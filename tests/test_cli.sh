@@ -211,6 +211,8 @@ status=0
     > "$TEST_DIR/too-large.log" 2>&1 || status=$?
 [[ "$status" == 1 ]]
 grep -q 'uint16' "$TEST_DIR/too-large.log"
+python3 tests/test_mistakes.py
+
 for options in '--min-diff 4 --max-diff 2' '--max-diff 10' '--test-max-diff 17' '--test-per-cell 0'; do
     status=0
     "$CXXGPT" gen-reasoning --out "$TEST_DIR/invalid-reason" $options --train 0 --val 0 \

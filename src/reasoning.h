@@ -26,6 +26,7 @@
 #include <cstdlib>
 #include <functional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "common.h"
@@ -324,6 +325,194 @@ inline Problem make_problem(const std::string& task, int difficulty, Rng& rng, c
     if (task == "cmp") return cmp(rng, difficulty);
     CHECK(false, "unknown task '%s'", task.c_str());
     return {};
+}
+
+// ---------------------------------------------------------------------------
+// Planted mistakes (gen-reasoning --mistakes P)
+//
+// One statement of a solution is written wrong first, then right:
+//   b=a+3=4+3=7   becomes   [[no-loss]]b=a+3=4+3=8[[/no-loss]]. Wait: b=a+3=4+3=7
+// The marked wrong statement is context only: it is never trained on
+// (loss_mask.h), so the model learns to correct a mistake, not to make one.
+//
+// Most tasks have calculations: numbers and operators worked out into a
+// result at the end of a statement. The one corrupted, per task:
+//   chain  "b=a+3=4+3=7"        4+3 (the definition "a=4" and the
+//                               chain_plan lookup "b=a+3" work nothing out)
+//   add    "4+3+1=8"            one column: digit + digit + carry
+//   mul    "23*4=80+12=92"      80+12 ("23*4=80+12" only splits the product)
+//   expr   "7-2=5: 5*3"         7-2 (the expr_rewrite text after ':' is not)
+//   eq     "3*x=20-8=12; x=12/3=4"   20-8 or 12/3
+//   cmp    "1=1; 2<3", "3 digits vs 2"   nothing is worked out ("1=1" is
+//          not a calculation), so plant_comparison_mistake turns the
+//          deciding relation around or miscounts the digits instead.
+
+namespace mistake_detail {
+
+// steps[begin, end) is one statement, e.g. "b=a+3=4+3=7": steps[expr,
+// value - 1) is what is worked out ("4+3"), steps[value, end) the result.
+struct Calculation {
+    size_t begin, expr, value, end;
+    int64_t correct;
+};
+
+inline bool is_digit(char c) { return c >= '0' && c <= '9'; }
+inline bool is_operator(char c) { return c == '+' || c == '-' || c == '*' || c == '/'; }
+
+inline std::vector<Calculation> find_calculations(const std::string& s) {
+    std::vector<Calculation> found;
+    size_t begin = 0;  // where the current statement starts
+    for (size_t i = 0; i < s.size(); ++i) {
+        if (s.compare(i, 2, "; ") == 0 || s.compare(i, 2, ", ") == 0) begin = i + 2;
+        if (s.compare(i, 4, " => ") == 0) begin = i + 4;
+        if (s[i] != '=') continue;
+        // A result: digits right after '=', ending the statement (or followed
+        // by expr_rewrite's ':'). "23*4=80+12" goes on, so 80 is not one.
+        size_t end = i + 1;
+        while (end < s.size() && is_digit(s[end])) ++end;
+        if (end == i + 1 || (end < s.size() && s[end] != ';' && s[end] != ',' && s[end] != ':')) continue;
+        // What is worked out: the numbers and operators just before '='.
+        size_t expr = i;
+        while (expr > begin && (is_digit(s[expr - 1]) || is_operator(s[expr - 1]))) --expr;
+        bool has_operator = false;
+        for (size_t k = expr; k < i; ++k) has_operator = has_operator || is_operator(s[k]);
+        if (!has_operator) continue;  // "a=4" or "8=8": nothing worked out
+        int64_t correct = 0;
+        const auto parsed = std::from_chars(s.data() + i + 1, s.data() + end, correct);
+        CHECK(parsed.ec == std::errc{}, "bad generated numerical step");
+        found.push_back({begin, expr, i + 1, end, correct});
+    }
+    return found;
+}
+
+// The value of numbers joined by + - * / ("4*3+0"), * and / first.
+inline int64_t evaluate(std::string_view e) {
+    std::vector<int64_t> numbers;
+    std::string ops;
+    for (size_t i = 0; i < e.size();) {
+        int64_t v = 0;
+        const auto r = std::from_chars(e.data() + i, e.data() + e.size(), v);
+        CHECK(r.ec == std::errc{}, "bad calculation '%.*s'", int(e.size()), e.data());
+        numbers.push_back(v);
+        i = size_t(r.ptr - e.data());
+        if (i < e.size()) ops += e[i++];
+    }
+    CHECK(numbers.size() == ops.size() + 1, "bad calculation '%.*s'", int(e.size()), e.data());
+    // Fold each * or / into the number before it; then add and subtract.
+    std::vector<int64_t> terms = {numbers[0]};
+    std::string signs;
+    for (size_t k = 0; k < ops.size(); ++k) {
+        const int64_t b = numbers[k + 1];
+        if (ops[k] == '*') {
+            terms.back() *= b;
+        } else if (ops[k] == '/') {
+            CHECK(b != 0, "division by zero in '%.*s'", int(e.size()), e.data());
+            terms.back() /= b;
+        } else {
+            terms.push_back(b);
+            signs += ops[k];
+        }
+    }
+    int64_t value = terms[0];
+    for (size_t k = 0; k < signs.size(); ++k) value += signs[k] == '+' ? terms[k + 1] : -terms[k + 1];
+    return value;
+}
+
+enum MistakeKind { kWrongDigit, kMissedCarry, kWrongOperator };
+
+// A wrong result for the calculation `expr`, whose right result is
+// `correct`; or -1 when this kind of mistake does not fit it (a result is
+// never negative, so -1 cannot be confused with one).
+inline int64_t wrong_value(std::string_view expr, int64_t correct, MistakeKind kind, Rng& rng) {
+    switch (kind) {
+    case kWrongDigit: {  // one digit of the result wrong, the others right
+        std::string digits = std::to_string(correct);
+        const size_t i = size_t(rng.below(digits.size()));
+        digits[i] = char('0' + (digits[i] - '0' + 1 + rng.below(9)) % 10);
+        return std::stoll(digits);
+    }
+    case kMissedCarry:  // a carry or borrow forgotten (one off for a single digit)
+        return correct >= 10 ? correct - 10 : correct + 1;
+    case kWrongOperator: {
+        // A learner who slips on an operator still works out the rest of
+        // the calculation right. So the whole calculation is redone with
+        // its first operator swapped for the one it is most often mixed up
+        // with (in an add column the first one joins the two digits, and
+        // the carry is still added; elsewhere there is usually only one):
+        //   7*4    as 7+4   = 11    (* and + mixed up)
+        //   4+3+0  as 4*3+0 = 12    (+ between single digits read as *)
+        //   20-8   as 20+8  = 28    (a sign slip, e.g. moving -8 across the =)
+        //   80+12  as 80-12 = 68    (a sign slip between bigger numbers)
+        //   12/3   as 12*3  = 36    (3 moved across the = without inverting it)
+        const size_t op = expr.find_first_of("+-*/");
+        if (op == expr.npos) return -1;
+        const bool single_digits = op == 1 && (expr.size() == 3 || (expr.size() > 3 && is_operator(expr[3])));
+        std::string slipped(expr);
+        slipped[op] = expr[op] == '*' ? '+' : expr[op] == '/' ? '*' : expr[op] == '-' ? '+'
+                      : single_digits ? '*' : '-';
+        const int64_t wrong = evaluate(slipped);
+        // 2+2 as 2*2 is still 4, and 7+12 as 7-12 is negative: no mistake.
+        return wrong >= 0 && wrong != correct ? wrong : -1;
+    }
+    }
+    return -1;
+}
+
+// statement = steps[begin, end), which is right: put `wrong` before it,
+// marked as not trained on, and a phrase that introduces the correction.
+inline void insert_mistake(Problem& p, size_t begin, size_t end, const std::string& wrong, Rng& rng) {
+    static const char* corrections[] = {"Wait: ", "Correction: ", "Let me check: ", "That was wrong: "};
+    const std::string right = p.steps.substr(begin, end - begin);
+    CHECK(wrong != right, "planted statement must be wrong");
+    p.steps.replace(begin, end - begin, "[[no-loss]]" + wrong + "[[/no-loss]]. " + corrections[rng.below(4)] + right);
+}
+
+// cmp: "1=1; 2<3" (same length: digit by digit until one differs) or
+// "3 digits vs 2". The last step decides; it is the one corrupted:
+//   "2<3" -> "2>3"                      (the relation turned around)
+//   "3 digits vs 2" -> "4 digits vs 2"  (one number's digits miscounted)
+// The "1=1" steps are left alone: "1<1" is not a slip anyone makes.
+inline bool plant_comparison_mistake(Problem& p, Rng& rng) {
+    const size_t last = p.steps.rfind("; ");
+    const size_t begin = last == std::string::npos ? 0 : last + 2;
+    const std::string right = p.steps.substr(begin);
+    std::string wrong = right;
+    const std::string vs = " digits vs ";
+    const size_t at = right.find(vs);
+    if (at != std::string::npos) {
+        // Miscount one side by one, never down to zero digits.
+        const bool left = rng.below(2) == 0;
+        const size_t from = left ? 0 : at + vs.size(), to = left ? at : right.size();
+        const int count = std::stoi(right.substr(from, to - from));
+        const int miscount = count > 1 && rng.below(2) ? count - 1 : count + 1;
+        wrong.replace(from, to - from, std::to_string(miscount));
+    } else {
+        // "2<3": a digit, the relation, a digit.
+        if (right.size() != 3 || (right[1] != '<' && right[1] != '>')) return false;
+        wrong[1] = right[1] == '<' ? '>' : '<';
+    }
+    insert_mistake(p, begin, p.steps.size(), wrong, rng);
+    return true;
+}
+
+}  // namespace mistake_detail
+
+// Plants one mistake in p's solution, followed by its correction; false if
+// p has nothing that fits (every generated problem has something).
+// The CLI uses its own RNG for this, so the problems stay the same.
+inline bool plant_mistake(Problem& p, Rng& rng) {
+    using namespace mistake_detail;
+    if (p.task == "cmp") return plant_comparison_mistake(p, rng);
+    const std::vector<Calculation> calculations = find_calculations(p.steps);
+    if (calculations.empty()) return false;
+    const Calculation c = calculations[rng.below(calculations.size())];
+    const std::string_view expr(p.steps.data() + c.expr, c.value - 1 - c.expr);
+    int64_t wrong = wrong_value(expr, c.correct, MistakeKind(rng.below(3)), rng);
+    // A wrong operator that changes nothing: a wrong digit or carry instead.
+    if (wrong < 0) wrong = wrong_value(expr, c.correct, MistakeKind(rng.below(2)), rng);
+    CHECK(wrong >= 0 && wrong != c.correct, "planted value must be wrong");
+    insert_mistake(p, c.begin, c.end, p.steps.substr(c.begin, c.value - c.begin) + std::to_string(wrong), rng);
+    return true;
 }
 
 // Problem sets on disk: one per line, tab-separated

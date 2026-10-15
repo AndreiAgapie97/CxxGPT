@@ -519,6 +519,60 @@ night. In order of cost:
   planted mistake. Mask the wrong step out of the loss, so the model learns to
   correct a mistake but not to make it.
 
+`gen-reasoning --mistakes P` implements this experiment for the synthetic
+curriculum (all six task families). `P` is a probability in [0,1], default 0;
+only accepted training problems draw from a separate mistake RNG. Thus the
+questions, final answers, validation tokens and test set stay the same across
+fractions with the same seed. At 0, every output is byte-identical to the old
+generator. At a nonzero fraction it also writes `OUT.train.text` so the owner
+can inspect the planted statements. Errors change one digit, omit a carry or
+borrow, or redo a whole calculation with one operator slipped (`4+3+0` as
+`4*3+0`, `20-8` as `20+8`); in `cmp`, which has no calculations, the deciding
+relation is turned around (`2<3` as `2>3`) or a digit count is off by one.
+Corrections use several short phrasings.
+
+The reserved text markers `[[no-loss]]` and `[[/no-loss]]` surround exactly
+the wrong statement, excluding its following punctuation and correction.
+The generator, and `text2tok --loss-markers`, remove both markers before
+encoding and give every enclosed token mask 0 (without the flag, `text2tok`
+treats them as plain text, so web text is tokenized as before; re-tokenizing
+`OUT.train.text` needs the flag). The wrong statement remains in the context,
+so the next trained token begins its correction. Annotation boundaries also
+split BPE encoding: no merged token crosses from a wrong span into a trained
+span. Nested, unmatched and unclosed markers are errors, including spans
+crossing a document separator (with `--loss-markers`). A streaming block waits for a closing marker
+within the existing buffer limit. The token-file layout is unchanged.
+`gen-reasoning` still masks the question; `text2tok` trains on the rest of
+its input as before (including questions), and `--doc-sep` still trims each
+document. Use the generator's `.train.tok` for this experiment.
+
+Run on the laptop GPU, with the same architecture, budget and paired seeds
+for 0%, 10% and 30%. These commands are an experiment plan, not measured
+results; this change was tested on CPU without running the experiment:
+
+```bash
+mkdir -p data/planted runs
+for p in 0 0.1 0.3; do
+  ./cxxgpt gen-reasoning --out data/planted/p$p --seed 41 --mistakes "$p" \
+    --chain-plan --expr-rewrite
+  for seed in 1 2 3; do
+    run="runs/planted-p$p-s$seed"
+    ./cxxgpt-gpu train --gpu --data data/planted/p$p.train.tok \
+      --val data/planted/p$p.val.tok --seq 256 --dim 256 --layers 4 --heads 4 \
+      --experts 8 --topk 2 --ternary --fp-attn --muon --batch 16 --steps 2500 \
+      --lr 1.5e-3 --warmup 150 --eval-every 500 --log-every 50 --seed "$seed" \
+      --out "$run.ckpt" --log "$run.csv" > "$run.log" 2>&1
+    ./cxxgpt eval-reasoning --ckpt "$run.ckpt" --test data/planted/p$p.test.txt \
+      --show-failures > "$run.eval" 2>&1
+  done
+done
+```
+
+Compare clean validation loss and exact-answer accuracy per task across
+paired seeds. Fixed steps, batch and sequence length give the same sampled
+token budget; more correction text means fewer complete problems in that
+budget. A gain here must still pass the dev-set funnel before a laptop night.
+
 ### C. Reviving dead experts by cloning busy ones
 
 - When an expert has been starved for a long time (its bias pinned near steps
