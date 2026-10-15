@@ -392,6 +392,12 @@ void decode(const char* name, const Config& cfg, double tol, Matmul matmul = Mat
     const auto gc = generate(cpu, prompts, cfg.seq_len, never);
     const auto gg = generate(dec, prompts, cfg.seq_len, never);
     if (matmul == Matmul::fp32) EXPECT(gc == gg, "%s: generate() picked different tokens", name);
+    // With the no-repeat block (eval-reasoning --no-repeat), too.
+    const auto bc = generate(cpu, prompts, cfg.seq_len, never, 0.0, nullptr, nullptr, calc::Mode::none, nullptr,
+                             nullptr, 3);
+    const auto bg = generate(dec, prompts, cfg.seq_len, never, 0.0, nullptr, nullptr, calc::Mode::none, nullptr,
+                             nullptr, 3);
+    if (matmul == Matmul::fp32) EXPECT(bc == bg, "%s: generate() with --no-repeat 3 picked different tokens", name);
     // The caches lived in the gradient buffer; zero_grad() gives it back.
     gpu.zero_grad();
     std::vector<float> g(cpu.num_params(), 1.0f);

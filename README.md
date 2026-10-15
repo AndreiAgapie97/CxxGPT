@@ -170,6 +170,15 @@ during training).
   `--limit` are, and try k is the same at every effort level. All of one
   problem's tries are generated together, so `--tries` must not exceed
   `--batch` (64 by default).
+- `--no-repeat N` (also on `sample`; off by default) never lets an answer
+  write a run of N tokens a second time: small models greedily repeat a
+  sentence until the token budget runs out. Only the answer counts, not
+  the question it may copy, and shorter repeats ("9 * 2") stay allowed, so
+  N should be long (8-16). The headline says so (`(greedy, no-repeat 12)`).
+  Every evaluation also prints how many first tries ended without a
+  `#### ` line. The model can dodge the block with a near-copy (another
+  apostrophe in the same sentence); unlikelihood training (issue #34) is
+  the training-side fix.
 
 ### Generated word problems
 

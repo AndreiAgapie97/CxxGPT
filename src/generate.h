@@ -32,6 +32,72 @@ int pick_token(const T* logits, int V, double temperature, Rng* rng) {
     return best;
 }
 
+// The same, but never one of the `blocked` tokens: the argmax of the others,
+// or a sample with the blocked tokens' probability set to 0 (one random
+// number, as above). With nothing blocked this is exactly the pick above;
+// if every token is blocked, the block is ignored.
+template <class T>
+int pick_token(const T* logits, int V, double temperature, Rng* rng, const std::vector<int>& blocked) {
+    if (blocked.empty()) return pick_token(logits, V, temperature, rng);
+    std::vector<char> no(size_t(V), 0);
+    for (int t : blocked)
+        if (t >= 0 && t < V) no[size_t(t)] = 1;
+    int best = -1;
+    for (int i = 0; i < V; ++i)
+        if (!no[size_t(i)] && (best < 0 || logits[i] > logits[best])) best = i;
+    if (best < 0) return pick_token(logits, V, temperature, rng);
+    if (temperature <= 0 || !rng) return best;
+    std::vector<double> p(V);
+    double sum = 0;
+    for (int i = 0; i < V; ++i)
+        sum += p[i] = no[size_t(i)] ? 0.0 : std::exp((double(logits[i]) - logits[best]) / temperature);
+    double u = rng->uniform() * sum;
+    for (int i = 0; i < V; ++i)
+        if (p[i] > 0 && (u -= p[i]) < 0) return i;
+    return best;
+}
+
+// The no-repeat block (--no-repeat N) for one sequence: the tokens that
+// would complete a run of N tokens the sequence has already written once.
+// Small models greedily repeat a sentence until the token budget runs out;
+// this forces something new instead. Only the generated text counts, not
+// the prompt: an answer may copy a whole phrase of its question. A run
+// shorter than N may repeat ("9 * 2" after "16 - 3 - 4 = 9"), so N must be
+// longer than the numbers and phrases a solution reuses on purpose. A BOS
+// starts a new document and forgets what came before.
+class NoRepeat {
+public:
+    explicit NoRepeat(int n) : n_(n) { CHECK(n >= 2, "--no-repeat must be 0 (off) or at least 2, not %d", n); }
+
+    void add(int t) {
+        if (t == kBos) {
+            text_.clear();
+            next_.clear();
+            return;
+        }
+        text_.push_back(t);
+        if (int(text_.size()) < n_) return;
+        // The run of N tokens just completed: its first N - 1 tokens, then t.
+        std::vector<int>& after = next_[std::vector<int>(text_.end() - n_, text_.end() - 1)];
+        if (std::find(after.begin(), after.end(), t) == after.end()) after.push_back(t);
+    }
+
+    // The tokens that may not come next.
+    const std::vector<int>& blocked() const {
+        if (int(text_.size()) < n_ - 1) return none_;
+        const auto it = next_.find(std::vector<int>(text_.end() - (n_ - 1), text_.end()));
+        return it == next_.end() ? none_ : it->second;
+    }
+
+private:
+    int n_;
+    std::vector<int> text_;
+    // Every N - 1 tokens seen so far -> the tokens that followed them. Exact
+    // keys, not hashes: a collision would block a token wrongly.
+    std::map<std::vector<int>, std::vector<int>> next_;
+    std::vector<int> none_;
+};
+
 // Continues every prompt by max_new tokens, all in one batch, or by fewer
 // when the context runs out: with prompts of up to L tokens, at most
 // seq_len - L + 1 (the last token is never fed back, so it needs no slot).
@@ -45,6 +111,9 @@ int pick_token(const T* logits, int V, double temperature, Rng* rng) {
 // so tests can pass a scripted fake instead of a real Model.
 // With a calculator `tool`, its tokens use the same cache and budget as
 // sampled tokens, and draw no random numbers.
+// With no_repeat N (0: off), the model never writes a run of N tokens a
+// second time (NoRepeat); calculator tokens are never blocked, but count as
+// written text.
 template <class M>
 std::vector<std::vector<int>> generate(M& model, const std::vector<std::vector<int>>& prompts,
                                        int max_new,
@@ -52,8 +121,9 @@ std::vector<std::vector<int>> generate(M& model, const std::vector<std::vector<i
                                        double temperature = 0.0, Rng* rng = nullptr,
                                        std::vector<Rng>* rng_per_sequence = nullptr,
                                        calc::Mode tool = calc::Mode::none, const Tokenizer* tokenizer = nullptr,
-                                       calc::Counts* counts = nullptr) {
+                                       calc::Counts* counts = nullptr, int no_repeat = 0) {
     CHECK(tool == calc::Mode::none || tokenizer, "calculator needs a tokenizer");
+    CHECK(no_repeat == 0 || no_repeat >= 2, "--no-repeat must be 0 (off) or at least 2, not %d", no_repeat);
     const int B = int(prompts.size());
     std::vector<std::vector<int>> out(B);
     if (B == 0) return out;
@@ -88,6 +158,8 @@ std::vector<std::vector<int>> generate(M& model, const std::vector<std::vector<i
             for (int t : prompts[b]) watch(b, t);
     std::vector<std::vector<int>> pending(B);
     std::vector<size_t> next(B, 0);
+    std::vector<NoRepeat> repeats;
+    if (no_repeat > 0) repeats.assign(size_t(B), NoRepeat(no_repeat));
     int n_finished = 0;
     for (int pos = 0; pos < total; ++pos) {
         for (int b = 0; b < B; ++b) {
@@ -100,8 +172,10 @@ std::vector<std::vector<int>> generate(M& model, const std::vector<std::vector<i
             if (finished[b]) continue;  // stopped slots consume no further random draws
             const bool injected = next[b] < pending[b].size();
             Rng* r = rng_per_sequence ? &(*rng_per_sequence)[size_t(b)] : rng;
-            int t = injected ? pending[b][next[b]++] :
-                pick_token(logits + size_t(b) * model.cfg.vocab, model.cfg.vocab, temperature, r);
+            const auto* row = logits + size_t(b) * model.cfg.vocab;
+            int t = injected       ? pending[b][next[b]++] :
+                    no_repeat > 0 ? pick_token(row, model.cfg.vocab, temperature, r, repeats[size_t(b)].blocked()) :
+                                    pick_token(row, model.cfg.vocab, temperature, r);
             if (tool != calc::Mode::none && !injected && t < tokenizer->vocab_size()) {
                 const std::string& bytes = tokenizer->token_bytes(t);
                 // A BPE token can carry the trigger and more punctuation, as
@@ -127,6 +201,7 @@ std::vector<std::vector<int>> generate(M& model, const std::vector<std::vector<i
             }
             cur[b] = t;
             out[b].push_back(t);
+            if (no_repeat > 0) repeats[size_t(b)].add(t);
             if (done(out[b])) finished[b] = 1, ++n_finished;
             if (tool != calc::Mode::none) watch(b, t);
         }
@@ -165,6 +240,7 @@ struct VoteOpts {
     double temperature = 0.0;
     uint64_t seed = 1;
     std::vector<size_t> problem_ids;  // optional, one per problem
+    int no_repeat = 0;                // the no-repeat block's N (generate); 0: off
 };
 
 // The seed of one try: the run's seed, the problem's number and the try's
@@ -181,18 +257,22 @@ inline uint64_t try_seed(uint64_t seed, uint64_t problem, uint64_t try_index) {
 }
 
 // The effort a score was measured at, for printing next to it: "greedy",
-// "1 sampled try, temp 0.8, seed 1" or "maj@8, temp 0.7, seed 1". Scores at
-// different efforts are different tests, so every printed score says which.
+// "1 sampled try, temp 0.8, seed 1" or "maj@8, temp 0.7, seed 1", followed
+// by ", no-repeat N" when the block is on. Scores at different efforts are
+// different tests, so every printed score says which.
 inline std::string effort_label(const VoteOpts& vote) {
-    if (vote.tries == 1 && vote.temperature <= 0) return "greedy";
     char buf[96];
-    if (vote.tries == 1)
+    if (vote.tries == 1 && vote.temperature <= 0)
+        std::snprintf(buf, sizeof buf, "greedy");
+    else if (vote.tries == 1)
         std::snprintf(buf, sizeof buf, "1 sampled try, temp %g, seed %llu", vote.temperature,
                       static_cast<unsigned long long>(vote.seed));
     else
         std::snprintf(buf, sizeof buf, "maj@%d, temp %g, seed %llu", vote.tries, vote.temperature,
                       static_cast<unsigned long long>(vote.seed));
-    return buf;
+    std::string label = buf;
+    if (vote.no_repeat > 0) label += ", no-repeat " + std::to_string(vote.no_repeat);
+    return label;
 }
 
 // The most common answer; on a tie, the one that appeared first.
@@ -287,6 +367,9 @@ struct EvalResult {
     std::string effort = "greedy";  // effort_label() of the run, printed with the headline
     int max_new = 200;
     size_t gold_over_cap = 0;
+    // First tries without a finished "#### answer" line: they ran out of
+    // tokens, usually in a loop that repeats a sentence.
+    size_t unfinished = 0;
     std::vector<std::pair<Problem, std::string>> failures;  // a few, for inspection
     std::vector<std::string> completions;  // optional, the first tries in input order, for trace audits
 
@@ -316,6 +399,7 @@ inline std::vector<int> prompt_tokens(const Problem& p, const Tokenizer& tok) {
 // not depend on the batching as long as the context leaves every batch room
 // for max_new tokens (as for greedy decoding). With a calculator `tool`,
 // every try may call it (generate), and r.tool_calls counts the calls.
+// vote.no_repeat turns on the no-repeat block for every try (NoRepeat).
 // The default Tokenizer (no merges) is byte-level.
 template <class M>
 EvalResult eval_reasoning(M& model, const std::vector<Problem>& problems, const Tokenizer& tok = {},
@@ -370,7 +454,7 @@ EvalResult eval_reasoning(M& model, const std::vector<Problem>& problems, const 
         }
         const auto outs = generate(model, group, max_new,
                                    [&](const std::vector<int>& gen) { return completion_done(text_of(gen)); },
-                                   vote.temperature, nullptr, &rngs, tool, &tok, &r.tool_calls);
+                                   vote.temperature, nullptr, &rngs, tool, &tok, &r.tool_calls, vote.no_repeat);
         // Problem order[k]'s tries sit together in the group, in try order.
         for (size_t k = k0; k < k1; ++k)
             for (int t = 0; t < vote.tries; ++t)
@@ -382,6 +466,7 @@ EvalResult eval_reasoning(M& model, const std::vector<Problem>& problems, const 
     for (size_t i = 0; i < n; ++i) {
         const Problem& p = problems[i];
         r.gold_over_cap += tok.encode(p.completion()).size() > size_t(max_new);
+        r.unfinished += !completion_done(texts[i][0]);
         const TryScore s = score_tries(texts[i], p.answer);
         r.by_task[{p.task, p.difficulty}].add(s);
         r.correct += s.vote_ok;  // the headline number is the vote's (maj@N)

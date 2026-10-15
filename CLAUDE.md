@@ -55,6 +55,10 @@ Reasoning is the first capability we go after.
   on the final answer (maj@N, also pass@N and the first try's score). Each
   try has its own seed, so results do not depend on `--batch` or
   `--limit`; every headline names its effort (`(greedy)`, `(maj@8, ...)`).
+  `--no-repeat N` (also on `sample`, off by default; `NoRepeat` in
+  `src/generate.h`) forbids writing a run of N generated tokens twice,
+  against greedy loops (#33); every evaluation prints its unfinished first
+  tries. Not yet scored on a dev set.
 - `src/gpu.cu` (interface `src/gpu.h`): the CUDA training backend, the
   same model op for op, fp32 with cuBLAS. `train --gpu` stores the
   products' inputs in bf16 by default (`--matmul bf16`, fp32 master

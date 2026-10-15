@@ -9,6 +9,7 @@
 //   cxxgpt eval-reasoning --ckpt model.ckpt --test FILE    exact-answer accuracy
 //       [--tries N | --effort low/medium/high] [--temp T] [--seed S]
 //                                      sample N tries per problem; the headline becomes their maj@N vote
+//       [--no-repeat N]                never write a run of N tokens twice (also on sample)
 //   cxxgpt bench-infer [--ckpt model.ckpt | model options]  ternary engine vs fp32 decode
 //
 // Run a subcommand with --help for its options.
@@ -657,6 +658,7 @@ void print_eval(const EvalResult& r, size_t show_failures) {
     std::printf("overall %.1f%% (%d / %d) (%s)\n", 100.0 * r.correct / std::max(1, r.total), r.correct, r.total,
                 r.effort.c_str());
     std::printf("gold completions exceeding --max-new %d: %zu / %d\n", r.max_new, r.gold_over_cap, r.total);
+    std::printf("unfinished answers (no \"#### \" line, first tries): %zu / %d\n", r.unfinished, r.total);
     // Multi-line answers (GSM8K's) stay indented under their label.
     auto indent = [](std::string t) {
         for (size_t i = 0; (i = t.find('\n', i)) != std::string::npos; i += 15) t.replace(i, 1, "\n              ");
@@ -700,6 +702,9 @@ int cmd_eval_reasoning(Args& a) {
     const long seed = a.integer("seed", 1);
     CHECK(seed >= 0, "--seed must not be negative");
     vote.seed = uint64_t(seed);
+    // Never repeat a run of N generated tokens (generate.h, NoRepeat); 0: off.
+    vote.no_repeat = a.integer_int("no-repeat", 0);
+    CHECK(vote.no_repeat == 0 || vote.no_repeat >= 2, "--no-repeat must be 0 (off) or at least 2");
     // As TernaryEngine runs it: the embedding (and --fp-attn attention) in
     // int8 rows.
     const bool as_engine = a.flag("as-engine");
@@ -1262,6 +1267,8 @@ int cmd_sample(Args& a) {
     const bool answer = a.flag("answer");  // stop after the "#### answer" line, as eval-reasoning does
     Rng rng(uint64_t(a.integer("seed", 1)));
     const calc::Mode tool = calculator_mode(a);
+    const int no_repeat = a.integer_int("no-repeat", 0);  // as for eval-reasoning
+    CHECK(no_repeat == 0 || no_repeat >= 2, "--no-repeat must be 0 (off) or at least 2");
     a.done();
     Model<float> model(peek_checkpoint_config(ckpt));
     load_checkpoint(ckpt, model, nullptr, nullptr);
@@ -1288,7 +1295,7 @@ int cmd_sample(Args& a) {
     const auto out = generate(
         model, {ids}, n,
         [&](const std::vector<int>& g) { return g.back() == kBos || (answer && completion_done(text_of(g))); },
-        temp, &rng, nullptr, tool, &tok, &counts);
+        temp, &rng, nullptr, tool, &tok, &counts, no_repeat);
     std::vector<int> gen = out[0];
     if (!gen.empty() && gen.back() == kBos) gen.pop_back();
     const std::string text = text_of(gen);

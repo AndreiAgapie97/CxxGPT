@@ -442,6 +442,19 @@ grep -q '^effort: tries 32, temperature 0.5, seed 1$' "$TEST_DIR/vote-effort-hig
     --effort low --threads 2 > "$TEST_DIR/vote-effort-low.log"
 require_absent -q 'effort:' "$TEST_DIR/vote-effort-low.log"
 grep -q '^overall .* (greedy)$' "$TEST_DIR/vote-effort-low.log"
+grep -q '^unfinished answers (no "#### " line, first tries): [0-9]* / 1$' "$TEST_DIR/vote-effort-low.log"
+# The no-repeat block names itself in the headline; N = 1 would forbid
+# every token already written, so it is refused.
+"$CXXGPT" eval-reasoning --ckpt "$TEST_DIR/audit.ckpt" --test "$TEST_DIR/audit.txt" \
+    --no-repeat 4 --max-new 6 --threads 2 > "$TEST_DIR/no-repeat.log"
+grep -q '^overall .* (greedy, no-repeat 4)$' "$TEST_DIR/no-repeat.log"
+for cmd in "eval-reasoning --test $TEST_DIR/audit.txt" sample; do
+    status=0
+    "$CXXGPT" $cmd --ckpt "$TEST_DIR/audit.ckpt" --no-repeat 1 --threads 2 \
+        > "$TEST_DIR/no-repeat-bad.log" 2>&1 || status=$?
+    [[ "$status" == 1 ]]
+    grep -q 'no-repeat must be 0 (off) or at least 2' "$TEST_DIR/no-repeat-bad.log"
+done
 # A model that has memorized the one problem finishes its tries, so the
 # vote has answers to count. Each document ends in "\n." because text2tok
 # trims documents, and the answer line must end with its newline.

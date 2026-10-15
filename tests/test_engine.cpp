@@ -23,6 +23,7 @@
 #include "test_optim.h"
 #include "test_reasoning_traces.h"
 #include "test_vote.h"
+#include "test_no_repeat.h"
 
 int main(int argc, char** argv) {
     int threads = int(std::thread::hardware_concurrency());
@@ -52,6 +53,7 @@ int main(int argc, char** argv) {
         {"optim", test_optim},
         {"generated traces", test_reasoning_traces},
         {"vote", test_vote},
+        {"no-repeat block", test_no_repeat},
         {"attention", test_attention},
     };
     for (auto& s : suites) {
