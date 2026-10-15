@@ -73,9 +73,53 @@ inline void test_vote_answer() {
     EXPECT(vote_answer({"4", "9", "4", "4"}) == "4", "majority after a wrong first try lost");
     EXPECT(vote_answer({"8", "3", "8", "3"}) == "8", "a tie must go to the first-seen answer");
     EXPECT(vote_answer({"5", "5", "12", "5"}) == "5", "counts, not the last answer, decide");
-    EXPECT(vote_answer({"", "6", "6", "6"}) == "6", "a missing answer line counts as empty and loses");
+    // An empty answer here is a finished but empty "#### " line: one vote
+    // like any other. (Unfinished tries never reach vote_answer.)
+    EXPECT(vote_answer({"", "6", "6", "6"}) == "6", "one empty answer line must lose to three 6s");
     EXPECT(vote_answer({}) == "", "no tries gave no answer");
-    EXPECT(vote_answer({"", ""}) == "", "all-missing answers vote for the empty answer");
+    EXPECT(vote_answer({"", ""}) == "", "two empty answer lines vote for the empty answer");
+}
+
+// score_tries directly: unfinished tries abstain, a problem without a
+// finished try is wrong, and one try scores exactly as the plain check.
+inline void test_score_tries() {
+    const std::string unfinished = "work, but no answer line";
+    auto answer = [](const char* a) { return std::string("work\n#### ") + a + "\n"; };
+    // Gold 7, tries "", "", 7, 7: the two answers both say 7, so 7 wins.
+    TryScore s = score_tries({unfinished, unfinished, answer("7"), answer("7")}, "7");
+    EXPECT(s.vote_ok && s.any_ok && !s.first_ok && s.distinct == 1 && s.shown == 2,
+           "unfinished, unfinished, 7, 7 vs gold 7: vote %d any %d first %d distinct %d shown %zu", s.vote_ok,
+           s.any_ok, s.first_ok, s.distinct, s.shown);
+    // Gold 7, tries "", "", "", 7: the only answer is 7.
+    s = score_tries({unfinished, unfinished, unfinished, answer("7")}, "7");
+    EXPECT(s.vote_ok && s.distinct == 1, "three unfinished and one 7 vs gold 7 must be right (vote %d)", s.vote_ok);
+    // Gold "", three unfinished and one "#### 5": the only answer is 5.
+    s = score_tries({unfinished, unfinished, unfinished, answer("5")}, "");
+    EXPECT(!s.vote_ok && !s.any_ok && s.distinct == 1 && s.shown == 3,
+           "three unfinished and one 5 vs gold \"\" must be wrong (vote %d any %d)", s.vote_ok, s.any_ok);
+    // No try finished: wrong even against gold "", no answers, first try shown.
+    s = score_tries({unfinished, unfinished}, "");
+    EXPECT(!s.vote_ok && !s.any_ok && s.distinct == 0 && s.shown == 0,
+           "no finished try must be wrong with no answers (vote %d distinct %d)", s.vote_ok, s.distinct);
+    // A finished empty answer line against gold "" is right.
+    s = score_tries({unfinished, answer(""), answer("")}, "");
+    EXPECT(s.vote_ok && s.distinct == 1, "finished empty answers vs gold \"\" must be right (vote %d)", s.vote_ok);
+    // The vote loses: the shown try is the first one that gave the voted answer.
+    s = score_tries({unfinished, answer("3"), answer("5"), answer("5")}, "3");
+    EXPECT(!s.vote_ok && s.any_ok && s.distinct == 2 && s.shown == 2,
+           "3, 5, 5 vs gold 3: vote %d any %d distinct %d shown %zu", s.vote_ok, s.any_ok, s.distinct, s.shown);
+    // One try: all three scores equal the plain check, on every kind of text.
+    const std::vector<std::pair<std::string, std::string>> single = {
+        {answer("7"), "7"}, {answer("8"), "7"}, {unfinished, "7"}, {answer(""), ""},
+        {unfinished, ""},   {"#### 7", "7"},    {answer("1,080"), "1080"},
+    };
+    for (const auto& [text, gold] : single) {
+        const bool plain = completion_done(text) && answer_matches(text, gold);
+        s = score_tries({text}, gold);
+        EXPECT(s.first_ok == plain && s.vote_ok == plain && s.any_ok == plain,
+               "one try '%s' vs gold '%s': first %d vote %d any %d, plain %d", text.c_str(), gold.c_str(),
+               s.first_ok, s.vote_ok, s.any_ok, plain);
+    }
 }
 
 inline void test_vote_report() {
@@ -85,8 +129,9 @@ inline void test_vote_report() {
     //   gold 9 : tries 9, 4, 4, 4   -> single ok, vote 4 no, any ok, 2 distinct
     //   gold 12: tries 5, 5, 12, 5  -> single no, vote 5 no, any ok, 2 distinct
     //   gold 3 : tries 8, 3, 8, 3   -> tie 2-2, vote 8 (first seen) no, any ok
-    //   gold 6 : tries "", 6, 6, 6  -> single no, vote 6 ok, any ok, 2 distinct
-    // Overall: single 2/5, vote 2/5, any 5/5, distinct answers 10 (mean 2.0).
+    //   gold 6 : tries -, 6, 6, 6   -> single no, vote 6 ok, any ok, 1 distinct
+    //            (the first try writes no answer line: it abstains)
+    // Overall: single 2/5, vote 2/5, any 5/5, distinct answers 9 (mean 1.8).
     // Per level: add d1 1/2 by vote, add d2 0/1, mul d1 0/1, mul d2 1/1.
     std::vector<Problem> ps = {
         vote_problem("add", 1, "12+45?", "7"),
@@ -114,7 +159,7 @@ inline void test_vote_report() {
     EXPECT(r.vote_correct == 2, "vote accuracy %d, hand-computed 2", r.vote_correct);
     EXPECT(r.any_correct == 5, "any-try accuracy %d, hand-computed 5", r.any_correct);
     EXPECT(r.correct == r.vote_correct, "the headline score must be the vote's");
-    EXPECT(r.distinct_answers == 10.0, "distinct answers %.1f, hand-computed 10", r.distinct_answers);
+    EXPECT(r.distinct_answers == 9.0, "distinct answers %.1f, hand-computed 9", r.distinct_answers);
     const VoteCell& add1 = r.vote_by_task.at({"add", 1});
     EXPECT(add1.vote_correct == 1 && add1.single_correct == 2 && add1.any_correct == 2,
            "add d1 cell: single %d vote %d any %d", add1.single_correct, add1.vote_correct, add1.any_correct);
@@ -220,6 +265,7 @@ inline void test_vote_single_try_matches_greedy() {
 
 inline void test_vote() {
     test_vote_answer();
+    test_score_tries();
     test_vote_report();
     test_vote_empty_answer();
     test_vote_single_try_matches_greedy();

@@ -96,7 +96,8 @@ inline std::string normalized_answer(const std::string& completion) {
 
 // How many times each problem is sampled. With tries > 1, every problem is
 // generated `tries` times at `temperature` (sampling needs a seeded Rng), and
-// the reported answer is the most common final answer. With tries == 1 the
+// the reported answer is the most common final answer among the tries that
+// finished one. With tries == 1 the
 // evaluation is exactly what it was before votes existed.
 struct VoteOpts {
     int tries = 1;
@@ -133,6 +134,41 @@ inline std::string vote_answer(const std::vector<std::string>& answers) {
     return best ? *best : "";
 }
 
+// How one problem's tries scored.
+struct TryScore {
+    bool first_ok = false;  // the first try alone (with one try: the plain score)
+    bool vote_ok = false;   // the most common answer (maj@N)
+    bool any_ok = false;    // at least one try (pass@N)
+    int distinct = 0;       // how many different answers the tries gave
+    size_t shown = 0;       // the try to show when the vote is wrong
+};
+
+// Scores one problem's tries (their completion texts) against the gold
+// answer. Only a try that finished its "#### answer" line has an answer; a
+// try that ran out of tokens, or wrote no answer line, abstains: it does not
+// vote and is not counted among the distinct answers. A problem where no try
+// finished is wrong. With one try this is exactly the plain check
+// completion_done(text) && answer_matches(text, gold).
+inline TryScore score_tries(const std::vector<std::string>& texts, const std::string& gold) {
+    std::vector<std::string> answers;  // the finished tries' answers
+    std::vector<size_t> from;          // which try each answer came from
+    for (size_t t = 0; t < texts.size(); ++t) {
+        if (!completion_done(texts[t])) continue;
+        answers.push_back(normalized_answer(texts[t]));
+        from.push_back(t);
+    }
+    TryScore s;
+    s.first_ok = !texts.empty() && completion_done(texts[0]) && answer_matches(texts[0], gold);
+    s.any_ok = std::find(answers.begin(), answers.end(), gold) != answers.end();
+    s.distinct = int(std::set<std::string>(answers.begin(), answers.end()).size());
+    if (answers.empty()) return s;  // no try finished: wrong, and the first try is shown
+    const std::string voted = vote_answer(answers);
+    s.vote_ok = voted == gold;
+    // Show the first try that gave the voted answer.
+    s.shown = from[size_t(std::find(answers.begin(), answers.end(), voted) - answers.begin())];
+    return s;
+}
+
 struct EvalResult {
     // (task, difficulty) -> (correct, total); with votes, correctness is the
     // vote's (maj@N), which is also what `correct` below holds.
@@ -162,8 +198,9 @@ inline std::vector<int> prompt_tokens(const Problem& p, const Tokenizer& tok) {
 // Decodes every problem from "A: " and checks the answer exactly. With
 // vote.tries == 1 (the default) this is the plain greedy evaluation. With
 // tries > 1, each problem is sampled `tries` times at vote.temperature (an
-// Rng must be given) and the reported answer is the most common one, ties
-// going to the answer that appeared first.
+// Rng must be given) and the reported answer is the most common one among
+// the tries that finished an answer line, ties going to the answer that
+// appeared first (score_tries).
 // The default Tokenizer (no merges) is byte-level.
 template <class M>
 EvalResult eval_reasoning(M& model, const std::vector<Problem>& problems, const Tokenizer& tok = {},
@@ -219,51 +256,22 @@ EvalResult eval_reasoning(M& model, const std::vector<Problem>& problems, const 
     for (size_t i = 0; i < n; ++i) {
         const Problem& p = problems[i];
         r.gold_over_cap += tok.encode(p.completion()).size() > size_t(max_new);
-        // The answers the tries gave, normalized the way scoring normalizes
-        // them; a try that never finished its "#### answer" line (it ran out
-        // of tokens, or wrote no answer line at all) counts as the empty
-        // answer, so a single-try evaluation scores exactly as before.
-        std::vector<std::string> answers(vote.tries);
-        for (int t = 0; t < vote.tries; ++t)
-            answers[size_t(t)] =
-                completion_done(texts[i][size_t(t)]) ? normalized_answer(texts[i][size_t(t)]) : "";
-        const bool single_ok = completion_done(texts[i][0]) && answer_matches(texts[i][0], p.answer);
-        const std::string voted = vote_answer(answers);
-        // An empty answer can mean two things: every try failed to finish an
-        // "#### " line (wrong, as a single greedy try always was), or the
-        // answer line itself was empty and gold is empty too (correct today).
-        // Only a finished try can give the empty answer correctly.
-        bool any_finished = false;
-        for (int t = 0; t < vote.tries && !any_finished; ++t) any_finished = completion_done(texts[i][size_t(t)]);
-        const bool vote_ok = (any_finished || !voted.empty()) && voted == p.answer;
-        bool any_ok = false;
-        for (int t = 0; t < vote.tries && !any_ok; ++t)
-            any_ok = completion_done(texts[i][size_t(t)]) && answer_matches(texts[i][size_t(t)], p.answer);
+        const TryScore s = score_tries(texts[i], p.answer);
         auto& cell = r.by_task[{p.task, p.difficulty}];
-        cell.first += vote_ok;  // the headline number is the vote's (maj@N)
+        cell.first += s.vote_ok;  // the headline number is the vote's (maj@N)
         cell.second += 1;
-        r.correct += vote_ok;
+        r.correct += s.vote_ok;
         r.total += 1;
-        r.single_correct += single_ok;
-        r.vote_correct += vote_ok;
-        r.any_correct += any_ok;
-        r.distinct_answers += double(std::set<std::string>(answers.begin(), answers.end()).size());
+        r.single_correct += s.first_ok;
+        r.vote_correct += s.vote_ok;
+        r.any_correct += s.any_ok;
+        r.distinct_answers += s.distinct;
         auto& vcell = r.vote_by_task[{p.task, p.difficulty}];
-        vcell.single_correct += single_ok;
-        vcell.vote_correct += vote_ok;
-        vcell.any_correct += any_ok;
-        vcell.distinct_answers += double(std::set<std::string>(answers.begin(), answers.end()).size());
-        if (!vote_ok && r.failures.size() < keep_failures) {
-            // The completion shown is the first try that gave the voted
-            // answer, or the first try if no try did (all without "#### ").
-            size_t shown = 0;
-            for (int t = 0; t < vote.tries; ++t)
-                if (answers[size_t(t)] == voted) {
-                    shown = size_t(t);
-                    break;
-                }
-            r.failures.push_back({p, texts[i][shown]});
-        }
+        vcell.single_correct += s.first_ok;
+        vcell.vote_correct += s.vote_ok;
+        vcell.any_correct += s.any_ok;
+        vcell.distinct_answers += s.distinct;
+        if (!s.vote_ok && r.failures.size() < keep_failures) r.failures.push_back({p, texts[i][s.shown]});
     }
     if (keep_completions) {
         r.completions.resize(n);
