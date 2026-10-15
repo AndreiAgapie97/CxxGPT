@@ -1,7 +1,8 @@
 // test_vote.h — the many-tries vote: a scripted fake model returns fixed
-// answer sequences, and the reported single/vote/any accuracies and distinct
-// counts are checked against numbers computed by hand from those sequences.
-// A real tiny model with one try must reproduce a plain greedy decode.
+// answer sequences (or sampled digits), and the reported first-try/vote/any
+// accuracies and distinct counts are checked against numbers computed by
+// hand from those sequences. A real tiny model with one try must reproduce a
+// plain greedy decode, and its sampled tries must follow their seeds.
 #pragma once
 
 #include <map>
@@ -17,6 +18,7 @@ namespace {
 // token, whatever the temperature: the desired token's logit towers over the
 // rest, so sampling it is certain. Once a script runs out it repeats '.',
 // so a completion without an "#### " line simply fills its token budget.
+// A '?' in a script is the one random step: any digit, sampled.
 class ScriptedModel {
 public:
     Config cfg;
@@ -41,6 +43,12 @@ public:
             for (int v = 0; v < cfg.vocab; ++v) logits_[at + v] = 0.0f;
             const size_t index = size_t(pos - (prompt_len - 1));
             const int token = index < scripts_[b].size() ? int(scripts_[b][index]) : int('.');
+            if (token == '?') {
+                // A digit to sample: the ten digits tie, so temperature 1
+                // picks one uniformly (greedy picks '0').
+                for (int d = '0'; d <= '9'; ++d) logits_[at + d] = 1e6f;
+                continue;
+            }
             logits_[at + token] = 1e6f;
         }
         return logits_.data();
@@ -214,6 +222,99 @@ inline void test_vote_empty_answer() {
     EXPECT(u.correct == 0, "an unfinished try must not give the empty answer (vote %d)", u.correct);
 }
 
+// Several problems per batch: batch 8 with 2 tries holds 4 problems, so the
+// 6 problems below take a batch of 4 and a batch of 2, and each try's text
+// must reach its own problem and its own place (try 0 first). Hand-computed:
+//   gold 1: tries 1, 2  -> first ok, vote 1 (tie, first seen) ok, any ok, 2 distinct
+//   gold 2: tries 3, 2  -> first no, vote 3 no, any ok, 2 distinct
+//   gold 3: tries -, 3  -> first no, vote 3 ok, any ok, 1 distinct
+//   gold 4: tries 4, 4  -> first ok, vote ok, any ok, 1 distinct
+//   gold 5: tries 5, 6  -> first ok, vote 5 ok, any ok, 2 distinct
+//   gold 6: tries 7, 8  -> first no, vote 7 no, any no, 2 distinct
+// Overall: first 3/6, vote 4/6, any 5/6, distinct 10.
+inline void test_vote_batch_of_problems() {
+    std::vector<Problem> ps;
+    for (const char* gold : {"1", "2", "3", "4", "5", "6"})
+        ps.push_back(vote_problem("add", 1, std::string("1+") + gold + "=?", gold));
+    ScriptedModel fake;
+    for (const char* t : {"1", "2", "3", "2"}) fake.queue.push_back(vote_script(t));
+    fake.queue.push_back("no answer line here\n");
+    for (const char* t : {"3", "4", "4", "5", "6", "7", "8"}) fake.queue.push_back(vote_script(t));
+    fake.prompt_len = 1 + int(ps[0].prompt().size());
+    VoteOpts vote;
+    vote.tries = 2;
+    vote.temperature = 1.0;
+    const EvalResult r = eval_reasoning(fake, ps, Tokenizer{}, 8, 40, 8, true, vote);
+    const LevelScore all = r.overall();
+    EXPECT(all.total == 6 && all.first_correct == 3 && all.vote_correct == 4 && all.any_correct == 5 &&
+               all.distinct_answers == 10 && r.correct == 4,
+           "batch of problems: first %d vote %d any %d distinct %d, hand-computed 3, 4, 5, 10", all.first_correct,
+           all.vote_correct, all.any_correct, all.distinct_answers);
+    const std::vector<std::string> first_tries = {vote_script("1"), vote_script("3"), "no answer line here\n",
+                                                  vote_script("4"), vote_script("5"), vote_script("7")};
+    for (size_t i = 0; i < ps.size() && i < r.completions.size(); ++i)
+        EXPECT(r.completions[i].starts_with(first_tries[i]), "problem %zu's first try is '%s', expected '%s'", i,
+               r.completions[i].c_str(), first_tries[i].c_str());
+}
+
+// One try, some answers right: the score must equal a count made here with
+// the plain check on the completions, and the hand count of 3.
+//   gold 7   : "#### 7"     right
+//   gold 8   : "#### 9"     wrong
+//   gold 3   : no answer    wrong
+//   gold 1080: "#### 1,080" right (digit-grouping commas are dropped)
+//   gold ""  : "#### "      right
+inline void test_vote_single_try_counts() {
+    std::vector<Problem> ps = {vote_problem("add", 1, "3+4=?", "7"), vote_problem("add", 1, "4+4=?", "8"),
+                               vote_problem("add", 1, "1+2=?", "3"), vote_problem("mul", 2, "36*30", "1080"),
+                               vote_problem("mul", 2, "0*0=?", "")};
+    ScriptedModel fake;
+    fake.queue = {vote_script("7"), vote_script("9"), "no answer line here\n", vote_script("1,080"),
+                  vote_script("")};
+    fake.prompt_len = 1 + int(ps[0].prompt().size());
+    const EvalResult r = eval_reasoning(fake, ps, Tokenizer{}, 4, 40, 8, true);  // greedy, two batches
+    int reference = 0;
+    for (size_t i = 0; i < ps.size() && i < r.completions.size(); ++i)
+        reference += completion_done(r.completions[i]) && answer_matches(r.completions[i], ps[i].answer);
+    const LevelScore all = r.overall();
+    EXPECT(r.correct == 3 && reference == 3, "one try scored %d, the plain check %d, the hand count 3", r.correct,
+           reference);
+    EXPECT(all.first_correct == 3 && all.vote_correct == 3 && all.any_correct == 3,
+           "with one try, first %d, vote %d and any %d must all be 3", all.first_correct, all.vote_correct,
+           all.any_correct);
+    EXPECT(r.by_task.at({"mul", 2}).vote_correct == 2 && r.by_task.at({"add", 1}).vote_correct == 1,
+           "one try scored the wrong levels");
+}
+
+// At temperature 1 the tries really differ: each answer is a sampled digit,
+// so 8 tries give more than one distinct answer per problem on average, and
+// two seeds give different answers.
+inline void test_vote_sampled_answers() {
+    std::vector<Problem> ps;
+    for (const char* q : {"2+3=?", "1+4=?", "0+5=?", "5+0=?"}) ps.push_back(vote_problem("add", 1, q, "5"));
+    auto run = [&](uint64_t seed) {
+        ScriptedModel fake;
+        fake.queue.assign(ps.size() * 8, "work\n#### ?\n");
+        fake.prompt_len = 1 + int(ps[0].prompt().size());
+        VoteOpts vote;
+        vote.tries = 8;
+        vote.temperature = 1.0;
+        vote.seed = seed;
+        return eval_reasoning(fake, ps, Tokenizer{}, 8, 40, 8, true, vote);
+    };
+    const EvalResult one = run(1), two = run(2);
+    const LevelScore all = one.overall();
+    EXPECT(all.distinct_answers > all.total, "mean distinct answers %.2f at temperature 1, expected above 1",
+           double(all.distinct_answers) / std::max(1, all.total));
+    EXPECT(one.completions != two.completions, "seeds 1 and 2 sampled the same first answers");
+    // Greedy picks the first of the tied digits, every time.
+    ScriptedModel greedy;
+    greedy.queue.assign(ps.size(), "work\n#### ?\n");
+    greedy.prompt_len = 1 + int(ps[0].prompt().size());
+    const EvalResult g = eval_reasoning(greedy, ps, Tokenizer{}, 8, 40, 8, true);
+    for (const auto& text : g.completions) EXPECT(text == "work\n#### 0\n", "greedy sampled '%s'", text.c_str());
+}
+
 inline void test_vote_single_try_matches_greedy() {
     Config cfg;
     cfg.vocab = 256;
@@ -330,6 +431,9 @@ inline void test_vote() {
     test_score_tries();
     test_vote_report();
     test_vote_empty_answer();
+    test_vote_batch_of_problems();
+    test_vote_single_try_counts();
+    test_vote_sampled_answers();
     test_vote_single_try_matches_greedy();
     test_vote_seeding();
 }

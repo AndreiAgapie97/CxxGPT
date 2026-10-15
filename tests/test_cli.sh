@@ -262,7 +262,7 @@ status=0
 grep -q 'max-new must be positive' "$TEST_DIR/bad-cap.log"
 
 # The vote: --tries N with --temp samples each problem N times and reports
-# single-try, vote and any-try accuracies; --effort is a shorthand for N.
+# first-sampled-try, vote and any-try accuracies; --effort is a shorthand for N.
 # '--tries 2' without --temp, non-positive tries and an unknown effort all
 # fail with a checked error.
 for options in '--tries 2' '--tries 0 --temp 1.0' '--tries 1junk --temp 1.0' '--effort huge'; do
@@ -278,11 +278,22 @@ status=0
     --tries 4 --temp 1.0 --batch 2 --threads 2 > "$TEST_DIR/tries-batch.log" 2>&1 || status=$?
 [[ "$status" == 1 ]]
 grep -q -- '--tries 4 is more than --batch 2' "$TEST_DIR/tries-batch.log"
-"$CXXGPT" eval-reasoning --ckpt "$TEST_DIR/audit.ckpt" --test "$TEST_DIR/audit.txt" \
-    --tries 4 --temp 0.9 --seed 3 --max-new 6 --threads 2 > "$TEST_DIR/vote-a.log"
-"$CXXGPT" eval-reasoning --ckpt "$TEST_DIR/audit.ckpt" --test "$TEST_DIR/audit.txt" \
-    --tries 4 --temp 0.9 --seed 3 --max-new 6 --threads 2 > "$TEST_DIR/vote-b.log"
+# The random model never finishes an answer, but --show-failures prints the
+# sampled text, so the same seed must repeat it and another seed must not
+# (the timing line left out).
+vote_run() {  # vote_run SEED OUT: the report at that seed, without its timing line
+    "$CXXGPT" eval-reasoning --ckpt "$TEST_DIR/audit.ckpt" --test "$TEST_DIR/audit.txt" --show-failures \
+        --tries 4 --temp 0.9 --seed "$1" --max-new 6 --threads 2 > "$TEST_DIR/vote-full.log"
+    grep -a -v '^([0-9.]* s)$' "$TEST_DIR/vote-full.log" > "$2"  # -a: the sampled bytes may look binary
+}
+vote_run 3 "$TEST_DIR/vote-a.log"
+vote_run 3 "$TEST_DIR/vote-b.log"
+vote_run 4 "$TEST_DIR/vote-c.log"
 cmp "$TEST_DIR/vote-a.log" "$TEST_DIR/vote-b.log"
+grep -a -q 'got:' "$TEST_DIR/vote-a.log"
+status=0
+cmp -s "$TEST_DIR/vote-a.log" "$TEST_DIR/vote-c.log" || status=$?
+[[ "$status" == 1 ]]
 grep -q '^effort: tries 4, temperature 0.9, seed 3$' "$TEST_DIR/vote-a.log"
 grep -q 'first sampled try / vote maj@4 / any try pass@4 / mean distinct answers' "$TEST_DIR/vote-a.log"
 # Every headline names its effort.
@@ -300,6 +311,18 @@ grep -q '^effort: tries 32, temperature 0.5, seed 1$' "$TEST_DIR/vote-effort-hig
     --effort low --threads 2 > "$TEST_DIR/vote-effort-low.log"
 require_absent -q 'effort:' "$TEST_DIR/vote-effort-low.log"
 grep -q '^overall .* (greedy)$' "$TEST_DIR/vote-effort-low.log"
+# A model that has memorized the one problem finishes its tries, so the
+# vote has answers to count. Each document ends in "\n." because text2tok
+# trims documents, and the answer line must end with its newline.
+for i in $(seq 64); do printf 'Q: 1+1\nA: 1+1=2\n#### 2\n.<|endoftext|>'; done > "$TEST_DIR/memo.txt"
+"$CXXGPT" text2tok --in "$TEST_DIR/memo.txt" --out "$TEST_DIR/memo.tok" --doc-sep '<|endoftext|>' \
+    > "$TEST_DIR/memo-tok.log"
+"$CXXGPT" train --data "$TEST_DIR/memo.tok" --val "$TEST_DIR/memo.tok" --seq 32 --dim 32 --heads 2 --ffn 64 \
+    --layers 2 --batch 8 --steps 400 --lr 3e-3 --warmup 0 --eval-every 400 --eval-batches 1 --save-every 0 \
+    --threads 2 --out "$TEST_DIR/memo.ckpt" > "$TEST_DIR/memo-train.log"
+"$CXXGPT" eval-reasoning --ckpt "$TEST_DIR/memo.ckpt" --test "$TEST_DIR/audit.txt" \
+    --tries 4 --temp 0.5 --seed 3 --max-new 20 --threads 2 > "$TEST_DIR/vote-memo.log"
+grep -q '^overall 100.0% (1 / 1) (maj@4, temp 0.5, seed 3)$' "$TEST_DIR/vote-memo.log"
 printf 'CLI: eval-reasoning tries/vote options passed\n'
 
 # Vocab compatibility must fail before constructing/training the model.
