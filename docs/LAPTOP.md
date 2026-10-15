@@ -136,7 +136,7 @@ and the MetaMath and OpenMath2 rows made from them, from the training files.
   training files (a few minutes; it streams the files):
   ```sh
   ./cxxgpt leak-check --questions data/gsm8k/dev.txt \
-    --train data/gsm8k/train.txt,data/metamath/train.txt,data/openmath2/train.txt
+    --train data/gsm8k/train.txt,data/old/metamath/train.txt,data/old/openmath2/train.txt
   ```
   For each file it prints how many of the 500 dev questions share a run of
   13 words with it, and up to three of them. Expect 0 or close to 0 for
@@ -243,14 +243,15 @@ the GSM8K split in `data/math-pilot-20261015/`):
 ```sh
 scripts/prepare_clean.sh
 ```
-It prints the `MIX=` line and the leak check (all zero). The new model
+It prints the leak check (all zero); `night.sh` trains on this mix by
+default. The new model
 trains as one run over several nights: `HOURS=30` plans the learning-rate
 schedule for four nights, `--time-limit 450` stops each night after 7.5
 hours with a checkpoint, and the same command the next evening resumes it
 (`night.sh` resumes `runs/$RUN.ckpt` when it exists), schedule, optimizer
 and data order included. A new run name, no `INIT`, the dev set:
 ```sh
-RUN=clean1 DEV=1 HOURS=30 MIX="..." TOKS=25900 scripts/night.sh --sampler qa --time-limit 450
+RUN=clean1 DEV=1 HOURS=30 TOKS=25900 scripts/night.sh --sampler qa --time-limit 450
 ```
 Its exams mid-run come before the learning rate has come down, so they
 read lower than a one-night run's last exam would at the same step.

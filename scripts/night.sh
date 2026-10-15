@@ -22,7 +22,11 @@
 #         TERNARY=all turns attention ternary too. Full-precision nights
 #         first, ternary ones at the end.
 #   MIX: the training files, comma-separated, "*N" repeats one N times;
-#        by default web text, stories, OpenMath, MetaMath and GSM8K train x4.
+#        by default the audited mix scripts/prepare_clean.sh writes into
+#        $CLEAN (data/clean-20261015): textbooks x2, wiki, DOAB and arXiv
+#        books and papers, word problems, GSM8K train x8. The mix of nights
+#        1 and 2 (web text, stories, OpenMath, MetaMath; issue #46) is in
+#        data/old/ and runs only when named in MIX.
 #   DEV=1: use the held-out GSM8K dev files for both validation and exams.
 # Validation defaults to the GSM8K test set, which training never sees: the loss
 # on its worked solutions every 500 steps, and exact answers every 500 too
@@ -55,8 +59,12 @@ case "$(uname -s)" in
 esac
 GPU=${GPU---gpu}
 if [ -z "${MIX:-}" ]; then
-  web=$(find "$DATA/fineweb-edu" -name '[0-9][0-9][0-9].tok' | sort | paste -sd,)
-  MIX="$web,$DATA/tinystories/train.tok,$DATA/openmath2/train.tok,$DATA/metamath/train.tok,$DATA/gsm8k/train.tok*4"
+  CLEAN=${CLEAN:-$DATA/clean-20261015}
+  MIX="$CLEAN/textbooks.tok*2,$CLEAN/wiki.tok,$CLEAN/doab-part.tok,$CLEAN/arxiv-part.tok,$CLEAN/word-train.tok,$CLEAN/gsm8k-train.tok*8"
+  IFS=, read -ra files <<< "$MIX"
+  for f in "${files[@]}"; do
+    [ -f "${f%%\**}" ] || { echo "no ${f%%\**}: run scripts/prepare_clean.sh first"; exit 1; }
+  done
 fi
 
 per_step=$((SEQ * BATCH * ACCUM))

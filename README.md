@@ -270,7 +270,8 @@ this command does not change the night data mix.
 ### Real data and GPU training
 
 ```sh
-scripts/prepare_data.sh              # download, train our tokenizer, write token files
+scripts/prepare_clean.sh             # the audited mix (below), night.sh's default
+scripts/prepare_data.sh              # the mix of nights 1-2: download, tokenizer, token files
 scripts/probe.sh                     # GPU speed and memory per model size, and the
                                      #   night.sh command for each
 TOKS=... MODEL=... scripts/night.sh  # one night of training, checked on GSM8K
@@ -293,7 +294,7 @@ before the dev set existed needs one more `scripts/prepare_data.sh`, then
 one exact-text check that no dev question is left in training:
 ```sh
 ./cxxgpt leak-check --questions data/gsm8k/dev.txt \
-  --train data/gsm8k/train.txt,data/metamath/train.txt,data/openmath2/train.txt
+  --train data/gsm8k/train.txt,data/old/metamath/train.txt,data/old/openmath2/train.txt
 ```
 [docs/LAPTOP.md](docs/LAPTOP.md) ("The dev set") gives the counts to
 expect.
@@ -323,12 +324,15 @@ academic books and papers are a little over half of the mix instead of
 nearly three quarters. No GSM8K test, GSM8K
 dev or SVAMP dev question shares a 13-word run with any of it. The 500
 held-out GSM8K problems are the dev set (`DEV=1`): the new model has never
-seen them.
+seen them. `night.sh` trains on this mix unless `MIX=` names others. The
+old sets are kept in `data/old/` (moved there, not deleted): for comparing
+old and new data, and for questions about nights 1 and 2. `prepare_data.sh`
+writes them to `data/` again if run.
 
 **Answers with their questions.** Training windows start at random
 offsets, so a window often begins in the middle of a math problem: the
 answer is trained while its question is out of view. `./cxxgpt qa-context
---data data/gsm8k/train.tok,data/metamath/train.tok,data/openmath2/train.tok`
+--data data/gsm8k/train.tok,data/old/metamath/train.tok,data/old/openmath2/train.tok`
 counts it exactly. `train --sampler qa` (`scripts/night.sh --sampler qa`)
 moves such a window back to the start of its problem, when the whole
 problem fits in a window. At `--seq 512`, the share of answer tokens that

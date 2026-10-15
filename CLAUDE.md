@@ -165,8 +165,9 @@ Reasoning is the first capability we go after.
   `data/public-20261015/` and never changes it), 1M `gen-word` problems,
   and GSM8K train without the 500 dev problems and 7 near-copies of test or
   dev questions. 2.33B tokens; no test, dev or SVAMP dev question shares a
-  13-word run with it. MetaMath, OpenMath2, FineWeb-Edu and TinyStories are
-  out. The tokenizer stays `data/tok.bpe`.
+  13-word run with it; `night.sh`'s default mix. MetaMath, OpenMath2,
+  FineWeb-Edu and TinyStories are out, kept in `data/old/` for comparisons.
+  The tokenizer stays `data/tok.bpe`.
 - `src/cxxgpt.cpp`: the CLI (train, sample, eval, data prep, benchmarks).
 - `scripts/get_data.py`: downloads public datasets (GSM8K, TinyStories,
   FineWeb-Edu, OpenMathInstruct-2, MetaMathQA) into `data/`, as text with
