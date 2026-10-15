@@ -590,7 +590,8 @@ struct Backend {
     virtual double step(double lr, double max_norm) = 0;
     // Updates the router biases from the expert loads since the last call;
     // returns the busiest expert's load ratio (see Model::max_load_ratio).
-    virtual double balance(double rate, ExpertLoadLog* interval = nullptr) = 0;
+    // A non-null interval also collects those loads for --load-log.
+    virtual double balance(double rate, ExpertLoadLog* interval) = 0;
     // Brings the weights and optimizer state into the host Model and AdamW,
     // for checkpoints and evaluations.
     virtual void sync() = 0;
@@ -612,7 +613,7 @@ struct CpuBackend : Backend {
         if (std::isfinite(norm)) opt.update(model, lr);
         return norm;
     }
-    double balance(double rate, ExpertLoadLog* interval = nullptr) override {
+    double balance(double rate, ExpertLoadLog* interval) override {
         return balance_with_load_log(model, rate, interval);
     }
     void sync() override {}
@@ -648,7 +649,7 @@ struct GpuBackend : Backend {
             for (const auto& [name, seconds] : gpu.take_profile()) g_profiler.add(name.c_str(), seconds);
         return norm;
     }
-    double balance(double rate, ExpertLoadLog* interval = nullptr) override {
+    double balance(double rate, ExpertLoadLog* interval) override {
         const auto loads = gpu.take_expert_load();
         for (size_t l = 0; l < loads.size(); ++l)
             for (size_t e = 0; e < loads[l].size(); ++e) model.expert_load[l][e] += loads[l][e];
@@ -906,7 +907,7 @@ int cmd_train(Args& a) {
         // of them stops training rather than spending the night on NaNs.
         if (!std::isfinite(gnorm) || !std::isfinite(loss)) {
             std::printf("step %ld: loss %g, gradient norm %g; update skipped\n", step + 1, loss, gnorm);
-            be.balance(0);  // discard this attempt's loads without changing biases
+            be.balance(0, nullptr);  // discard this attempt's loads without changing biases
             if (++bad_steps == kMaxBadSteps) {
                 std::printf("stopping: %d diverged steps in a row\n", kMaxBadSteps);
                 diverged = true;
