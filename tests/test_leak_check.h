@@ -50,7 +50,8 @@ inline void test_leak_check() {
             EXPECT(hits[i] == leak_reference(questions[i], text), "13-word search differs from reference");
     }
     // The reference changed with the escapes too, so check the cases directly.
-    auto first_hit = [&](const std::string& text) {
+    // "-> bool": vector<bool>'s [] returns a proxy into the temporary vector.
+    auto first_hit = [&](const std::string& text) -> bool {
         std::istringstream in(text);
         return index.scan(in)[0];
     };
