@@ -1303,7 +1303,15 @@ int cmd_bench_infer(Args& a) {
 }  // namespace
 
 int main(int argc, char** argv) {
-    std::setvbuf(stdout, nullptr, _IOLBF, 0);  // startup/eval/save lines reach tee immediately
+    // Startup/eval/save lines reach tee immediately. Microsoft's C library
+    // has no line buffering (_IOLBF means full buffering there, and a size
+    // of 0 is an invalid argument that aborts the program), so on Windows
+    // stdout is unbuffered instead.
+#ifdef _WIN32
+    std::setvbuf(stdout, nullptr, _IONBF, 0);
+#else
+    std::setvbuf(stdout, nullptr, _IOLBF, 0);
+#endif
     struct Command {
         const char* name;
         int (*run)(Args&);
