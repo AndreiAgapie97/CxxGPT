@@ -14,9 +14,13 @@ DATA=${DATA:-data}
 VOCAB=${VOCAB:-16384}
 FINEWEB_FILES=${FINEWEB_FILES:-1}
 BPE_SAMPLE_MB=${BPE_SAMPLE_MB:-200}
-PY=${PY:-.venv/bin/python}
-CX=${CX:-./cxxgpt}
-[ -x "$CX" ] || { echo "build it first: make"; exit 1; }
+# On native Windows (Git Bash): the CMake build's program, and a venv's
+# Python in Scripts\ (python -m venv .venv; .venv/Scripts/pip install pyarrow).
+case "$(uname -s)" in
+  MINGW* | MSYS*) PY=${PY:-.venv/Scripts/python.exe} CX=${CX:-build/cxxgpt.exe} build="cmake (README)" ;;
+  *) PY=${PY:-.venv/bin/python} CX=${CX:-./cxxgpt} build="make" ;;
+esac
+[ -x "$CX" ] || { echo "build it first: $build"; exit 1; }
 
 echo "== download (resumes where it stopped)"
 "$PY" scripts/get_data.py --out "$DATA" gsm8k tinystories metamath openmath2

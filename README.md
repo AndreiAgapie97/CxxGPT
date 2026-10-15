@@ -78,6 +78,12 @@ cmake -S . -B build -G Ninja -DCMAKE_CXX_COMPILER=clang-cl -DCMAKE_BUILD_TYPE=Re
 CI does not build the CUDA half on Windows (its runner has no CUDA); the
 Linux CUDA jobs compile the same `gpu.cu`.
 
+`scripts\build_windows.cmd` does all of this from any terminal: it finds
+Visual Studio and clang-cl, builds the laptop's way (with CUDA when `nvcc`
+is installed) and runs the kernel, engine and GPU tests. The training
+scripts (`night.sh`, `probe.sh`, `prepare_data.sh`, `report.sh`) run in Git
+Bash and use `build\`'s programs there ([docs/LAPTOP.md](docs/LAPTOP.md)).
+
 Windows CI builds the same targets another way: it finds Visual Studio with
 `vswhere`, configures with that Visual Studio generator and its clang-cl
 toolset (`-T ClangCL -A x64`), builds with `--config Release` and runs

@@ -1,71 +1,68 @@
 # Training on the laptop
 
 The laptop (RTX 4070 Laptop GPU with 8 GB, 16 threads, 32 GB RAM) trains
-overnight under WSL2, the Linux that runs inside Windows. Setting it up
-takes about an hour, once. After step 8, Claude Code runs on the laptop
-and can do everything else from there.
+overnight natively on Windows. (Until 2026-10-15 it trained under WSL2,
+the Linux inside Windows; native Windows trains the same model to the same
+loss, 7% faster and without WSL's slow stretches, and leaves WSL's memory
+to Windows: `review/baselines/` has both curves.) The scripts run in Git
+Bash, the shell that comes with Git for Windows. Setting it up takes
+about an hour, once.
 
 ## One-time setup
 
-### On Windows
-
 1. **Update the NVIDIA driver**, with the NVIDIA app or from nvidia.com.
-   WSL uses the Windows driver; nothing GPU-related gets installed inside
-   Linux except the compiler. Then, in the NVIDIA Control Panel (Manage 3D
-   settings), set **CUDA - Sysmem Fallback Policy** to **Prefer No Sysmem
-   Fallback**. Otherwise a model too big for the GPU's 8 GB does not fail:
-   the driver spills into system RAM and training runs several times
-   slower (d768-moe at batch 8: 2,900 tokens/s, against 17,800 for
-   d768-dense, which does the same work per token). On the owner's laptop
-   the setting did not reach programs running under WSL, so `probe.sh`
-   also halves the batch of any size that fills more than 90% of the GPU;
-   use the batch it prints.
-2. **Give Linux enough memory.** By default WSL gets half the RAM. Create
-   the file `C:\Users\<you>\.wslconfig` containing:
-   ```ini
-   [wsl2]
-   memory=24GB
-   processors=16
-   swap=8GB
-   ```
-3. **Install Ubuntu.** Open PowerShell as administrator and run
-   `wsl --install -d Ubuntu-24.04`. Reboot if asked, then pick a Linux user
-   name and password when Ubuntu first opens.
-4. **Keep the laptop awake at night.** Plugged in: sleep "Never", and
+   Then, in the NVIDIA Control Panel (Manage 3D settings), set **CUDA -
+   Sysmem Fallback Policy** to **Prefer No Sysmem Fallback**. Otherwise a
+   model too big for the GPU's 8 GB does not fail: the driver spills into
+   system RAM and training runs several times slower (d768-moe at batch 8:
+   2,900 tokens/s, against 17,800 for d768-dense, which does the same work
+   per token). `probe.sh` also halves the batch of any size that fills more
+   than 90% of the GPU; use the batch it prints.
+2. **Install the tools** (each once; `winget` is Windows' own installer, in
+   PowerShell):
+   - Git for Windows, which brings Git Bash: `winget install Git.Git`;
+   - Visual Studio Build Tools 2022 with the **Desktop development with
+     C++** workload (MSVC, the Windows SDK, CMake and Ninja), from
+     visualstudio.microsoft.com;
+   - LLVM, for clang-cl: `winget install LLVM.LLVM` (or the Build Tools'
+     "C++ Clang tools" component; Visual Studio's installer refuses to
+     change the Build Tools while any build is running);
+   - the CUDA Toolkit (13.x), from developer.nvidia.com;
+   - Python 3, only for downloading data: `winget install Python.Python.3.12`.
+3. **Keep the laptop awake at night.** Plugged in: sleep "Never", and
    "When I close the lid: Do nothing" (Control Panel, Power Options). Put
-   it on a hard surface so the fans can breathe.
-
-### In Ubuntu
-
-5. Check that the GPU is visible: `nvidia-smi` should list the RTX 4070.
-6. Get the code, in the Linux home folder (much faster than `/mnt/c`):
-   ```sh
-   git clone -b main https://github.com/AndreiAgapie97/CxxGPT.git ~/CxxGPT
-   cd ~/CxxGPT
+   it on a hard surface so the fans can breathe. In Windows Update, set
+   the active hours to cover the night (or pause updates), so it does not
+   restart in the middle of a run.
+4. Check that the GPU is visible: `nvidia-smi` should list the RTX 4070.
+5. Get the code, then build everything and run all tests, including the
+   GPU against the CPU (any terminal; in Git Bash:
+   `scripts/build_windows.cmd`):
+   ```bat
+   git clone -b main https://github.com/AndreiAgapie97/CxxGPT.git
+   cd CxxGPT
+   scripts\build_windows.cmd
    ```
-7. Run the setup script. It installs the compilers, the CUDA compiler and
-   cuBLAS, and Python with pyarrow (for data files). Then it builds
-   everything and runs all tests, including the GPU against the CPU:
-   ```sh
-   scripts/setup_wsl.sh
-   ```
-   It should end with `all passed` and `All set`. If anything fails, keep
+   The programs land in `build\` (`cxxgpt.exe`, `cxxgpt-gpu.exe`,
+   `test_gpu.exe`, ...). It should end with `All set`, after the two known
+   `test_gpu` failures (GPU options, below). If anything else fails, keep
    the output; Claude can work from it.
-8. Install Claude Code and start it in the project:
-   ```sh
-   curl -fsSL https://claude.ai/install.sh | bash
-   cd ~/CxxGPT && claude
-   ```
-   To follow and steer that session from the Claude app (phone or
-   browser), start it with `claude remote-control` instead of `claude`.
-   To let it push to GitHub from the laptop, also run
-   `sudo apt install gh && gh auth login` once.
+6. For the downloads (`prepare_data.sh`), a Python environment with
+   pyarrow, in Git Bash: `python -m venv .venv && .venv/Scripts/pip install pyarrow`.
+7. Install Claude Code and start it in the project
+   (code.claude.com has the Windows installer), `claude` in the CxxGPT
+   folder. To follow and steer that session from the Claude app (phone or
+   browser), start it with `claude remote-control` instead.
+
+The commands below are for Git Bash, in the CxxGPT folder; on Windows,
+`./cxxgpt` is `build/cxxgpt.exe` and `./cxxgpt-gpu` is
+`build/cxxgpt-gpu.exe` (the scripts pick these by themselves).
 
 ## Running overnight
 
-- Start long runs inside `tmux`, so they survive closing the terminal:
-  `tmux new -s train`, start the run, then press Ctrl-b and then d to
-  detach. `tmux attach -t train` brings it back.
+- Start the night in a Git Bash window and leave it open: closing the
+  window stops the run (run the same command again to resume from the
+  last checkpoint, saved every 1000 steps).
 - `--time-limit MINUTES` stops training and saves a checkpoint in time for
   the morning. Ctrl-C also saves before stopping. `--resume` continues
   from the checkpoint.
@@ -79,7 +76,7 @@ and can do everything else from there.
   0x4: power cap; 0x8: hardware slowdown; 0x20/0x40: too hot) and the last logged step. When a stretch of the
   night runs slow, those rows say whether the GPU slowed itself down (clock
   and power drop, a thermal reason) or sat idle waiting (load drops, clock
-  stays up: Windows, WSL or the CPU side).
+  stays up: another program busy on the CPU, such as a build, or Windows).
 
 ## The plan
 
@@ -156,7 +153,6 @@ and the MetaMath and OpenMath2 rows made from them, from the training files.
 ### Night 1
 
 ```sh
-tmux new -s train
 TOKS=... BATCH=... ACCUM=... MODEL="..." scripts/night.sh   # the line the probe printed
 ```
 
@@ -230,7 +226,7 @@ day.
 
 ### GPU options
 
-Two GPU speed options; `./test_gpu`, which `setup_wsl.sh` runs, checks
+Two GPU speed options; `test_gpu`, which `build_windows.cmd` runs, checks
 both against the CPU engine:
 - fused attention, on by default since 2026-10-14 (`--no-fused-attn`
   turns it off; `--fused-attn` insists on it). Its kernels never store the
@@ -254,8 +250,8 @@ both against the CPU engine:
   TF32 and the others in bf16 (`GPU="--gpu --matmul tf32"` for TF32).
 
 Two `test_gpu` checks have failed since the first run on the laptop's
-RTX 4070 (2026-10-14), so `test_gpu` ends without `all passed` and
-`setup_wsl.sh` without `All set` until they are fixed:
+RTX 4070 (2026-10-14), under WSL and natively alike, so `test_gpu` ends
+without `all passed` until they are fixed:
 - `heads of 64` (70 tokens, fused fp32): 4.1e-4 against 1e-4. The cuBLAS
   attention misses that bound too there (1.8e-4); at 24, 128, 256 and 512
   tokens both are within it and equal (6.0e-5 fused, 6.9e-5 cuBLAS at
@@ -277,7 +273,7 @@ Where a training step spends its GPU time (if it runs out of memory, use
 `--batch 4 --accum 32`):
 ```sh
 ./cxxgpt-gpu train --gpu --profile --data data/reason.train.tok --vocab 16384 --seq 512 \
-  --batch 8 --accum 16 --steps 10 --warmup 5 --eval-every 0 --save-every 0 --out /tmp/profile.ckpt \
+  --batch 8 --accum 16 --steps 10 --warmup 5 --eval-every 0 --save-every 0 --out build/profile.ckpt \
   --muon --dim 768 --layers 12 --heads 12 --experts 8 --topk 2 2>&1 | tail -25
 ```
 (`data/reason.train.tok` is the file the probe made.)

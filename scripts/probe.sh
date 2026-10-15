@@ -18,9 +18,13 @@ ACCUM=${ACCUM:-16}
 OPT=${OPT---muon}
 VOCAB=${VOCAB:-16384}
 NIGHT_HOURS=${NIGHT_HOURS:-7.5}
-CX=${CX:-./cxxgpt-gpu}
+# On native Windows (Git Bash) the programs are the CMake build's (README).
+case "$(uname -s)" in
+  MINGW* | MSYS*) CX=${CX:-build/cxxgpt-gpu.exe} build="cmake with -DCXXGPT_CUDA=ON (README)" ;;
+  *) CX=${CX:-./cxxgpt-gpu} build="make gpu" ;;
+esac
 GPU=${GPU---gpu}
-[ -x "$CX" ] || { echo "build it first: make gpu"; exit 1; }
+[ -x "$CX" ] || { echo "build it first: $build"; exit 1; }
 [ -f data/reason.train.tok ] || "$CX" gen-reasoning --out data/reason > /dev/null
 # The GPU's memory in MB (under WSL, nvidia-smi comes from Windows).
 if [ -d /usr/lib/wsl/lib ]; then export PATH=$PATH:/usr/lib/wsl/lib; fi

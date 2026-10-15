@@ -47,7 +47,11 @@ LR=${LR:-1.5e-3}
 SEQ=${SEQ:-512}
 BATCH=${BATCH:-8}
 ACCUM=${ACCUM:-16}
-CX=${CX:-./cxxgpt-gpu}
+# On native Windows (Git Bash) the programs are the CMake build's (README).
+case "$(uname -s)" in
+  MINGW* | MSYS*) CX=${CX:-build/cxxgpt-gpu.exe} ;;
+  *) CX=${CX:-./cxxgpt-gpu} ;;
+esac
 GPU=${GPU---gpu}
 if [ -z "${MIX:-}" ]; then
   web=$(find "$DATA/fineweb-edu" -name '[0-9][0-9][0-9].tok' | sort | paste -sd,)
@@ -83,7 +87,8 @@ echo "$RUN: $steps steps of $per_step tokens; stops after $minutes minutes at th
 # Every 10 s, the GPU's clock, temperature, power, load, memory and slowdown
 # reasons, with the last logged step, into runs/$RUN.gpu.csv: when a stretch
 # of the night runs slow, this says what the GPU was doing then.
-# (Under WSL, nvidia-smi lives in /usr/lib/wsl/lib, not always on the PATH.)
+# (Windows has it on the PATH; under WSL it lives in /usr/lib/wsl/lib, not
+# always on the PATH.)
 smi=$(command -v nvidia-smi || echo /usr/lib/wsl/lib/nvidia-smi)
 if [ -x "$smi" ]; then
   (
