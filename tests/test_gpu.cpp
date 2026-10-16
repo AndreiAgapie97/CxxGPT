@@ -1,26 +1,32 @@
-// test_gpu.cpp — the CUDA trainer (src/gpu.cu) against the CPU engine.
-// Needs an NVIDIA GPU: make gpu-test.
+// test_gpu.cpp — the CUDA trainer (src/gpu.cu) against the model in double
+// precision on the GPU (src/gpu_ref.cu). Needs an NVIDIA GPU: make gpu-test.
 //
-// For each architecture, both sides start from the same weights and train
-// a few steps on the same batches; the losses, every parameter tensor's
-// gradient, the gradient norm and the updated weights must agree. With
-// exact fp32 matmuls the only differences are summation order; ternary
-// models also see rare int8 rounding flips, so their tolerance is looser.
-// Muon runs the same comparison on the dense and MoE models. Some runs clip
-// the gradient (to half its norm), as training with --clip does. Attention
-// runs on the fused kernels (attention.cuh), except in one run that checks
-// the cuBLAS path (--no-fused-attn). Two runs check --fp-attn and
-// --nope-every. One run multiplies in bf16, against looser tolerances, and
-// two in TF32, where attention runs on cuBLAS and on the tensor-core fused
-// kernels (attention_tc.cuh). Before all that, both sets of fused kernels
-// are checked alone against a double-precision reference. Then decoding:
-// the GPU's KV-cache decoder against the CPU's, and eval_reasoning() on it
-// (eval-reasoning --gpu) against the CPU, greedy, with a vote and with the
-// calculator. Unlikelihood training (#34) runs the same comparison with
+// First the reference itself against the CPU engine in double, while that
+// engine exists: the same losses, negatives and expert loads, finite
+// differences equal to the CPU's analytic gradients, and the same optimizer
+// steps, attention and ternary codes.
+//
+// For each architecture, the GPU trains a few steps; at each step the
+// reference takes the GPU's weights and must give the same loss, the GPU's
+// gradient must match the reference's finite differences (along random
+// directions per tensor, directional_check), and the optimizer's step and
+// state must match the reference's from the same gradient. With exact fp32
+// matmuls the only differences are summation order; ternary models also see
+// rare int8 rounding flips, so their tolerance is looser. Muon runs the same
+// comparison on the dense and MoE models. Some runs clip the gradient, as
+// training with --clip does. Attention runs on the fused kernels
+// (attention.cuh), except in one run that checks the cuBLAS path
+// (--no-fused-attn). Two runs check --fp-attn and --nope-every. Some runs
+// multiply in bf16 or TF32 (cuBLAS attention and the tensor-core fused
+// kernels, attention_tc.cuh), against looser tolerances. Before all that,
+// both sets of fused kernels are checked alone against attention in double.
+// Then decoding: the GPU's KV-cache decoder against the reference's whole
+// forward on each prefix (ReferenceDecoder), and eval_reasoning() on it
+// (eval-reasoning --gpu), greedy, with a vote, the calculator and the
+// no-repeat block. Unlikelihood training (#34) runs the same comparison with
 // the term on, plus a saturated row and a term that never fires. The GPU's
-// ternary codes must be the CPU's, code for code (#40). A last
-// check trains on the GPU alone, with TF32 and with bf16, until a toy
-// pattern is learned.
+// ternary codes must be the CPU's, code for code (#40). A last check trains
+// on the GPU alone, with TF32 and with bf16, until a toy pattern is learned.
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
@@ -129,6 +135,54 @@ std::string first_divergence(const std::vector<std::vector<int>>& prompts, const
     return "";
 }
 
+// The gradient a reference measures along random directions, against a
+// gradient g: for each tensor, the reference's loss changes along `dirs`
+// random directions within it (central differences of the Quant::frozen
+// loss, h relative to the tensor's size), against g · v. Returns the worst
+// tensor's sqrt(Σ (fd - g·v)²) / sqrt(Σ (g·v)²): the relative error of g,
+// as rel_l2 measures it, estimated from the directions.
+struct DirectionalCheck {
+    double worst = 0;
+    std::string tensor;
+};
+DirectionalCheck directional_check(GpuReference& ref, const std::vector<ParamInfo>& infos,
+                                   const std::vector<double>& w0, const std::vector<double>& g, const int* tok,
+                                   const int* tgt, int B, int Tn, double ul_alpha, int ul_ngram, uint64_t seed,
+                                   int dirs = 3) {
+    Rng rng(seed);
+    ref.set_params(w0);
+    ref.forward(tok, tgt, B, Tn, ul_alpha, ul_ngram, GpuReference::Quant::record);
+    DirectionalCheck out;
+    std::vector<double> w = w0;
+    for (const auto& info : infos) {
+        double rms = 0;
+        for (size_t i = 0; i < info.size; ++i) rms += w0[info.offset + i] * w0[info.offset + i];
+        rms = std::sqrt(rms / double(info.size));
+        // 1e-5 left rounding noise of 1e-5 on the routers' small gradients.
+        const double h = 1e-4 * std::max(rms, 1e-2);
+        double err = 0, size = 0;
+        for (int d = 0; d < dirs; ++d) {
+            std::vector<double> v(info.size);
+            double gv = 0;
+            for (size_t i = 0; i < info.size; ++i) v[i] = rng.normal(), gv += g[info.offset + i] * v[i];
+            for (size_t i = 0; i < info.size; ++i) w[info.offset + i] = w0[info.offset + i] + h * v[i];
+            ref.set_params(w);
+            const double up = ref.forward(tok, tgt, B, Tn, ul_alpha, ul_ngram, GpuReference::Quant::frozen).loss;
+            for (size_t i = 0; i < info.size; ++i) w[info.offset + i] = w0[info.offset + i] - h * v[i];
+            ref.set_params(w);
+            const double down = ref.forward(tok, tgt, B, Tn, ul_alpha, ul_ngram, GpuReference::Quant::frozen).loss;
+            const double fd = (up - down) / (2 * h);
+            err += (fd - gv) * (fd - gv);
+            size += gv * gv;
+        }
+        for (size_t i = 0; i < info.size; ++i) w[info.offset + i] = w0[info.offset + i];
+        const double rel = size > 0 ? std::sqrt(err / size) : std::sqrt(err);
+        if (rel > out.worst) out.worst = rel, out.tensor = info.name;
+    }
+    ref.set_params(w0);
+    return out;
+}
+
 struct Run {
     bool muon = false;
     // > 0: clip the gradient to that fraction of its norm, scaling it on
@@ -148,84 +202,98 @@ struct Run {
 void compare(const char* name, const Config& cfg, double tol_loss, double tol_grad, double tol_param, Run run = {}) {
     const bool muon = run.muon;
     const double clip = run.clip;
-    Model<float> cpu(cfg);
-    cpu.init(5);
+    Model<float> host(cfg);  // the layout and a copy of the weights
+    GpuTrainer gpu(cfg, host.infos, run.matmul, run.fused);
+    gpu.init_params(5);
     Rng rng(6);
-    for (auto& layer : cpu.router_bias)
+    for (auto& layer : host.router_bias)
         for (auto& b : layer) b = float(0.01 * rng.normal());
-    AdamW opt;
+    ReferenceOptimizer opt;
     opt.muon = muon;
-    GpuTrainer gpu(cfg, cpu.infos, run.matmul, run.fused);
     gpu.set_grouped_experts(run.grouped);
-    gpu.set_params(cpu.params.data());
     gpu.set_adam_state(0, nullptr, nullptr);
-    gpu.set_router_bias(cpu.router_bias);
+    gpu.set_router_bias(host.router_bias);
     gpu.set_muon(muon, opt.muon_momentum, opt.muon_steps);
-    cpu.unlikelihood = {run.ul_alpha, run.ul_ngram};
     gpu.set_unlikelihood(run.ul_alpha, run.ul_ngram);
+    GpuReference ref(cfg, host.infos);
+    ref.set_router_bias(host.router_bias);
 
     const int B = 3, Tn = cfg.seq_len, N = B * Tn;
+    const size_t P = host.num_params();
     std::vector<int> tok, tgt;
-    std::vector<float> g(cpu.num_params()), p(cpu.num_params());
+    std::vector<float> g(P), p(P), after(P);
+    std::vector<double> m(P, 0.0), v(P, 0.0);
+    std::vector<std::vector<double>> load(cfg.n_layers, std::vector<double>(std::max(1, cfg.n_experts), 0.0));
     double worst_loss = 0, worst_grad = 0, worst_param = 0, worst_ul = 0;
     size_t fired = 0;
     std::string worst_tensor;
     for (int step = 0; step < 3; ++step) {
+        // The reference follows the GPU's weights, so each step measures
+        // only that step's differences.
+        gpu.get_params(p.data());
+        const std::vector<double> w(p.begin(), p.end());
+        ref.set_params(w);
         random_batch(rng, cfg.vocab, N, tok, tgt);
         if (run.ul_alpha > 0)
             for (int& t : tok) t %= 4;
-        cpu.zero_grad();
         gpu.zero_grad();
-        const double lc = cpu.forward(tok.data(), tgt.data(), B, Tn, true);
         const double lg = gpu.forward(tok.data(), tgt.data(), B, Tn, true);
-        worst_loss = std::max(worst_loss, std::abs(lc - lg) / std::abs(lc));
+        const GpuReference::Result r = ref.forward(tok.data(), tgt.data(), B, Tn, run.ul_alpha, run.ul_ngram);
+        worst_loss = std::max(worst_loss, std::abs(r.loss - lg) / std::abs(r.loss));
+        for (size_t l = 0; l < load.size(); ++l)
+            for (size_t e = 0; e < load[l].size(); ++e) load[l][e] += r.expert_load[l][e];
         if (run.ul_alpha > 0) {
             const GpuTrainer::ForwardParts f = gpu.last_parts();
-            EXPECT(f.fired == cpu.last_fired && f.negatives == cpu.last_negatives,
-                   "%s: the GPU found %zu negatives at %zu positions, the CPU %zu at %zu", name, f.negatives,
-                   f.fired, cpu.last_negatives, cpu.last_fired);
-            worst_ul = std::max(worst_ul, std::abs(f.ul - cpu.last_ul) / std::max(cpu.last_ul, 1e-30));
-            fired += cpu.last_fired;
+            EXPECT(f.fired == r.fired && f.negatives == r.negatives,
+                   "%s: the GPU found %zu negatives at %zu positions, the reference %zu at %zu", name, f.negatives,
+                   f.fired, r.negatives, r.fired);
+            worst_ul = std::max(worst_ul, std::abs(f.ul - r.ul) / std::max(r.ul, 1e-30));
+            fired += r.fired;
         }
-        cpu.backward(1.0);
         gpu.backward(1.0);
         gpu.get_grads(g.data());
-        for (const auto& info : cpu.infos) {
-            const double d = rel_l2(&g[info.offset], &cpu.grads[info.offset], info.size);
-            if (d > worst_grad) worst_grad = d, worst_tensor = info.name;
+        const std::vector<double> gd(g.begin(), g.end());
+        // The gradients on the first and last steps (each check is about a
+        // thousand reference forwards); every step's optimizer step below.
+        if (step != 1) {
+            const DirectionalCheck d = directional_check(ref, host.infos, w, gd, tok.data(), tgt.data(), B, Tn,
+                                                         run.ul_alpha, run.ul_ngram, 100 + uint64_t(step), 8);
+            if (d.worst > worst_grad) worst_grad = d.worst, worst_tensor = d.tensor;
         }
-        const double nc = clip_grad_norm(cpu, 0.0), ng = gpu.grad_norm();
-        EXPECT(std::abs(nc - ng) <= tol_grad * nc, "%s: grad norm %g (gpu) vs %g (cpu)", name, ng, nc);
-        double scale = 1.0;
-        if (clip > 0) {
-            clip_grad_norm(cpu, clip * nc);
-            scale = double(float(clip * nc / ng));
-        }
-        opt.update(cpu, 1e-2);
+        const double nr = std::sqrt(reference_sum_squares(g)), ng = gpu.grad_norm();
+        EXPECT(std::abs(nr - ng) <= 1e-6 * nr, "%s: grad norm %.9g (gpu) vs %.9g (reference)", name, ng, nr);
+        // Clipping scales the gradient by `scale` inside the optimizer, as
+        // GpuBackend does; the reference takes the scaled gradient.
+        const double scale = clip > 0 ? double(float(clip)) : 1.0;
+        std::vector<double> gs(gd), wr(w);
+        for (double& x : gs) x *= scale;
+        reference_optimizer_step(opt, host.infos, 1e-2, step + 1, wr, gs, m, v);
         gpu.adamw_step(1e-2, opt.beta1, opt.beta2, opt.eps, opt.weight_decay, scale);
-        gpu.get_params(p.data());
-        worst_param = std::max(worst_param, rel_l2(p.data(), cpu.params.data(), p.size()));
+        gpu.get_params(after.data());
+        // The step (each weight's change), not the weights, is compared.
+        std::vector<float> sg(P), sr(P);
+        for (size_t i = 0; i < P; ++i) sg[i] = after[i] - p[i], sr[i] = float(wr[i] - w[i]);
+        worst_param = std::max(worst_param, rel_l2(sg.data(), sr.data(), P));
     }
-    // The optimizer state matches the CPU's, and survives a trip through a
-    // second trainer, loaded as GpuBackend does (state first, then Muon).
-    std::vector<float> gm(p.size()), gv(p.size()), gm2(p.size()), gv2(p.size());
+    // The optimizer state matches the reference's (both from the GPU's
+    // gradients), and survives a trip through a second trainer, loaded as
+    // GpuBackend does (state first, then Muon).
+    std::vector<float> gm(P), gv(P), gm2(P), gv2(P), rm(m.begin(), m.end()), rv(v.begin(), v.end());
     long gstep = 0, gstep2 = 0;
     gpu.get_adam_state(&gstep, gm.data(), gv.data());
-    const double dm = rel_l2(gm.data(), opt.m.data(), gm.size()), dv = rel_l2(gv.data(), opt.v.data(), gv.size());
-    EXPECT(gstep == opt.step && dm <= 3 * tol_grad && dv <= 3 * tol_grad,
-           "%s: optimizer state differs from the CPU's (step %ld vs %ld, m by %g, v by %g)", name, gstep, opt.step,
-           dm, dv);
-    GpuTrainer gpu2(cfg, cpu.infos, run.matmul, run.fused);
+    const double dm = rel_l2(gm.data(), rm.data(), P), dv = rel_l2(gv.data(), rv.data(), P);
+    EXPECT(gstep == 3 && dm <= 1e-5 && dv <= 1e-5,
+           "%s: optimizer state differs from the reference's (step %ld, m by %g, v by %g)", name, gstep, dm, dv);
+    GpuTrainer gpu2(cfg, host.infos, run.matmul, run.fused);
     gpu2.set_adam_state(gstep, gm.data(), gv.data());
     gpu2.set_muon(muon, opt.muon_momentum, opt.muon_steps);
     gpu2.get_adam_state(&gstep2, gm2.data(), gv2.data());
     EXPECT(gstep2 == gstep && gm2 == gm && gv2 == gv, "%s: optimizer state changed in a round trip", name);
 
-    const auto load = gpu.take_expert_load();
     if (cfg.moe() && tol_grad < 1e-3)
-        EXPECT(load == cpu.expert_load, "%s: expert loads differ (routing changed)", name);
-    std::printf("  %-14s loss %.1e, grads %.1e (worst %s), params %.1e\n", name, worst_loss, worst_grad,
-                worst_tensor.c_str(), worst_param);
+        EXPECT(gpu.take_expert_load() == load, "%s: expert loads differ (routing changed)", name);
+    std::printf("  %-14s loss %.1e, grads %.1e (worst %s), steps %.1e, state %.1e\n", name, worst_loss, worst_grad,
+                worst_tensor.c_str(), worst_param, std::max(dm, dv));
     if (run.ul_alpha > 0) {
         std::printf("  %-14s unlikelihood term %.1e apart, fired at %zu positions\n", "", worst_ul, fired);
         EXPECT(fired > 0, "%s: the unlikelihood term never fired", name);
@@ -233,11 +301,12 @@ void compare(const char* name, const Config& cfg, double tol_loss, double tol_gr
     }
     EXPECT(worst_loss <= tol_loss, "%s: loss differs by %g", name, worst_loss);
     EXPECT(worst_grad <= tol_grad, "%s: gradient of %s differs by %g", name, worst_tensor.c_str(), worst_grad);
-    EXPECT(worst_param <= tol_param, "%s: weights after the optimizer step differ by %g", name, worst_param);
+    EXPECT(worst_param <= tol_param, "%s: the optimizer's steps differ by %g", name, worst_param);
 }
 
-// The production accumulation helper must preserve the CPU macro-batch
-// objective on CUDA too. Runtime validation requires physical GPU hardware.
+// The production accumulation helper (micro-batches with 0, 1, 3 and 8
+// targets) must give the loss and gradient of the whole group as one batch,
+// as the reference computes it.
 void masked_accumulation() {
     const auto group = masked_accumulation_fixture();
   for (bool fused : {false, true}) {
@@ -252,29 +321,29 @@ void masked_accumulation() {
         if (variant == 2 || variant == 3 || variant == 5 || variant == 7) {
             cfg.n_experts = 4; cfg.top_k = 2; cfg.expert_hidden = 24; cfg.n_shared = 1;
         }
-        Model<float> cpu(cfg);
-        cpu.init(57);
-        GpuTrainer gpu(cfg, cpu.infos, Matmul::fp32, fused);
-        gpu.set_params(cpu.params.data());
-        cpu.zero_grad();
-        const double lc = cpu.forward(group.inputs.data(), group.targets.data(), 4, 8, true);
-        cpu.backward();
+        Model<float> host(cfg);  // the layout and a copy of the weights
+        GpuTrainer gpu(cfg, host.infos, Matmul::fp32, fused);
+        gpu.init_params(57);
+        gpu.get_params(host.params.data());
+        // The reference sees the whole group as one batch.
+        GpuReference ref(cfg, host.infos);
+        const std::vector<double> w(host.params.begin(), host.params.end());
+        ref.set_params(w);
+        const double lc = ref.forward(group.inputs.data(), group.targets.data(), 4, 8).loss;
         const double lg = accumulated_backward(gpu, group);
-        std::vector<float> grad(cpu.num_params());
+        std::vector<float> grad(host.num_params());
         gpu.get_grads(grad.data());
         for (float g : grad) EXPECT(std::isfinite(g), "non-finite accumulated GPU gradient");
+        const std::vector<double> gd(grad.begin(), grad.end());
+        const DirectionalCheck d =
+            directional_check(ref, host.infos, w, gd, group.inputs.data(), group.targets.data(), 4, 8, 0, 3, 58, 8);
         const double tol = cfg.ternary ? 3e-2 : 1e-4;
         EXPECT(std::abs(lc - lg) < (cfg.ternary ? 1e-3 : 1e-5) * std::abs(lc),
-               "variant %d accumulated GPU loss %g vs CPU %g", variant, lg, lc);
-        double worst = 0;
-        for (const auto& p : cpu.infos) {
-            const double d = rel_l2(grad.data() + p.offset, cpu.grads.data() + p.offset, p.size);
-            EXPECT(std::isfinite(d) && d < tol, "variant %d accumulated GPU tensor %s error %g",
-                   variant, p.name.c_str(), d);
-            worst = std::max(worst, d);
-        }
-        std::printf("  variant %d masked GPU accumulation, fused=%d: loss difference %.1e gradient %.1e\n",
-                    variant, int(fused), std::abs(lc - lg), worst);
+               "variant %d accumulated GPU loss %g vs the reference's %g", variant, lg, lc);
+        EXPECT(std::isfinite(d.worst) && d.worst < tol, "variant %d accumulated GPU tensor %s error %g", variant,
+               d.tensor.c_str(), d.worst);
+        std::printf("  variant %d masked GPU accumulation, fused=%d: loss difference %.1e gradient %.1e (worst %s)\n",
+                    variant, int(fused), std::abs(lc - lg), d.worst, d.tensor.c_str());
         auto empty = group;
         std::fill(empty.targets.begin(), empty.targets.end(), -1); empty.refresh_counts();
         EXPECT(accumulated_backward(gpu, empty) == 0, "empty GPU accumulated loss nonzero");
@@ -366,33 +435,39 @@ void fused_kernels() {
 // both target probabilities underflow. The middle row is ignored.
 void extreme_cross_entropy() {
     ExtremeLossFixture fixture;
-    auto& cpu = fixture.model;
-    const auto& cfg = cpu.cfg;
-    const ParamInfo& embedding = *cpu.find("wte");
-    GpuTrainer gpu(cfg, cpu.infos, /*tf32=*/false);
-    gpu.set_params(cpu.params.data());
+    const auto& host = fixture.model;  // the fixture's weights
+    const auto& cfg = host.cfg;
+    const ParamInfo& embedding = *host.find("wte");
+    GpuTrainer gpu(cfg, host.infos, Matmul::fp32);
+    gpu.set_params(host.params.data());
+    GpuReference reference(cfg, host.infos);
+    const std::vector<double> w(host.params.begin(), host.params.end());
+    reference.set_params(w);
     const int* tok = fixture.tokens.data();
     const int* tgt = fixture.targets.data();
-    cpu.zero_grad(); gpu.zero_grad();
-    const double lc = cpu.forward(tok, tgt, 1, 3), lg = gpu.forward(tok, tgt, 1, 3);
+    gpu.zero_grad();
+    const double lc = reference.forward(tok, tgt, 1, 3).loss, lg = gpu.forward(tok, tgt, 1, 3);
     const double ref = fixture.reference_loss();
-    EXPECT(std::isfinite(lc) && std::abs(lc - ref) < 0.05, "extreme CPU loss %g vs %g", lc, ref);
+    EXPECT(std::isfinite(lc) && std::abs(lc - ref) < 0.05, "extreme reference loss %g vs %g", lc, ref);
     EXPECT(std::isfinite(lg) && std::abs(lg - ref) < 0.05, "extreme GPU loss %g vs %g", lg, ref);
-    cpu.backward(); gpu.backward(1.0);
-    std::vector<float> grad(cpu.num_params());
+    gpu.backward(1.0);
+    std::vector<float> grad(host.num_params());
     gpu.get_grads(grad.data());
     for (float g : grad) EXPECT(std::isfinite(g), "non-finite extreme GPU gradient");
     for (int i = 0; i < cfg.d_model; ++i)
         EXPECT(std::abs(grad[embedding.offset + cfg.d_model + i] + 0.5f) < 1e-5f,
                "underflowed target lost its output-weight gradient");
-    EXPECT(rel_l2(grad.data(), cpu.grads.data(), grad.size()) < 1e-4,
-           "extreme loss gradients disagree between CPU and GPU");
+    const std::vector<double> gd(grad.begin(), grad.end());
+    const DirectionalCheck d = directional_check(reference, host.infos, w, gd, tok, tgt, 1, 3, 0, 3, 59, 8);
+    EXPECT(d.worst < 1e-4, "extreme loss: the GPU's gradient of %s differs from the reference's by %g",
+           d.tensor.c_str(), d.worst);
     const int ignored[] = {-1, -1, -1};
     gpu.zero_grad();
     EXPECT(gpu.forward(tok, ignored, 1, 3) == 0, "all-ignored GPU loss nonzero");
     gpu.backward(1.0); gpu.get_grads(grad.data());
     for (float g : grad) EXPECT(g == 0, "all-ignored GPU gradient nonzero");
-    std::printf("  extreme cross-entropy: CPU %.1f GPU %.1f reference %.1f\n", lc, lg, ref);
+    std::printf("  extreme cross-entropy: reference %.1f GPU %.1f exact %.1f, gradients %.1e (worst %s)\n", lc, lg,
+                ref, d.worst, d.tensor.c_str());
 }
 
 // Ternary codes (#40): the GPU quantizes with its own kernels (absolute
@@ -466,34 +541,34 @@ void ternary_codes_on_gpu(const Config& cfg) {
 
 // Unlikelihood with a saturated softmax: the fixture's logits are about
 // +-3e7, so the negative (token 0, repeating "0 0") has p = 1 and every
-// other probability underflows. Both sides give the floor's loss; the CPU's
-// exponential stops short of 0 where the GPU's reaches it, so only the
-// GPU's gradient being finite is checked. Then a term that never fires
+// other probability underflows. The GPU and the reference both give the
+// floor's loss; only the GPU's gradient being finite is checked. Then a term that never fires
 // (runs longer than the batch) must leave the GPU's gradient as it was, up
 // to rounding: the token embedding's gradient is summed with atomic adds,
 // whose order (and so its last bits) changes from run to run.
 void unlikelihood_edges() {
     ExtremeLossFixture fixture;
-    auto& cpu = fixture.model;
-    const auto& cfg = cpu.cfg;
-    GpuTrainer gpu(cfg, cpu.infos, /*tf32=*/false);
-    gpu.set_params(cpu.params.data());
+    const auto& host = fixture.model;  // the fixture's weights
+    const auto& cfg = host.cfg;
+    GpuTrainer gpu(cfg, host.infos, Matmul::fp32);
+    gpu.set_params(host.params.data());
+    GpuReference ref(cfg, host.infos);
+    ref.set_params(host.params.data());
     const int tgt[] = {1, 1, 2};
-    cpu.unlikelihood = {1.0, 2};
     gpu.set_unlikelihood(1.0, 2);
-    cpu.zero_grad();
     gpu.zero_grad();
-    const double lc = cpu.forward(fixture.tokens.data(), tgt, 1, 3, true);
+    const GpuReference::Result r = ref.forward(fixture.tokens.data(), tgt, 1, 3, 1.0, 2);
     const double lg = gpu.forward(fixture.tokens.data(), tgt, 1, 3, true);
     const GpuTrainer::ForwardParts f = gpu.last_parts();
     const double floor_term = -std::log(kUnlikelihoodFloor) / 3;  // one negative, 3 targets
-    EXPECT(f.negatives == 1 && cpu.last_negatives == 1, "saturated: %zu GPU, %zu CPU negatives", f.negatives,
-           cpu.last_negatives);
-    EXPECT(std::abs(f.ul - floor_term) < 1e-9 && std::abs(cpu.last_ul - floor_term) < 1e-9,
-           "saturated: term %g (GPU), %g (CPU), floor %g", f.ul, cpu.last_ul, floor_term);
-    EXPECT(std::abs(lc - lg) <= 1e-5 * std::abs(lc), "saturated: loss %g (GPU) vs %g (CPU)", lg, lc);
+    EXPECT(f.negatives == 1 && r.negatives == 1, "saturated: %zu GPU, %zu reference negatives", f.negatives,
+           r.negatives);
+    EXPECT(std::abs(f.ul - floor_term) < 1e-9 && std::abs(r.ul - floor_term) < 1e-9,
+           "saturated: term %g (GPU), %g (reference), floor %g", f.ul, r.ul, floor_term);
+    EXPECT(std::abs(r.loss - lg) <= 1e-5 * std::abs(r.loss), "saturated: loss %g (GPU) vs %g (reference)", lg,
+           r.loss);
     gpu.backward(1.0);
-    std::vector<float> grad(cpu.num_params());
+    std::vector<float> grad(host.num_params());
     gpu.get_grads(grad.data());
     bool finite = true;
     for (float g : grad) finite = finite && std::isfinite(g);
@@ -505,8 +580,12 @@ void unlikelihood_edges() {
     dense.d_model = 64;
     dense.n_layers = 2;
     dense.n_heads = 4;
-    Model<float> m(dense);
-    m.init(5);
+    Model<float> m(dense);  // the layout and a copy of the weights
+    {
+        GpuTrainer init(dense, m.infos, Matmul::fp32);
+        init.init_params(5);
+        init.get_params(m.params.data());
+    }
     Rng rng(9);
     std::vector<int> tok, t;
     random_batch(rng, dense.vocab, 3 * dense.seq_len, tok, t);
@@ -782,54 +861,6 @@ void eval_on_gpu() {
 }
 
 }  // namespace
-
-// The gradient a reference measures along random directions, against a
-// gradient g: for each tensor, the reference's loss changes along `dirs`
-// random directions within it (central differences of the Quant::frozen
-// loss, h relative to the tensor's size), against g · v. Returns the worst
-// tensor's sqrt(Σ (fd - g·v)²) / sqrt(Σ (g·v)²): the relative error of g,
-// as rel_l2 measures it, estimated from the directions.
-struct DirectionalCheck {
-    double worst = 0;
-    std::string tensor;
-};
-DirectionalCheck directional_check(GpuReference& ref, const std::vector<ParamInfo>& infos,
-                                   const std::vector<double>& w0, const std::vector<double>& g, const int* tok,
-                                   const int* tgt, int B, int Tn, double ul_alpha, int ul_ngram, uint64_t seed,
-                                   int dirs = 3) {
-    Rng rng(seed);
-    ref.set_params(w0);
-    ref.forward(tok, tgt, B, Tn, ul_alpha, ul_ngram, GpuReference::Quant::record);
-    DirectionalCheck out;
-    std::vector<double> w = w0;
-    for (const auto& info : infos) {
-        double rms = 0;
-        for (size_t i = 0; i < info.size; ++i) rms += w0[info.offset + i] * w0[info.offset + i];
-        rms = std::sqrt(rms / double(info.size));
-        // 1e-5 left rounding noise of 1e-5 on the routers' small gradients.
-        const double h = 1e-4 * std::max(rms, 1e-2);
-        double err = 0, size = 0;
-        for (int d = 0; d < dirs; ++d) {
-            std::vector<double> v(info.size);
-            double gv = 0;
-            for (size_t i = 0; i < info.size; ++i) v[i] = rng.normal(), gv += g[info.offset + i] * v[i];
-            for (size_t i = 0; i < info.size; ++i) w[info.offset + i] = w0[info.offset + i] + h * v[i];
-            ref.set_params(w);
-            const double up = ref.forward(tok, tgt, B, Tn, ul_alpha, ul_ngram, GpuReference::Quant::frozen).loss;
-            for (size_t i = 0; i < info.size; ++i) w[info.offset + i] = w0[info.offset + i] - h * v[i];
-            ref.set_params(w);
-            const double down = ref.forward(tok, tgt, B, Tn, ul_alpha, ul_ngram, GpuReference::Quant::frozen).loss;
-            const double fd = (up - down) / (2 * h);
-            err += (fd - gv) * (fd - gv);
-            size += gv * gv;
-        }
-        for (size_t i = 0; i < info.size; ++i) w[info.offset + i] = w0[info.offset + i];
-        const double rel = size > 0 ? std::sqrt(err / size) : std::sqrt(err);
-        if (rel > out.worst) out.worst = rel, out.tensor = info.name;
-    }
-    ref.set_params(w0);
-    return out;
-}
 
 // The reference against the CPU engine in double, while the CPU engine still
 // exists (the trust the reference inherits): the same loss, cross-entropy,
@@ -1215,14 +1246,17 @@ int main() {
     dense.d_model = 64;
     dense.n_layers = 2;
     dense.n_heads = 4;
-    compare("dense", dense, 1e-5, 1e-4, 1e-4);
-    compare("dense, cuBLAS attention", dense, 1e-5, 1e-4, 1e-4, {.fused = false});
+    // The bounds (loss, gradients, optimizer steps) are 3-5x what the RTX
+    // 4070 measured against the fp64 reference (2026-10-16). Exact fp32:
+    // losses within 1.4e-8, gradients 2.4e-6, steps 3.3e-7 (Muon 1.9e-6).
+    compare("dense", dense, 1e-7, 1e-5, 2e-6);
+    compare("dense, cuBLAS attention", dense, 1e-7, 1e-5, 2e-6, {.fused = false});
     // bf16 products keep 8 significant bits of each input, about 4e-3 apart,
-    // so a looser check that nothing else differs. The bounds here and for
-    // the MoE runs below are twice what the RTX 4070 measured; the worst
-    // gradients are a norm weight's and the router's, which sum many
-    // nearly cancelling terms (TF32, 3 bits finer, is about 4x closer).
-    compare("dense bf16", dense, 3e-4, 3e-1, 5e-2, {.matmul = Matmul::bf16});
+    // so a looser check that nothing else differs. Measured: loss 5.2e-5,
+    // gradients 1.2e-2; the worst gradients are a norm weight's and the
+    // router's, which sum many nearly cancelling terms (TF32, 3 bits finer,
+    // is about 10x closer). The optimizer stays fp32.
+    compare("dense bf16", dense, 3e-4, 5e-2, 2e-6, {.matmul = Matmul::bf16});
 
     // Fused attention over several tiles of rows (70 tokens), and at its
     // largest head size, which needs more than 48 KB of shared memory.
@@ -1230,57 +1264,64 @@ int main() {
     wide.seq_len = 70;
     wide.d_model = 128;
     wide.n_heads = 2;
-    compare("heads of 64", wide, 1e-5, 1e-4, 1e-4);
+    // Against the CPU's float engine these two missed 1e-4 (#27); against
+    // the fp64 reference they are as close as the others (7.6e-7): the
+    // differences were the CPU's.
+    compare("heads of 64", wide, 1e-7, 1e-5, 2e-6);
     wide.seq_len = 40;
     wide.n_heads = 1;
-    compare("head of 128", wide, 1e-5, 1e-4, 1e-4);
+    compare("head of 128", wide, 1e-7, 1e-5, 2e-6);
 
     // TF32, as training runs: attention through cuBLAS, and fused on the
     // tensor cores. Both round the same inputs the same way, so the fused
-    // kernels must stay as close to the CPU as cuBLAS does. The bounds are
-    // twice what cuBLAS measured on the RTX 4070 (loss 1.0e-4, gradients
-    // 6.1e-2 at worst, on a norm weight, weights 7.7e-3).
+    // kernels must stay as close to the reference as cuBLAS does. Measured:
+    // cuBLAS loss 5.4e-7, gradients 1.5e-3 (a norm weight); fused 1.4e-6,
+    // 2.0e-3.
     wide.seq_len = 70;
     wide.n_heads = 2;
-    compare("tf32, cuBLAS attention", wide, 2e-4, 1.5e-1, 2e-2, {.fused = false, .matmul = Matmul::tf32});
-    compare("tf32, fused attention", wide, 2e-4, 1.5e-1, 2e-2, {.matmul = Matmul::tf32});
+    compare("tf32, cuBLAS attention", wide, 1e-5, 1e-2, 2e-6, {.fused = false, .matmul = Matmul::tf32});
+    compare("tf32, fused attention", wide, 1e-5, 1e-2, 2e-6, {.matmul = Matmul::tf32});
 
+    // Ternary: an activation's int8 rounding can flip between fp32 and
+    // fp64, which moves a gradient (measured: loss 1.0e-6, gradients
+    // 2.3e-3; with MoE often no flip at all).
     Config tern = dense;
     tern.ternary = true;
-    compare("ternary", tern, 1e-3, 3e-2, 1e-2);
+    compare("ternary", tern, 1e-5, 1e-2, 2e-6);
 
     Config moe = dense;
     moe.n_experts = 4;
     moe.top_k = 2;
     moe.n_shared = 1;
     moe.expert_hidden = 32;
-    compare("moe+shared", moe, 1e-5, 1e-4, 1e-4);
+    compare("moe+shared", moe, 1e-7, 1e-5, 2e-6);
 
     Config moe1 = moe;
     moe1.top_k = 1;
     moe1.n_shared = 0;
-    compare("moe top-1", moe1, 1e-5, 1e-4, 1e-4, {.clip = 0.5});
+    compare("moe top-1", moe1, 1e-7, 1e-5, 2e-6, {.clip = 0.5});
     // The experts' products in bf16 (each a slice of the rows), against the
-    // same model in TF32. Measured: TF32 loss 1.2e-4, gradients 1.0e-1,
-    // weights 7.9e-3; bf16 5.9e-4, 4.4e-1 (the router), 3.7e-2; with Muon
-    // 2.3e-5, 2.3e-1, 4.1e-3.
-    compare("moe tf32", moe, 3e-4, 2e-1, 2e-2, {.matmul = Matmul::tf32});
-    compare("moe bf16", moe, 1.2e-3, 9e-1, 8e-2, {.matmul = Matmul::bf16});
-    compare("moe muon bf16", moe, 5e-5, 5e-1, 1e-2, {.muon = true, .matmul = Matmul::bf16});
+    // same model in TF32. Measured against the fp64 reference: TF32 loss
+    // 3.6e-6, gradients 1.5e-3; bf16 5.9e-5, 1.5e-1 (the router); with Muon
+    // 3.1e-5, 1.1e-2, and its steps 1.3e-2 apart: with bf16 products the
+    // GPU's Newton-Schulz multiplies in bf16 too.
+    compare("moe tf32", moe, 2e-5, 1e-2, 2e-6, {.matmul = Matmul::tf32});
+    compare("moe bf16", moe, 3e-4, 5e-1, 2e-6, {.matmul = Matmul::bf16});
+    compare("moe muon bf16", moe, 2e-4, 5e-2, 3e-2, {.muon = true, .matmul = Matmul::bf16});
 
     Config ours = moe;
     ours.ternary = true;
-    compare("ternary moe", ours, 1e-3, 3e-2, 1e-2);
+    compare("ternary moe", ours, 1e-5, 1e-2, 2e-6);
 
     // Ternary FFN with full-precision attention (--fp-attn), and layers
     // without RoPE (--nope-every 2: the second of every two).
     Config fpa = ours;
     fpa.fp_attention = true;
-    compare("ternary moe, fp attention", fpa, 1e-3, 3e-2, 1e-2);
+    compare("ternary moe, fp attention", fpa, 1e-5, 1e-2, 2e-6);
     ternary_codes_on_gpu(ours);
     Config nope = dense;
     nope.nope_every = 2;
-    compare("dense, half NoPE", nope, 1e-5, 1e-4, 1e-4);
+    compare("dense, half NoPE", nope, 1e-7, 1e-5, 2e-6);
 
     // The double-precision GPU reference against the CPU engine in double.
     reference_vs_cpu("dense", dense);
@@ -1299,20 +1340,20 @@ int main() {
     reference_vs_cpu("head of 128", wide1);
     reference_tools_vs_cpu(moe);
 
-    // Muon moves the weights about as much as the gradients differ, ten
-    // times more than AdamW does, hence the looser weight tolerance.
-    compare("dense muon", dense, 1e-5, 1e-4, 1e-3, {.muon = true});
-    compare("moe muon", moe, 1e-5, 1e-4, 1e-3, {.muon = true, .clip = 0.5});
+    // Muon's Newton-Schulz steps are fp32 products on the GPU, a few
+    // times further from the reference than AdamW's steps.
+    compare("dense muon", dense, 1e-7, 1e-5, 1e-5, {.muon = true});
+    compare("moe muon", moe, 1e-7, 1e-5, 1e-5, {.muon = true, .clip = 0.5});
 
     // The experts' grouped products (#49) in the same runs: exact, TF32,
     // bf16, ternary, Muon, top-1 and unlikelihood.
-    compare("moe+shared, grouped", moe, 1e-5, 1e-4, 1e-4, {.grouped = true});
-    compare("moe top-1, grouped", moe1, 1e-5, 1e-4, 1e-4, {.clip = 0.5, .grouped = true});
-    compare("moe tf32, grouped", moe, 3e-4, 2e-1, 2e-2, {.matmul = Matmul::tf32, .grouped = true});
-    compare("moe bf16, grouped", moe, 1.2e-3, 9e-1, 8e-2, {.matmul = Matmul::bf16, .grouped = true});
-    compare("moe muon bf16, grouped", moe, 5e-5, 5e-1, 1e-2, {.muon = true, .matmul = Matmul::bf16, .grouped = true});
-    compare("ternary moe, grouped", ours, 1e-3, 3e-2, 1e-2, {.grouped = true});
-    compare("moe ul, grouped", moe, 1e-5, 1e-4, 1e-4, {.grouped = true, .ul_alpha = 0.5, .ul_ngram = 3});
+    compare("moe+shared, grouped", moe, 1e-7, 1e-5, 2e-6, {.grouped = true});
+    compare("moe top-1, grouped", moe1, 1e-7, 1e-5, 2e-6, {.clip = 0.5, .grouped = true});
+    compare("moe tf32, grouped", moe, 2e-5, 1e-2, 2e-6, {.matmul = Matmul::tf32, .grouped = true});
+    compare("moe bf16, grouped", moe, 3e-4, 5e-1, 2e-6, {.matmul = Matmul::bf16, .grouped = true});
+    compare("moe muon bf16, grouped", moe, 2e-4, 5e-2, 3e-2, {.muon = true, .matmul = Matmul::bf16, .grouped = true});
+    compare("ternary moe, grouped", ours, 1e-5, 1e-2, 2e-6, {.grouped = true});
+    compare("moe ul, grouped", moe, 1e-7, 1e-5, 2e-6, {.grouped = true, .ul_alpha = 0.5, .ul_ngram = 3});
 
     // The whole step on the GPU (#50), plain and clipped, AdamW and Muon.
     step_on_gpu("dense step", dense, false, 0.0);
@@ -1322,9 +1363,9 @@ int main() {
     // Unlikelihood (#34): the term on both sides, exact products and bf16
     // (whose gradients go through the bf16 copy of the logits' gradient).
     unlikelihood_edges();
-    compare("dense ul", dense, 1e-5, 1e-4, 1e-4, {.ul_alpha = 0.5});
-    compare("moe ul", moe, 1e-5, 1e-4, 1e-4, {.ul_alpha = 0.5, .ul_ngram = 3});
-    compare("dense ul bf16", dense, 3e-4, 3e-1, 5e-2, {.matmul = Matmul::bf16, .ul_alpha = 0.5});
+    compare("dense ul", dense, 1e-7, 1e-5, 2e-6, {.ul_alpha = 0.5});
+    compare("moe ul", moe, 1e-7, 1e-5, 2e-6, {.ul_alpha = 0.5, .ul_ngram = 3});
+    compare("dense ul bf16", dense, 3e-4, 5e-2, 2e-6, {.matmul = Matmul::bf16, .ul_alpha = 0.5});
 
     // Decoding: exact products (summation order and expf against the CPU's
     // fast_exp are the only differences), MoE routing, layers without RoPE,
