@@ -78,6 +78,37 @@ inline int64_t solve_chain(const std::string& q) {
     return value(target);
 }
 
+// Since 2026-10-16 the curriculum has no degenerate zeros: no chain
+// variable (needed or not) is 0, no add operand is 0, eq's x is at least 1,
+// and expr never subtracts a number from itself, so no expr step gives 0.
+inline void check_no_zeros(const Problem& p) {
+    const std::string& q = p.question;
+    if (p.task == "chain") {
+        for (size_t pos = 0; pos < q.size();) {
+            const size_t end = q.find("; ", pos);
+            const std::string d = q.substr(pos, end == std::string::npos ? std::string::npos : end - pos);
+            if (d.size() > 2 && d[1] == '=') {
+                // The same definitions, asking for this variable instead.
+                const int64_t v = solve_chain(q.substr(0, q.rfind("; ")) + "; " + d[0] + "?");
+                EXPECT(v != 0, "chain variable %c is 0: %s", d[0], q.c_str());
+            }
+            if (end == std::string::npos) break;
+            pos = end + 2;
+        }
+    }
+    if (p.task == "add") {
+        const size_t plus = q.find('+');
+        EXPECT(std::stoll(q.substr(0, plus)) > 0 && std::stoll(q.substr(plus + 1)) > 0, "add with a 0: %s", q.c_str());
+    }
+    if (p.task == "eq") EXPECT(p.answer != "0", "eq with x = 0: %s", q.c_str());
+    if (p.task == "expr")
+        for (size_t at = 0; (at = p.steps.find('=', at)) != std::string::npos; ++at) {
+            const size_t end = p.steps.find_first_not_of("0123456789", at + 1);
+            EXPECT(p.steps.substr(at + 1, end == std::string::npos ? std::string::npos : end - at - 1) != "0",
+                   "an expr step gives 0: %s", p.steps.c_str());
+        }
+}
+
 inline std::string solve(const Problem& p) {
     const std::string& q = p.question;
     if (p.task == "chain") return std::to_string(solve_chain(q));
@@ -353,6 +384,7 @@ inline void test_reasoning() {
                 const std::string want = reasoning_check::solve(p);
                 EXPECT(p.answer == want, "%s d=%d: %s -> answer %s, solver says %s", task.c_str(), d,
                        p.question.c_str(), p.answer.c_str(), want.c_str());
+                reasoning_check::check_no_zeros(p);
                 // The steps end in the answer for the tasks whose last step computes it.
                 if (task == "chain" || task == "expr" || task == "eq") {
                     const std::string tail = "=" + p.answer;
