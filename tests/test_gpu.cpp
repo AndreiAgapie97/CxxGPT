@@ -32,6 +32,7 @@
 
 #include "../src/generate.h"
 #include "../src/gpu.h"
+#include "../src/gpu_ref.h"
 #include "../src/model.h"
 #include "../src/train.h"
 #include "test_util.h"
@@ -701,6 +702,100 @@ void eval_on_gpu() {
 
 }  // namespace
 
+// The gradient a reference measures along random directions, against a
+// gradient g: for each tensor, the reference's loss changes along `dirs`
+// random directions within it (central differences of the Quant::frozen
+// loss, h relative to the tensor's size), against g · v. Returns the worst
+// tensor's sqrt(Σ (fd - g·v)²) / sqrt(Σ (g·v)²): the relative error of g,
+// as rel_l2 measures it, estimated from the directions.
+struct DirectionalCheck {
+    double worst = 0;
+    std::string tensor;
+};
+DirectionalCheck directional_check(GpuReference& ref, const std::vector<ParamInfo>& infos,
+                                   const std::vector<double>& w0, const std::vector<double>& g, const int* tok,
+                                   const int* tgt, int B, int Tn, double ul_alpha, int ul_ngram, uint64_t seed,
+                                   int dirs = 3) {
+    Rng rng(seed);
+    ref.set_params(w0);
+    ref.forward(tok, tgt, B, Tn, ul_alpha, ul_ngram, GpuReference::Quant::record);
+    DirectionalCheck out;
+    std::vector<double> w = w0;
+    for (const auto& info : infos) {
+        double rms = 0;
+        for (size_t i = 0; i < info.size; ++i) rms += w0[info.offset + i] * w0[info.offset + i];
+        rms = std::sqrt(rms / double(info.size));
+        const double h = 1e-4 * std::max(rms, 1e-2);
+        double err = 0, size = 0;
+        for (int d = 0; d < dirs; ++d) {
+            std::vector<double> v(info.size);
+            double gv = 0;
+            for (size_t i = 0; i < info.size; ++i) v[i] = rng.normal(), gv += g[info.offset + i] * v[i];
+            for (size_t i = 0; i < info.size; ++i) w[info.offset + i] = w0[info.offset + i] + h * v[i];
+            ref.set_params(w);
+            const double up = ref.forward(tok, tgt, B, Tn, ul_alpha, ul_ngram, GpuReference::Quant::frozen).loss;
+            for (size_t i = 0; i < info.size; ++i) w[info.offset + i] = w0[info.offset + i] - h * v[i];
+            ref.set_params(w);
+            const double down = ref.forward(tok, tgt, B, Tn, ul_alpha, ul_ngram, GpuReference::Quant::frozen).loss;
+            const double fd = (up - down) / (2 * h);
+            err += (fd - gv) * (fd - gv);
+            size += gv * gv;
+        }
+        for (size_t i = 0; i < info.size; ++i) w[info.offset + i] = w0[info.offset + i];
+        const double rel = size > 0 ? std::sqrt(err / size) : std::sqrt(err);
+        if (rel > out.worst) out.worst = rel, out.tensor = info.name;
+    }
+    ref.set_params(w0);
+    return out;
+}
+
+// The reference against the CPU engine in double, while the CPU engine still
+// exists (the trust the reference inherits): the same loss, cross-entropy,
+// unlikelihood term, negatives and expert loads to rounding, and its finite
+// differences the CPU's analytic gradients (straight-through for ternary).
+void reference_vs_cpu(const char* name, const Config& cfg, double ul_alpha = 0, int ul_ngram = 3) {
+    Model<double> cpu(cfg);
+    cpu.init(5);
+    Rng rng(6);
+    for (auto& layer : cpu.router_bias)
+        for (auto& b : layer) b = 0.01 * rng.normal();
+    cpu.unlikelihood = {ul_alpha, ul_ngram};
+    GpuReference ref(cfg, cpu.infos);
+    ref.set_params(cpu.params);
+    std::vector<std::vector<float>> bias(cpu.router_bias.size());
+    for (size_t l = 0; l < bias.size(); ++l) bias[l].assign(cpu.router_bias[l].begin(), cpu.router_bias[l].end());
+    ref.set_router_bias(bias);
+    const int B = 2, Tn = cfg.seq_len, N = B * Tn;
+    std::vector<int> tok, tgt;
+    random_batch(rng, cfg.vocab, N, tok, tgt);
+    if (ul_alpha > 0)
+        for (int& t : tok) t %= 4;  // runs repeat, so the term fires
+    if (ul_alpha > 0)
+        for (int n = 0; n + 1 < N; ++n)
+            if (tgt[n] >= 0) tgt[n] = tok[n + 1];  // targets as sample_batch writes them
+    cpu.zero_grad();
+    const double lc = cpu.forward(tok.data(), tgt.data(), B, Tn, true);
+    cpu.backward(1.0);
+    const GpuReference::Result r = ref.forward(tok.data(), tgt.data(), B, Tn, ul_alpha, ul_ngram);
+    const double dl = std::abs(r.loss - lc) / std::abs(lc);
+    bool loads = true;
+    if (cfg.moe())
+        for (size_t l = 0; l < r.expert_load.size(); ++l)
+            for (size_t e = 0; e < r.expert_load[l].size(); ++e) loads &= r.expert_load[l][e] == cpu.expert_load[l][e];
+    const DirectionalCheck d = directional_check(ref, cpu.infos, cpu.params, cpu.grads, tok.data(), tgt.data(), B, Tn,
+                                                 ul_alpha, ul_ngram, 7);
+    std::printf("  reference = cpu, %-16s loss %.1e, gradients %.1e (worst %s)%s\n", name, dl, d.worst,
+                d.tensor.c_str(), ul_alpha > 0 ? "" : "");
+    EXPECT(dl < 1e-12, "reference %s: loss %.17g vs the CPU's %.17g", name, r.loss, lc);
+    EXPECT(r.fired == cpu.last_fired && r.negatives == cpu.last_negatives,
+           "reference %s: %zu negatives at %zu positions, the CPU %zu at %zu", name, r.negatives, r.fired,
+           cpu.last_negatives, cpu.last_fired);
+    EXPECT(ul_alpha <= 0 || r.fired > 0, "reference %s: the unlikelihood term never fired", name);
+    EXPECT(loads, "reference %s: expert loads differ from the CPU's", name);
+    EXPECT(d.worst < 1e-6, "reference %s: finite differences differ from the CPU's gradient of %s by %g", name,
+           d.tensor.c_str(), d.worst);
+}
+
 // GpuTrainer::init_params: Model::init's layout made on the GPU. The same
 // seed gives the same weights, another seed others; norms are exactly 1;
 // every matrix has mean about 0 and the intended spread (0.02, or 0.02 /
@@ -1036,6 +1131,17 @@ int main() {
     Config nope = dense;
     nope.nope_every = 2;
     compare("dense, half NoPE", nope, 1e-5, 1e-4, 1e-4);
+
+    // The double-precision GPU reference against the CPU engine in double.
+    reference_vs_cpu("dense", dense);
+    reference_vs_cpu("half NoPE", nope);
+    reference_vs_cpu("moe+shared", moe);
+    reference_vs_cpu("moe top-1", moe1);
+    reference_vs_cpu("ternary", tern);
+    reference_vs_cpu("ternary moe", ours);
+    reference_vs_cpu("fp attention", fpa);
+    reference_vs_cpu("dense ul", dense, 0.5, 2);
+    reference_vs_cpu("moe ul", moe, 0.5, 3);
 
     // Muon moves the weights about as much as the gradients differ, ten
     // times more than AdamW does, hence the looser weight tolerance.

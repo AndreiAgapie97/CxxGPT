@@ -61,8 +61,18 @@ if(CXXGPT_CUDA)
                 src/no_repeat.h src/config.h src/common.h
         COMMENT "nvcc src/gpu.cu"
         VERBATIM)
+    # The double-precision reference model, for test_gpu only.
+    set(gpu_ref_obj "${CMAKE_CURRENT_BINARY_DIR}/gpu_ref.obj")
+    add_custom_command(OUTPUT "${gpu_ref_obj}"
+        COMMAND "${CXXGPT_NVCC}" -O3 -std=c++20 -arch=${CXXGPT_CUDA_ARCH} -ccbin "${host_dir}"
+                -Werror all-warnings -Xcompiler "$<IF:$<CONFIG:Debug>,/MDd,/MD>,/W3,/WX"
+                -DNOMINMAX -D_CRT_SECURE_NO_WARNINGS
+                -c "${CMAKE_CURRENT_SOURCE_DIR}/src/gpu_ref.cu" -o "${gpu_ref_obj}"
+        DEPENDS src/gpu_ref.cu src/gpu_ref.h src/config.h src/common.h
+        COMMENT "nvcc src/gpu_ref.cu"
+        VERBATIM)
     add_executable(cxxgpt-gpu src/cxxgpt.cpp "${gpu_obj}")
-    add_executable(test_gpu tests/test_gpu.cpp "${gpu_obj}")
+    add_executable(test_gpu tests/test_gpu.cpp "${gpu_obj}" "${gpu_ref_obj}")
     target_compile_definitions(cxxgpt-gpu PRIVATE CXXGPT_CUDA)
     foreach(target cxxgpt-gpu test_gpu)
         target_link_libraries(${target} PRIVATE "${cuda_root}/lib/x64/cublas.lib" "${cuda_root}/lib/x64/cudart.lib")

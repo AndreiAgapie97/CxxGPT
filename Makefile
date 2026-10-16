@@ -57,8 +57,12 @@ gpu.o: src/gpu.cu src/gpu.h src/attention.cuh src/attention_tc.cuh src/grouped_g
 cxxgpt-gpu: src/cxxgpt.cpp gpu.o $(HEADERS)
 	$(CXX) $(CXXFLAGS) -DCXXGPT_CUDA $< gpu.o -o $@ $(CUDA_LIBS)
 
-test_gpu: tests/test_gpu.cpp gpu.o $(HEADERS) $(TEST_HEADERS)
-	$(CXX) $(CXXFLAGS) $< gpu.o -o $@ $(CUDA_LIBS)
+# The double-precision reference model, for test_gpu only.
+gpu_ref.o: src/gpu_ref.cu src/gpu_ref.h src/config.h src/common.h
+	$(NVCC) $(NVCCFLAGS) -c $< -o $@
+
+test_gpu: tests/test_gpu.cpp gpu.o gpu_ref.o $(HEADERS) $(TEST_HEADERS)
+	$(CXX) $(CXXFLAGS) $< gpu.o gpu_ref.o -o $@ $(CUDA_LIBS)
 
 gpu: cxxgpt-gpu test_gpu
 
@@ -132,4 +136,4 @@ tsan: ternary_moe.cpp tests/test_engine.cpp experiments/toy_world.cpp src/cxxgpt
 	./memory_probe_tsan --mode packed --ternary --experts 4 --batch 1 > /dev/null
 
 clean:
-	rm -f ternary_moe test_engine cxxgpt research_experiment reasoning_audit reasoning_targets reasoning_traces reasoning_curriculum memory_probe test_training_cli *_asan *_tsan gpu.o cxxgpt-gpu test_gpu
+	rm -f ternary_moe test_engine cxxgpt research_experiment reasoning_audit reasoning_targets reasoning_traces reasoning_curriculum memory_probe test_training_cli *_asan *_tsan gpu.o gpu_ref.o cxxgpt-gpu test_gpu
