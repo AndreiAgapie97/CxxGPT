@@ -283,15 +283,12 @@ inline void check_sense(const WordProblem& p, bool test) {
         EXPECT(pay > bill && pay % 500 == 0 && pay <= 2 * bill + 500, "an odd payment: %s",
                p.problem.question.c_str());
     }
-    // A family's wording repeats only once all the split's wordings are used.
-    std::array<std::vector<int>, word_detail::family_count> seen;
-    for (int id : p.patterns) {
-        auto& used = seen[size_t(id / 6)];
-        if (used.size() == (test ? 2u : 4u)) used.clear();
-        EXPECT(std::find(used.begin(), used.end(), id % 6) == used.end(), "a wording repeats too soon: %s",
-               p.problem.question.c_str());
-        used.push_back(id % 6);
-    }
+    // No wording is used twice in one story (extras take turns among three
+    // families of each kind; chains give away at most twice).
+    (void)test;
+    std::set<int> ids;
+    for (int id : p.patterns)
+        EXPECT(ids.insert(id).second, "a wording is used twice: %s", p.problem.question.c_str());
     // Chains: at most two cuts (share, fraction, percentage), never two in a
     // row; at most one sale and one purchase.
     if (p.shape == WordProblem::chain) {
@@ -381,7 +378,9 @@ inline void test_wordgen() {
             // Kept-items stories add items with "keeps" sentences only, never gifts.
             if (p.shape == WordProblem::part)
                 for (size_t k = 1; k < p.patterns.size(); ++k)
-                    EXPECT(p.patterns[k] / 6 == word_detail::part_extra, "part story adds items without keeping them");
+                    EXPECT(p.patterns[k] / 6 == word_detail::part_extra || p.patterns[k] / 6 == word_detail::part_extra_b ||
+                               p.patterns[k] / 6 == word_detail::part_extra_c,
+                           "part story adds items without keeping them");
             EXPECT(p.name != p.other && p.third != p.name && p.third != p.other, "a person appears twice");
             name_pairs.insert({p.name, p.other});
             seen_distractors.insert(p.distractor);

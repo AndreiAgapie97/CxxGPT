@@ -149,12 +149,12 @@ Math problem-solving accuracy is the first evaluation focus.
   answers and worked solutions (with or without calculator notes). Six
   story shapes (a running quantity, comparisons, totals over people,
   rates, a fraction or percentage of a part, purchases and change), 2-8
-  operations, distractor sentences, money spelled three ways; 120 sentence
-  patterns, 40 of them held out for the test split. Besides the plan's own
+  operations, distractor sentences, money spelled three ways; 162 sentence
+  patterns, 54 of them held out for the test split. Besides the plan's own
   exact check, a second solver works the five newer shapes out from the
   story's quantities alone. Audited 2026-10-16 (README, "Generated word
   problems"): no "1 cards", realistic payments, kept items with a source,
-  at most two cuts per chain, no wording repeated too soon; the tests
+  at most two cuts per chain, no wording used twice in a story; the tests
   check each rule. `data/targeted-math` was made before the audit (commit
   3b6d880) and keeps the old flaws until the owner decides to rebuild it.
 - GSM8K dev set: `scripts/get_data.py` holds out 500 GSM8K train problems

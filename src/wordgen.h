@@ -91,7 +91,8 @@ inline std::string money(int64_t value) {
 enum Family { boxes, production, earnings, containers, receive, give, share,
               fraction, percent, sell, buy, convert, compare_people, total_two,
               total_three, time_rate, part_fraction, part_percent, shopping,
-              extra_cost, part_extra, family_count };
+              extra_cost, part_extra, receive_b, receive_c, extra_cost_b, extra_cost_c, part_extra_b,
+              part_extra_c, family_count };
 
 // Six distinct question patterns per family: four for train, two held out
 // for test. Every sentence of a question, its distractor included, comes from
@@ -227,8 +228,60 @@ inline constexpr std::array<std::array<const char*, 6>, family_count> patterns =
       "On top of that, {name} finds {a} green {unit} and keeps them.",
       "{name} also wins {a} yellow {unit} at a fair and keeps them.",
       "In addition, {name} retains {a} more {unit} received as a gift.",
-      "A cousin hands {name} a further {a} {unit}, which {name} keeps."}}
+      "A cousin hands {name} a further {a} {unit}, which {name} keeps."}},
+    // Long stories add up to six amounts of one kind. Three families of
+    // each kind take turns (in_turn), so a story never needs a wording
+    // twice: twelve for train, six for test.
+    {{"{name} is given {a} more {unit}.",
+      "Soon after, {name} collects {a} more {unit}.",
+      "{name} adds {a} {unit} that a relative brought.",
+      "Later in the week, {name} obtains another {a} {unit}.",
+      "A teacher hands {name} {a} more {unit}.",
+      "{name} ends up with {a} extra {unit} from a classmate."}},
+    {{"{name}'s aunt sends {a} more {unit}.",
+      "{name} wins {a} more {unit} in a raffle.",
+      "Then {name} is handed another {a} {unit}.",
+      "{name} finds {a} more {unit} in a cupboard.",
+      "Someone at school passes {a} more {unit} to {name}.",
+      "{name} takes in {a} additional {unit} from an uncle."}},
+    {{"{name} picks up a snack for ${a} as well.",
+      "A greeting card for ${a} goes on the same bill.",
+      "{name} also adds a bag costing ${a}.",
+      "A small toy for ${a} is added to the purchase.",
+      "{name} grabs a drink priced at ${a} too.",
+      "One more thing, a notebook for ${a}, joins the bill."}},
+    {{"{name} also pays ${a} for gift wrapping.",
+      "The bill also includes a ${a} delivery fee.",
+      "{name} adds batteries costing ${a}.",
+      "A box of tissues for ${a} is also bought.",
+      "{name} throws in a pen worth ${a} as well.",
+      "There is also a ${a} charge for a sturdy bag."}},
+    {{"{name}'s grandmother sends {a} {unit}, and {name} keeps all of them.",
+      "{name} trades for {a} purple {unit} and keeps them.",
+      "A classmate gives {name} {a} {unit} to keep.",
+      "{name} keeps the {a} {unit} that came with a birthday card.",
+      "{name} receives {a} orange {unit} at school and keeps every one.",
+      "An uncle passes {a} {unit} to {name}, who keeps them."}},
+    {{"{name} also gets {a} white {unit} from a swap and keeps them.",
+      "A teacher rewards {name} with {a} {unit}, which {name} keeps.",
+      "{name} makes {a} more {unit} and keeps them as well.",
+      "Then {name} is given {a} pink {unit} and keeps them.",
+      "{name} collects {a} more {unit} at a market and keeps them.",
+      "A neighbor leaves {a} {unit} for {name}, who keeps them all."}}
 }};
+
+// The family for the index-th extra sentence of one kind: the three
+// families of that kind take turns (receive, receive_b, receive_c, ...).
+inline int in_turn(int family, size_t index) {
+    const size_t k = index % 3;
+    if (k == 0) return family;
+    if (family == receive) return k == 1 ? receive_b : receive_c;
+    if (family == extra_cost) return k == 1 ? extra_cost_b : extra_cost_c;
+    if (family == part_extra) return k == 1 ? part_extra_b : part_extra_c;
+    return family;
+}
+
+inline bool is_receive(int family) { return family == receive || family == receive_b || family == receive_c; }
 
 // Separate wording in each split, just like the arithmetic sentences.
 inline constexpr std::array<const char*, 24> distractors = {
@@ -331,7 +384,7 @@ struct Story {
         replace(s, "${a}", "$" + money(a));
         replace(s, "${b}", "$" + money(b));
         replace(s, "${c}", "$" + money(c));
-        replace(s, "{a}", kind == Kind::money && (family == receive || family == give) ? money(a) : number(a));
+        replace(s, "{a}", kind == Kind::money && (is_receive(family) || family == give) ? money(a) : number(a));
         replace(s, "{b}", number(b));
         replace(s, "{c}", number(c));
         replace(s, "{d}", number(d));
@@ -371,18 +424,25 @@ inline bool chain_story(Story& s, int steps) {
                      {"The starting amount is", s.name + " starts with", s.unit()})) return false;
     // A story a person would tell: at most two steps that cut the amount
     // down (an equal share, a fraction or a percentage kept), never two in
-    // a row, and at most one sale and one purchase.
-    int done = 1, cuts = 0, last = -1;
+    // a row, and at most one sale and one purchase. Gifts take turns among
+    // three families (at most six), giving away happens at most twice: no
+    // wording is needed twice.
+    int done = 1, cuts = 0, last = -1, gifts = 0, gives = 0;
     bool sold = false, bought = false;
     while (done < steps) {
         const bool can_cut = cuts < 2 && last != share && last != fraction && last != percent;
-        std::vector<int> choices = {receive, give};
+        std::vector<int> choices;
+        if (gifts < 6) choices.push_back(receive);
+        if (gives < 2) choices.push_back(give);
         if (can_cut) choices.insert(choices.end(), {share, fraction});
         if (can_cut && steps - done >= 2) choices.push_back(percent);
         if (s.kind == Kind::objects && !sold) choices.push_back(sell);
         if (s.kind == Kind::money && !bought) choices.push_back(buy);
         if (s.kind == Kind::liters) choices.push_back(convert);
-        const int family = choices[s.rng.below(choices.size())];
+        if (choices.empty()) return false;
+        int family = choices[s.rng.below(choices.size())];
+        if (family == receive) family = in_turn(receive, size_t(gifts++));
+        if (family == give) ++gives;
         last = family;
         if (family == share || family == fraction || family == percent) ++cuts;
         if (family == sell) sold = true;
@@ -392,7 +452,7 @@ inline bool chain_story(Story& s, int steps) {
         if (family == percent) a = s.draw(1, 3) * 25 * scale;
         if (family == sell || family == buy) a = s.draw(1, 32) * 25;
         if (family == convert) a = 1000 * scale;
-        if ((family == receive || family == give) && s.kind != Kind::objects) {
+        if ((is_receive(family) || family == give) && s.kind != Kind::objects) {
             a += s.draw(0, 3) * 25;
             // Draw in liters first, then express the amount in the current unit.
             if (s.kind == Kind::milliliters) a *= 1000;
@@ -470,8 +530,9 @@ inline bool opening(Story& s, int family, const std::array<int64_t, 4>& inputs, 
 // bill), one sentence and one addition each.
 inline bool add_amounts(Story& s, const std::vector<int64_t>& amounts, int family, const StepText& text) {
     for (const int64_t extra : amounts) {
+        const int turn = in_turn(family, s.out.additions.size());
         s.out.additions.push_back(extra);
-        s.sentence(family, extra);
+        s.sentence(turn, extra);
         const size_t previous = s.out.values.size() - 1, operand = s.literal(extra);
         if (!s.operation('+', previous, operand, s.kind == Kind::objects, text)) return false;
     }

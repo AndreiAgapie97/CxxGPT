@@ -246,8 +246,8 @@ Options (see `gen-word --help`):
   distractor wording; a distractor number never appears in the calculation.
 - `--notes on|off`: include or omit GSM8K calculator notes such as
   `<<48/2=24>>24` (default on). This changes only the worked solution.
-- `--split train|test`: 84 training sentence patterns or 42 held-out test
-  patterns, grouped into 21 arithmetic situations. The opening patterns
+- `--split train|test`: 108 training sentence patterns or 54 held-out test
+  patterns, grouped into 27 arithmetic situations. The opening patterns
   differ too, so the splits cannot share a complete question, even with
   different seeds. Each file also omits duplicate questions.
 
@@ -286,14 +286,15 @@ each checked by the tests on every generated problem:
 - a running quantity is cut down (an equal share, a fraction or a
   percentage kept) at most twice and never twice in a row, and is sold or
   bought at most once;
-- a sentence family's wording is not used twice in one story until all of
-  the split's wordings have been.
+- no wording is used twice in one story: extra items, purchases and kept
+  items each take turns among three sentence families (twelve wordings for
+  train, six for test), and a running quantity gets at most six gifts and
+  gives some away at most twice.
 
-These generated stories are still less varied than human-written math.
-Long stories outside the running-quantity shape are repetitive: at 7-8
-steps, each of the five other shapes is one multiplication (or fraction, or
-percentage) followed by five or six additions, more than the family has
-wordings (four for train, two for test), so a wording comes back. Success on its held-out wording alone is not evidence of improvement on
+These generated stories are still less varied than human-written math:
+at 7-8 steps, each of the five shapes other than the running quantity is
+one multiplication (or fraction, or percentage) followed by five or six
+additions, each worded differently. Success on its held-out wording alone is not evidence of improvement on
 GSM8K or SVAMP. No generated datasets are checked into the repository, and
 this command does not change the night data mix.
 
