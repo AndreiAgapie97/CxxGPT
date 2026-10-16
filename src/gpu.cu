@@ -197,29 +197,44 @@ __global__ void rmsnorm_fwd(float* out, __nv_bfloat16* outh, float* rstd, const 
     }
 }
 
-// rmsnorm_backward, the dx part: dx_i += r g_i w_i - r³/C x_i Σ_j g_j w_j x_j.
-__global__ void rmsnorm_bwd_dx(float* dx, const float* dout, const float* x, const float* w, const float* rstd,
-                               int N, int C) {
-    const int row = blockIdx.x * kRowsPerBlock + threadIdx.x / kWarp, lane = threadIdx.x % kWarp;
-    if (row >= N) return;
-    const float* xn = x + size_t(row) * C;
-    const float* dn = dout + size_t(row) * C;
-    float gx = 0.0f;
-    for (int c = lane; c < C; c += kWarp) gx += dn[c] * w[c] * xn[c];
-    gx = warp_sum(gx);
-    const float r = rstd[row], k = r * r * r * gx / float(C);
-    float* dxn = dx + size_t(row) * C;
-    for (int c = lane; c < C; c += kWarp) dxn[c] += r * dn[c] * w[c] - k * xn[c];
-}
-
-// rmsnorm_backward, the dw part, stage 1: block b sums rows [b*R, (b+1)*R).
-__global__ void rmsnorm_bwd_dw_partial(float* partial, const float* dout, const float* x, const float* rstd,
-                                       int N, int C, int R) {
-    const int n0 = blockIdx.x * R, n1 = min(N, n0 + R);
+// rmsnorm_backward in one pass over dout and x, for kNormRows rows per
+// block, one warp per row at a time:
+// - dx_i += r g_i w_i - r³/C x_i Σ_j g_j w_j x_j (with add false, dx is
+//   written, not read);
+// - the block's part of dw_i = Σ_rows g_i x_i r into partial[block]: each
+//   warp sums its rows in its own row of shared memory, then the warps'
+//   sums are added in a fixed order. No atomics, so every run gives the
+//   same bits.
+constexpr int kNormRows = 64;  // rows per block (kRowsPerBlock warps, 8 rows each)
+__global__ void rmsnorm_bwd(float* dx, float* partial, const float* dout, const float* x, const float* w,
+                            const float* rstd, int N, int C, bool add) {
+    extern __shared__ float wsum[];  // [kRowsPerBlock][C]
+    const int lane = threadIdx.x % kWarp, wid = threadIdx.x / kWarp;
+    float* mine = wsum + size_t(wid) * C;
+    for (int c = lane; c < C; c += kWarp) mine[c] = 0.0f;
+    constexpr int per_warp = kNormRows / kRowsPerBlock;
+    for (int k = 0; k < per_warp; ++k) {
+        const int row = blockIdx.x * kNormRows + wid * per_warp + k;
+        if (row >= N) break;  // the same for the whole warp
+        const float* xn = x + size_t(row) * C;
+        const float* dn = dout + size_t(row) * C;
+        float gx = 0.0f;
+        for (int c = lane; c < C; c += kWarp) gx += dn[c] * w[c] * xn[c];
+        gx = warp_sum(gx);
+        const float r = rstd[row], kk = r * r * r * gx / float(C);
+        float* dxn = dx + size_t(row) * C;
+        for (int c = lane; c < C; c += kWarp) {
+            const float d = dn[c], xv = xn[c];
+            const float v = r * d * w[c] - kk * xv;
+            dxn[c] = add ? dxn[c] + v : v;
+            mine[c] += d * xv * r;
+        }
+    }
+    __syncthreads();
     for (int c = threadIdx.x; c < C; c += blockDim.x) {
-        float acc = 0.0f;
-        for (int n = n0; n < n1; ++n) acc += dout[size_t(n) * C + c] * x[size_t(n) * C + c] * rstd[n];
-        partial[size_t(blockIdx.x) * C + c] = acc;
+        float s = 0.0f;
+        for (int q = 0; q < kRowsPerBlock; ++q) s += wsum[size_t(q) * C + c];
+        partial[size_t(blockIdx.x) * C + c] = s;
     }
 }
 
@@ -1579,18 +1594,25 @@ struct GpuTrainer::Impl {
         rmsnorm_fwd<<<blocks_for(N, kRowsPerBlock), kBlock>>>(out, outh, rstd, x, w, N, C);
         LAUNCH_CHECK();
     }
+    // dx gets the norm's input gradient added (add false: written), dw its
+    // weights' gradient added.
     void rmsnorm_backward(float* dx, float* dw, const float* dout, const float* x, const float* w,
-                          const float* rstd, int N, int C) {
+                          const float* rstd, int N, int C, bool add = true) {
         Region r(*this, "norms, rope, adds");
-        rmsnorm_bwd_dx<<<blocks_for(N, kRowsPerBlock), kBlock>>>(dx, dout, x, w, rstd, N, C);
-        LAUNCH_CHECK();
-        constexpr int R = 64;
-        const int nb = (N + R - 1) / R;
-        rmsnorm_bwd_dw_partial<<<nb, kBlock>>>(dw_partial.p, dout, x, rstd, N, C, R);
+        const int nb = (N + kNormRows - 1) / kNormRows;
+        const size_t smem = size_t(kRowsPerBlock) * C * sizeof(float);
+        CHECK(smem <= 96 * 1024, "the norm's backward keeps %d x %d sums in shared memory: d_model at most 3072",
+              kRowsPerBlock, C);
+        if (smem > 48 * 1024 && smem > norm_smem) {  // above 48 KB, CUDA wants to be told first
+            CUDA_CHECK(cudaFuncSetAttribute(rmsnorm_bwd, cudaFuncAttributeMaxDynamicSharedMemorySize, int(smem)));
+            norm_smem = smem;
+        }
+        rmsnorm_bwd<<<nb, kBlock, smem>>>(dx, dw_partial.p, dout, x, w, rstd, N, C, add);
         LAUNCH_CHECK();
         add_partials<<<blocks_for(C), kBlock>>>(dw, dw_partial.p, nb, C);
         LAUNCH_CHECK();
     }
+    size_t norm_smem = 48 * 1024;  // the dynamic shared memory rmsnorm_bwd may use
 
     void rope_apply(float* qkv, int B, int Tn, bool inverse, int pos0 = 0) {
         const int C = cfg.d_model, NH = cfg.n_heads, half = cfg.head_size() / 2;
@@ -1758,7 +1780,7 @@ struct GpuTrainer::Impl {
         dresid.resize(N * C); dC.resize(N * C); dqkv.resize(N * 3 * C); datty.resize(N * C);
         act(dfc, dfch, std::max(N * 2 * F, NK * 2 * Fe)); dsw.resize(std::max(N * F, NK * Fe));
         if (fused_attn) dsum.resize(rows); else dS.resize(att);
-        dw_partial.resize((N + 63) / 64 * C);
+        dw_partial.resize((N + kNormRows - 1) / kNormRows * C);
         if (cfg.moe()) { act(dey, deyh, NK * C); dxg.resize(NK * C); drl.resize(N * E); dgate.resize(NK); }
         if (bf16_ops) dlogitsh.resize(N * V);
     }
@@ -2259,9 +2281,9 @@ struct GpuTrainer::Impl {
         const int B = B_cur, Tn = T_cur, N = B * Tn, C = cfg.d_model, V = cfg.vocab;
         if (n_valid == 0) return;
         // Buffers whose first writer is a product or the experts' scatter
-        // are written (beta 0), not zeroed first and added to; dqkv is
-        // zeroed, since the attention backward adds into it, and dresid,
-        // which every norm's backward adds into.
+        // are written (beta 0), not zeroed first and added to; so is dresid
+        // by the final norm's backward, and the other norms add into it.
+        // dqkv is zeroed, since the attention backward adds into it.
         const float* xL = acts.back().resid2.p;
         {
             Region r(*this, "output layer and loss");
@@ -2277,8 +2299,7 @@ struct GpuTrainer::Impl {
             }
             linear_backward(dC.p, G(wte), pick(logits, dlogitsh), pick(lnf_out, lnfh), P(wte), N, C, V, 0.0f);
         }
-        dresid.zero(size_t(N) * C);
-        rmsnorm_backward(dresid.p, G(lnf), dC.p, xL, P(lnf), rstdf.p, N, C);
+        rmsnorm_backward(dresid.p, G(lnf), dC.p, xL, P(lnf), rstdf.p, N, C, false);  // writes dresid
         for (int l = cfg.n_layers - 1; l >= 0; --l) {
             auto& a = acts[l];
             const auto& o = layer[l];
