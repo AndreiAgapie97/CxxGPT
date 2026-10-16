@@ -560,7 +560,7 @@ __global__ void __launch_bounds__(L::threads, L::min_blocks) grouped_mma_tf32(Pr
     constexpr int BK = S::BK, MT = L::MT, NT = L::NT;
     const Tile t = find_tile<Reduce, L::BM, L::BN>(p, sizeof(float));
     if (!t.live) return;
-    extern __shared__ __align__(16) unsigned char smem_raw[];
+    extern __shared__ __align__(32) unsigned char smem_raw[];
     float* smem = reinterpret_cast<float*>(smem_raw);
     const float* A = reinterpret_cast<const float*>(t.A);
     const float* B = reinterpret_cast<const float*>(t.B);
