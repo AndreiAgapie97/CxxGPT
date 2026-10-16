@@ -84,7 +84,11 @@ Math problem-solving accuracy is the first evaluation focus.
   same model op for op, fp32 with cuBLAS. `train --gpu` stores the
   products' inputs in bf16 by default (`--matmul bf16`, fp32 master
   weights: 1.45x the tokens/s of `--matmul tf32`, the same loss curve);
-  ternary models default to TF32, which bf16 does not take yet. Fused
+  ternary models default to TF32 for now; with `--matmul bf16` they
+  multiply their codes (-1/0/+1 weights, int8 activations: exact in
+  bf16, with exact fp32 sums) and apply the scales after the sum, so the
+  forward products are exact and only the gradients are rounded, as in
+  bf16 models (`proj_forward`). Fused
   attention kernels are the default (`--no-fused-attn` for cuBLAS
   products): on the tensor cores with TF32/bf16
   (`src/attention_tc.cuh`, tested on the GPU only; 1.18x the cuBLAS

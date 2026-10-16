@@ -16,6 +16,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <map>
 #include <optional>
 #include <string>
 #include <utility>
@@ -718,14 +719,18 @@ __global__ void ternary_gamma(float* gamma, const double* partial, const size_t*
 }
 
 // ternary_quantize, stage 3: wq = clamp(round(w / gamma), -1, 1) * gamma.
-__global__ void ternary_apply(float* qbase, const float* base, const size_t* off, const size_t* len,
-                              const float* gamma) {
+// With bf16 products, also the code itself (-1, 0 or +1) into codes.
+// Either output may be null.
+__global__ void ternary_apply(float* qbase, __nv_bfloat16* codes, const float* base, const size_t* off,
+                              const size_t* len, const float* gamma) {
     const float* w = base + off[blockIdx.y];
-    float* wq = qbase + off[blockIdx.y];
     const float g = gamma[blockIdx.y];
     const size_t n = len[blockIdx.y];
-    for (size_t i = size_t(blockIdx.x) * blockDim.x + threadIdx.x; i < n; i += size_t(gridDim.x) * blockDim.x)
-        wq[i] = fminf(fmaxf(rintf(w[i] / g), -1.0f), 1.0f) * g;
+    for (size_t i = size_t(blockIdx.x) * blockDim.x + threadIdx.x; i < n; i += size_t(gridDim.x) * blockDim.x) {
+        const float code = fminf(fmaxf(rintf(w[i] / g), -1.0f), 1.0f);
+        if (qbase) qbase[off[blockIdx.y] + i] = code * g;
+        if (codes) codes[off[blockIdx.y] + i] = __float2bfloat16(code);
+    }
 }
 
 // act_quantize, one warp per row: x -> round(x / scale) * scale, scale = max|x| / 127.
@@ -743,6 +748,39 @@ __global__ void act_quant(float* xq, const float* x, int N, int C) {
     }
     const float scale = amax / 127.0f, inv = 1.0f / scale;
     for (int c = lane; c < C; c += kWarp) q[c] = fminf(fmaxf(rintf(xn[c] * inv), -127.0f), 127.0f) * scale;
+}
+
+// act_quant for bf16 products, the same codes: with scale, the codes
+// themselves (-127..127, exact in bf16) and each row's scale (0 for a row
+// of zeros); without, code * scale rounded to bf16, as to_bf16 would round
+// act_quant's result.
+__global__ void act_quant_bf16(__nv_bfloat16* xq, float* scale_out, const float* x, int N, int C) {
+    const int row = blockIdx.x * kRowsPerBlock + threadIdx.x / kWarp, lane = threadIdx.x % kWarp;
+    if (row >= N) return;
+    const float* xn = x + size_t(row) * C;
+    __nv_bfloat16* q = xq + size_t(row) * C;
+    float amax = 0.0f;
+    for (int c = lane; c < C; c += kWarp) amax = fmaxf(amax, fabsf(xn[c]));
+    amax = warp_max(amax);
+    if (amax == 0.0f) {
+        for (int c = lane; c < C; c += kWarp) q[c] = __float2bfloat16(0.0f);
+        if (scale_out && lane == 0) scale_out[row] = 0.0f;
+        return;
+    }
+    const float scale = amax / 127.0f, inv = 1.0f / scale;
+    for (int c = lane; c < C; c += kWarp) {
+        const float code = fminf(fmaxf(rintf(xn[c] * inv), -127.0f), 127.0f);
+        q[c] = __float2bfloat16(scale_out ? code : code * scale);
+    }
+    if (scale_out && lane == 0) scale_out[row] = scale;
+}
+
+// y[n, :] *= row[n] * (*g): a ternary product's scales after cuBLAS
+// multiplied the codes.
+__global__ void scale_rows(float* y, const float* row, const float* g, int N, int C) {
+    const size_t total = size_t(N) * C;
+    for (size_t i = size_t(blockIdx.x) * blockDim.x + threadIdx.x; i < total; i += size_t(gridDim.x) * blockDim.x)
+        y[i] *= row[i / C] * *g;
 }
 
 // fp32 to bf16 (round to nearest even), for the operands of bf16 products.
@@ -1154,7 +1192,10 @@ struct GpuTrainer::Impl {
     // bf16 operands: a bf16 copy of the weights (wbf, refreshed with the
     // ternary copy) and inputs written in bf16 (LayerActs), or rounded at
     // the product (op_x, op_dy); sums and results stay fp32, as does
-    // everything else.
+    // everything else. A ternary model's ternary products multiply codes
+    // instead (proj_forward): wbf holds those tensors' codes (-1/0/+1), the
+    // inputs stay fp32 until their int8 codes are taken, and the scales
+    // come after the product, which is then exact up to its last rounding.
     bool bf16_ops = false;
 
     DevBuf<float> params, grads, qparams, m, v;
@@ -1180,6 +1221,9 @@ struct GpuTrainer::Impl {
     DevBuf<size_t> seg_off, seg_len;
     DevBuf<double> seg_partial;
     DevBuf<float> seg_gamma;
+    std::map<size_t, int> seg_at;  // a segment's first parameter -> its index
+    DevBuf<float> qscale;           // with bf16 products: act_quant_bf16's row scales
+    DevBuf<float> consts;           // 0 and 1, for cuBLAS products whose alpha is on the GPU
     // All parameters as one segment, for the gradient norm.
     DevBuf<size_t> all_off, all_len;
     DevBuf<double> norm_partial;
@@ -1367,9 +1411,11 @@ struct GpuTrainer::Impl {
         // use TF32.
         compute = matmul == Matmul::fp32 ? CUBLAS_COMPUTE_32F : CUBLAS_COMPUTE_32F_FAST_TF32;
         bf16_ops = matmul == Matmul::bf16;
-        CHECK(!bf16_ops || !cfg.ternary,
-              "--matmul bf16 does not take ternary models yet (their quantized weights and activations are not "
-              "exact in bf16); use --matmul tf32");
+        if (bf16_ops && cfg.ternary) {
+            const float c[2] = {0.0f, 1.0f};
+            consts.resize(2);
+            to_device(consts.p, c, 2);
+        }
         if (fused_attn) {
             const int HS = cfg.head_size();
             CHECK(HS <= attn::kMaxHS, "fused attention takes heads of up to %d (this model: %d); use --no-fused-attn",
@@ -1380,7 +1426,10 @@ struct GpuTrainer::Impl {
             fused_attention_prepare(HS, tc_attn);
         }
         params.resize(n_params);
-        if (cfg.ternary) qparams.resize(n_params);  // read only through W(), for ternary models
+        // Ternary weights, read only through W(); with bf16 products the
+        // products take wbf's codes, and these 4 bytes a weight would not fit
+        // the night model in 8 GB (get_ternary_weights makes them for tests).
+        if (cfg.ternary && !bf16_ops) qparams.resize(n_params);
         if (bf16_ops) wbf.resize(n_params);
         if (!inference) {
             grads.resize(n_params);
@@ -1419,6 +1468,7 @@ struct GpuTrainer::Impl {
             if (!p.ternary) continue;
             const size_t per = p.size / p.count;
             for (int c = 0; c < p.count; ++c) {
+                seg_at[p.offset + c * per] = int(seg_off_h.size());
                 seg_off_h.push_back(p.offset + c * per);
                 seg_len_h.push_back(per);
             }
@@ -1512,6 +1562,19 @@ struct GpuTrainer::Impl {
                                   bf16 ? CUBLAS_COMPUTE_32F : compute, CUBLAS_GEMM_DEFAULT));
     }
 
+    // Row-major C[M, N] = gamma · A[M, K] · B[K, N] + beta · C (beta 0 or 1),
+    // bf16 inputs, with gamma on the GPU (a ternary tensor's).
+    void gemm_gamma(int M, int N, int K, const __nv_bfloat16* A, int lda, const __nv_bfloat16* B, int ldb,
+                    float* C, int ldc, const float* gamma, float beta) {
+        if (M == 0 || N == 0) return;
+        CHECK(beta == 0.0f || beta == 1.0f, "gemm_gamma takes beta 0 or 1");
+        CUBLAS_CHECK(cublasSetPointerMode(blas, CUBLAS_POINTER_MODE_DEVICE));
+        CUBLAS_CHECK(cublasGemmEx(blas, CUBLAS_OP_N, CUBLAS_OP_N, N, M, K, gamma, B, CUDA_R_16BF, ldb, A,
+                                  CUDA_R_16BF, lda, consts.p + (beta == 1.0f), C, CUDA_R_32F, ldc, CUBLAS_COMPUTE_32F,
+                                  CUBLAS_GEMM_DEFAULT));
+        CUBLAS_CHECK(cublasSetPointerMode(blas, CUBLAS_POINTER_MODE_HOST));
+    }
+
     // The same, for `batch` independent products at fixed strides.
     void gemm_batched(bool ta, bool tb, int M, int N, int K, const float* A, int lda, long long sa,
                       const float* B, int ldb, long long sb, float* C, int ldc, long long sc, float beta,
@@ -1534,8 +1597,10 @@ struct GpuTrainer::Impl {
     // With bf16 products: the bf16 copy of weights w (a pointer into params).
     const __nv_bfloat16* WB(const float* w) const { return wbf.p + (w - params.p); }
     // An activation kept in fp32 (f) or, with bf16 products, in bf16 (h).
-    Operand pick(const DevBuf<float>& f, const DevBuf<__nv_bfloat16>& h) const {
-        return bf16_ops ? Operand(h.p) : Operand(f.p);
+    // An input of ternary products (q) stays fp32 (its codes are taken from
+    // it; allocate's act).
+    Operand pick(const DevBuf<float>& f, const DevBuf<__nv_bfloat16>& h, bool q = false) const {
+        return bf16_ops && !q ? Operand(h.p) : Operand(f.p);
     }
     // x as a bf16 product's input: as it is, or n floats rounded into the
     // operand buffer op (grown on first use).
@@ -1579,12 +1644,42 @@ struct GpuTrainer::Impl {
         act_quant<<<blocks_for(N, kRowsPerBlock), kBlock>>>(xq_, x, N, C);
         LAUNCH_CHECK();
     }
+    // With bf16 products: x's int8 codes into op_x and their row scales into
+    // qscale (codes), or the codes times their scales in bf16 (!codes).
+    const __nv_bfloat16* act_quantize_bf16(Operand x, int N, int C, bool codes) {
+        CHECK(x.f, "a ternary product got a bf16 input");
+        op_x.resize(size_t(N) * C);
+        if (N > 0) {
+            act_quant_bf16<<<blocks_for(N, kRowsPerBlock), kBlock>>>(op_x.p, codes ? qscale.p : nullptr, x.f, N, C);
+            LAUNCH_CHECK();
+        }
+        return op_x.p;
+    }
+    // A ternary tensor's gamma on the GPU (its segment's; for experts, the
+    // first expert's, the others' following it).
+    const float* gamma_of(size_t woff) const {
+        const auto it = seg_at.find(woff);
+        CHECK(it != seg_at.end(), "no ternary tensor at parameter %zu", woff);
+        return seg_gamma.p + it->second;
+    }
 
     // Model::proj_forward / proj_backward: BitLinear when q (ternary weights,
-    // int8 activations).
+    // int8 activations). With bf16 products, a ternary product multiplies
+    // the codes (exact sums), then scales: y = (xc · wcᵀ) · row scale · gamma,
+    // and dx = (dy · wc) · gamma; the weights' gradient takes the
+    // activations as they are used, code times scale, rounded to bf16.
     void proj_forward(float* y, Operand x, size_t woff, int N, int IC, int OC, bool q) {
         Region r(*this, "matmul fwd");
-        if (q) {  // never with bf16 products
+        if (q && bf16_ops) {
+            gemm(false, true, N, OC, IC, act_quantize_bf16(x, N, IC, true), IC, wbf.p + woff, IC, y, OC, 0.0f, true);
+            if (N > 0) {
+                scale_rows<<<std::min(blocks_for(size_t(N) * OC), 4096), kBlock>>>(y, qscale.p, gamma_of(woff), N,
+                                                                                    OC);
+                LAUNCH_CHECK();
+            }
+            return;
+        }
+        if (q) {
             act_quantize(xq.p, x.f, N, IC);
             x = Operand(xq.p);
         }
@@ -1592,6 +1687,12 @@ struct GpuTrainer::Impl {
     }
     void proj_backward(float* dx, Operand dy, Operand x, size_t woff, int N, int IC, int OC, bool q, float dx_beta) {
         Region r(*this, "matmul bwd");
+        if (q && bf16_ops) {
+            const auto* dyb = as_bf16(dy, op_dy, size_t(N) * OC);
+            if (dx) gemm_gamma(N, IC, OC, dyb, OC, wbf.p + woff, IC, dx, IC, gamma_of(woff), dx_beta);
+            gemm(true, false, OC, IC, N, dyb, OC, act_quantize_bf16(x, N, IC, false), IC, G(woff), IC, 1.0f, true);
+            return;
+        }
         if (q) {
             act_quantize(xq.p, x.f, N, IC);
             x = Operand(xq.p);
@@ -1730,6 +1831,11 @@ struct GpuTrainer::Impl {
     // The weights as the products use them, after each change: the ternary
     // copy, and with bf16 products the bf16 copy.
     void quantize_weights() {
+        if (bf16_ops) {  // first: a ternary model's codes then replace its ternary tensors' part
+            Region r(*this, "bf16 weights");
+            to_bf16<<<std::min(blocks_for(n_params), 4096), kBlock>>>(wbf.p, params.p, n_params);
+            LAUNCH_CHECK();
+        }
         {
             Region r(*this, "ternary weights");
             if (n_seg > 0) {
@@ -1738,15 +1844,10 @@ struct GpuTrainer::Impl {
                 LAUNCH_CHECK();
                 ternary_gamma<<<n_seg, kWarp>>>(seg_gamma.p, seg_partial.p, seg_len.p, kPartials);
                 LAUNCH_CHECK();
-                ternary_apply<<<dim3(kPartials, n_seg), kBlock>>>(qparams.p, params.p, seg_off.p, seg_len.p,
-                                                                 seg_gamma.p);
+                ternary_apply<<<dim3(kPartials, n_seg), kBlock>>>(qparams.p, bf16_ops ? wbf.p : nullptr, params.p,
+                                                                 seg_off.p, seg_len.p, seg_gamma.p);
                 LAUNCH_CHECK();
             }
-        }
-        if (bf16_ops) {
-            Region r(*this, "bf16 weights");
-            to_bf16<<<std::min(blocks_for(n_params), 4096), kBlock>>>(wbf.p, params.p, n_params);
-            LAUNCH_CHECK();
         }
         weights_dirty = false;
     }
@@ -1761,23 +1862,25 @@ struct GpuTrainer::Impl {
         const size_t Fe = cfg.ehidden(), NK = cfg.moe() ? N * K : 0;
         const size_t att = size_t(B) * cfg.n_heads * Tn * Tn, rows = size_t(B) * cfg.n_heads * Tn;
         acts.resize(cfg.n_layers);
-        // An activation that only feeds products: fp32, or bf16 with bf16 products.
-        auto act = [&](DevBuf<float>& f, DevBuf<__nv_bfloat16>& h, size_t n) {
-            if (bf16_ops) h.resize(n);
+        // An activation that only feeds products: fp32, or bf16 with bf16
+        // products, unless the products are ternary (q, pick).
+        auto act = [&](DevBuf<float>& f, DevBuf<__nv_bfloat16>& h, size_t n, bool q = false) {
+            if (bf16_ops && !q) h.resize(n);
             else f.resize(n);
         };
+        const bool qa = attn_ternary(), qf = cfg.ternary;
         for (auto& a : acts) {
-            act(a.ln1, a.ln1h, N * C); a.rstd1.resize(N); a.qkv.resize(N * 3 * C);
+            act(a.ln1, a.ln1h, N * C, qa); a.rstd1.resize(N); a.qkv.resize(N * 3 * C);
             if (fused_attn) a.lse.resize(rows); else a.att.resize(att);
             a.atty.resize(N * C);
             if (bf16_ops) a.attyh.resize(N * C);
             a.resid1.resize(N * C); a.ln2.resize(N * C); a.rstd2.resize(N);
             if (bf16_ops) a.ln2h.resize(N * C);
-            a.resid2.resize(N * C); a.fc.resize(N * 2 * F); act(a.sw, a.swh, N * F);
+            a.resid2.resize(N * C); a.fc.resize(N * 2 * F); act(a.sw, a.swh, N * F, qf);
             if (cfg.moe()) {
                 a.rlogits.resize(N * E); a.sel.resize(N * K); a.gate.resize(N * K);
                 a.order.resize(NK); a.row_of.resize(NK);
-                act(a.xg, a.xgh, NK * C); a.efc.resize(NK * 2 * Fe); act(a.esw, a.eswh, NK * Fe);
+                act(a.xg, a.xgh, NK * C, qf); a.efc.resize(NK * 2 * Fe); act(a.esw, a.eswh, NK * Fe, qf);
                 a.starts.resize(E + 1);
                 a.ey.resize(NK * C);
             }
@@ -1786,6 +1889,7 @@ struct GpuTrainer::Impl {
         logits.resize(N * V); losses.resize(N);
         tokens.resize(N); targets.resize(N);
         xq.resize(std::max(N, NK) * std::max({C, F, Fe}));
+        if (bf16_ops && cfg.ternary) qscale.resize(std::max(N, NK));
         out_tmp.resize(N * C);
         if (inference) return;  // no backward pass
         dresid.resize(N * C); dC.resize(N * C); dqkv.resize(N * 3 * C); datty.resize(N * C);
@@ -1805,9 +1909,9 @@ struct GpuTrainer::Impl {
         const int C = cfg.d_model, F = cfg.always_hidden();
         CHECK(F > 0 || cfg.moe(), "a layer without an FFN");
         if (F > 0) {
-            proj_forward(a.fc.p, pick(a.ln2, a.ln2h), o.wfc, N, C, 2 * F, cfg.ternary);
+            proj_forward(a.fc.p, pick(a.ln2, a.ln2h, cfg.ternary), o.wfc, N, C, 2 * F, cfg.ternary);
             swiglu_forward(a.sw.p, a.swh.p, a.fc.p, N, F);
-            proj_forward(out_tmp.p, pick(a.sw, a.swh), o.wproj, N, F, C, cfg.ternary);
+            proj_forward(out_tmp.p, pick(a.sw, a.swh, cfg.ternary), o.wproj, N, F, C, cfg.ternary);
         }
         if (cfg.moe()) moe_forward(l, out, resid, F > 0 ? out_tmp.p : nullptr, N, training);
         else add(out, resid, out_tmp.p, size_t(N) * C);
@@ -1819,9 +1923,9 @@ struct GpuTrainer::Impl {
         const auto& o = layer[l];
         const int C = cfg.d_model, F = cfg.always_hidden();
         if (F > 0) {
-            proj_backward(dsw.p, dout, pick(a.sw, a.swh), o.wproj, N, F, C, cfg.ternary, 0.0f);
+            proj_backward(dsw.p, dout, pick(a.sw, a.swh, cfg.ternary), o.wproj, N, F, C, cfg.ternary, 0.0f);
             swiglu_backward(dfc.p, dfch.p, dsw.p, a.fc.p, N, F);
-            proj_backward(dx, pick(dfc, dfch), pick(a.ln2, a.ln2h), o.wfc, N, C, 2 * F, cfg.ternary,
+            proj_backward(dx, pick(dfc, dfch), pick(a.ln2, a.ln2h, cfg.ternary), o.wfc, N, C, 2 * F, cfg.ternary,
                           add ? 1.0f : 0.0f);
             add = true;  // the experts add to it
         }
@@ -1838,15 +1942,20 @@ struct GpuTrainer::Impl {
     void experts_forward(float* y, Operand x, size_t woff, size_t per, const int* starts, int NK, int IC, int OC,
                          bool q) {
         Region r(*this, "matmul fwd");
-        if (q) {  // never with bf16 products
-            act_quantize(xq.p, x.f, NK, IC);
-            x = Operand(xq.p);
-        }
         gg::Problem p;
-        if (bf16_ops) {
+        if (q && bf16_ops) {  // the codes' product, then the scales (proj_forward)
+            p.A = act_quantize_bf16(x, NK, IC, true);
+            p.B = wbf.p + woff;
+            p.row_scale = qscale.p;
+            p.group_scale = gamma_of(woff);
+        } else if (bf16_ops) {
             p.A = as_bf16(x, op_x, size_t(NK) * IC);
-            p.B = WB(W(woff, q));
+            p.B = wbf.p + woff;
         } else {
+            if (q) {
+                act_quantize(xq.p, x.f, NK, IC);
+                x = Operand(xq.p);
+            }
             CHECK(x.f, "an fp32 product got a bf16 input");
             p.A = x.f;
             p.B = W(woff, q);
@@ -1869,16 +1978,17 @@ struct GpuTrainer::Impl {
                           int IC, int OC, bool q, const float* swiglu = nullptr,
                           __nv_bfloat16* swiglu_out = nullptr) {
         Region r(*this, "matmul bwd");
-        if (q) {
-            act_quantize(xq.p, x.f, NK, IC);
-            x = Operand(xq.p);
-        }
         gg::Problem d, g;
         if (bf16_ops) {
             d.A = g.A = as_bf16(dy, op_dy, size_t(NK) * OC);
-            d.B = WB(W(woff, q));
-            g.B = as_bf16(x, op_x, size_t(NK) * IC);
+            d.B = wbf.p + woff;  // a ternary tensor's codes (proj_backward)
+            if (q) d.group_scale = gamma_of(woff);
+            g.B = q ? act_quantize_bf16(x, NK, IC, false) : as_bf16(x, op_x, size_t(NK) * IC);
         } else {
+            if (q) {
+                act_quantize(xq.p, x.f, NK, IC);
+                x = Operand(xq.p);
+            }
             CHECK(x.f && dy.f, "an fp32 product got a bf16 input");
             d.A = g.A = dy.f;
             d.B = W(woff, q);
@@ -1921,6 +2031,7 @@ struct GpuTrainer::Impl {
         expert_starts<<<1, 1>>>(a.starts.p, counts.p, E);
         LAUNCH_CHECK();
         const bool grouped = grouped_experts || decoding;
+        const bool bh = bf16_ops && !cfg.ternary;  // the experts' inputs in bf16 (pick)
         if (!grouped) {
             // The host needs the counts to size the experts' products. The
             // copy goes first and the grouping of rows behind it, so the
@@ -1930,7 +2041,7 @@ struct GpuTrainer::Impl {
         }
         moe_order<<<E, 1024>>>(a.order.p, a.row_of.p, a.sel.p, counts.p, NK);
         LAUNCH_CHECK();
-        if (bf16_ops)
+        if (bf16_ops && !cfg.ternary)
             moe_gather<<<blocks_for(size_t(NK) * C), kBlock>>>(a.xgh.p, a.ln2h.p, a.order.p, NK, C, K);
         else
             moe_gather<<<blocks_for(size_t(NK) * C), kBlock>>>(a.xg.p, a.ln2.p, a.order.p, NK, C, K);
@@ -1942,22 +2053,24 @@ struct GpuTrainer::Impl {
         const size_t efc_per = size_t(2) * Fe * C, eproj_per = size_t(C) * Fe;
         if (grouped) {
             routing.reset();
-            experts_forward(a.efc.p, pick(a.xg, a.xgh), o.efc, efc_per, a.starts.p, NK, C, 2 * Fe, cfg.ternary);
-            swiglu_forward(bf16_ops ? nullptr : a.esw.p, bf16_ops ? a.eswh.p : nullptr, a.efc.p, NK, Fe);
-            experts_forward(a.ey.p, pick(a.esw, a.eswh), o.eproj, eproj_per, a.starts.p, NK, Fe, C, cfg.ternary);
+            experts_forward(a.efc.p, pick(a.xg, a.xgh, cfg.ternary), o.efc, efc_per, a.starts.p, NK, C, 2 * Fe,
+                            cfg.ternary);
+            swiglu_forward(bh ? nullptr : a.esw.p, bh ? a.eswh.p : nullptr, a.efc.p, NK, Fe);
+            experts_forward(a.ey.p, pick(a.esw, a.eswh, cfg.ternary), o.eproj, eproj_per, a.starts.p, NK, Fe, C,
+                            cfg.ternary);
         } else {
             CUDA_CHECK(cudaEventSynchronize(counts_ready));
             a.expert_start.assign(E + 1, 0);
             for (int e = 0; e < E; ++e) a.expert_start[e + 1] = a.expert_start[e] + counts_h[e];
             routing.reset();
-            const Operand xg = pick(a.xg, a.xgh), esw = pick(a.esw, a.eswh);
+            const Operand xg = pick(a.xg, a.xgh, cfg.ternary), esw = pick(a.esw, a.eswh, cfg.ternary);
             for (int e = 0; e < E; ++e) {
                 const int r0 = a.expert_start[e], n = a.expert_start[e + 1] - r0;
                 if (n == 0) continue;
                 proj_forward(a.efc.p + size_t(r0) * 2 * Fe, xg + size_t(r0) * C, o.efc + e * efc_per, n, C, 2 * Fe,
                              cfg.ternary);
-                swiglu_forward(bf16_ops ? nullptr : a.esw.p + size_t(r0) * Fe,
-                               bf16_ops ? a.eswh.p + size_t(r0) * Fe : nullptr, a.efc.p + size_t(r0) * 2 * Fe, n, Fe);
+                swiglu_forward(bh ? nullptr : a.esw.p + size_t(r0) * Fe, bh ? a.eswh.p + size_t(r0) * Fe : nullptr,
+                               a.efc.p + size_t(r0) * 2 * Fe, n, Fe);
                 proj_forward(a.ey.p + size_t(r0) * C, esw + size_t(r0) * Fe, o.eproj + e * eproj_per, n, Fe, C,
                              cfg.ternary);
             }
@@ -1986,15 +2099,16 @@ struct GpuTrainer::Impl {
             // product's epilogue, so dsw is never stored (the same values and
             // formula as swiglu_backward); fp32 and TF32 keep the two passes.
             const bool fused = bf16_ops;
-            experts_backward(dsw.p, pick(dey, deyh), pick(a.esw, a.eswh), o.eproj, eproj_per, a.starts.p, NK, Fe, C,
-                             cfg.ternary, fused ? a.efc.p : nullptr, fused ? dfch.p : nullptr);
+            experts_backward(dsw.p, pick(dey, deyh), pick(a.esw, a.eswh, cfg.ternary), o.eproj, eproj_per,
+                             a.starts.p, NK, Fe, C, cfg.ternary, fused ? a.efc.p : nullptr, fused ? dfch.p : nullptr);
             if (!fused) swiglu_backward(dfc.p, dfch.p, dsw.p, a.efc.p, NK, Fe);
-            experts_backward(dxg.p, pick(dfc, dfch), pick(a.xg, a.xgh), o.efc, efc_per, a.starts.p, NK, C, 2 * Fe,
-                             cfg.ternary);
+            experts_backward(dxg.p, pick(dfc, dfch), pick(a.xg, a.xgh, cfg.ternary), o.efc, efc_per, a.starts.p,
+                             NK, C, 2 * Fe, cfg.ternary);
         } else {
             // Each expert writes its own rows of dsw and dxg; together they
             // cover all NK rows.
-            const Operand dy = pick(dey, deyh), xg = pick(a.xg, a.xgh), esw = pick(a.esw, a.eswh);
+            const Operand dy = pick(dey, deyh), xg = pick(a.xg, a.xgh, cfg.ternary),
+                          esw = pick(a.esw, a.eswh, cfg.ternary);
             for (int e = 0; e < E; ++e) {
                 const int r0 = a.expert_start[e], n = a.expert_start[e + 1] - r0;
                 if (n == 0) continue;
@@ -2039,11 +2153,11 @@ struct GpuTrainer::Impl {
             auto& a = acts[l];
             const auto& o = layer[l];
             rmsnorm_forward(a.ln1.p, a.ln1h.p, a.rstd1.p, x, P(o.ln1), N, C);
-            proj_forward(a.qkv.p, pick(a.ln1, a.ln1h), o.wqkv, N, C, 3 * C, attn_ternary());
+            proj_forward(a.qkv.p, pick(a.ln1, a.ln1h, attn_ternary()), o.wqkv, N, C, 3 * C, attn_ternary());
             if (cfg.rope_layer(l)) rope_apply(a.qkv.p, B, Tn, false);
             attention_forward(a, B, Tn);
             if (bf16_ops) to_bf16_region(a.attyh.p, a.atty.p, size_t(N) * C);
-            proj_forward(out_tmp.p, pick(a.atty, a.attyh), o.wo, N, C, C, attn_ternary());
+            proj_forward(out_tmp.p, pick(a.atty, a.attyh, attn_ternary()), o.wo, N, C, C, attn_ternary());
             add(a.resid1.p, x, out_tmp.p, size_t(N) * C);
             rmsnorm_forward(a.ln2.p, a.ln2h.p, a.rstd2.p, a.resid1.p, P(o.ln2), N, C);
             ffn_forward(l, a.resid2.p, a.resid1.p, N, training);
@@ -2192,7 +2306,7 @@ struct GpuTrainer::Impl {
             auto& a = acts[l];
             const auto& o = layer[l];
             rmsnorm_forward(a.ln1.p, a.ln1h.p, a.rstd1.p, x, P(o.ln1), N, C);
-            proj_forward(a.qkv.p, pick(a.ln1, a.ln1h), o.wqkv, N, C, 3 * C, attn_ternary());
+            proj_forward(a.qkv.p, pick(a.ln1, a.ln1h, attn_ternary()), o.wqkv, N, C, 3 * C, attn_ternary());
             if (cfg.rope_layer(l)) rope_apply(a.qkv.p, B, Q, false, pos0);
             {
                 Region r(*this, "attention fwd");
@@ -2203,7 +2317,7 @@ struct GpuTrainer::Impl {
                 LAUNCH_CHECK();
             }
             if (bf16_ops) to_bf16_region(a.attyh.p, a.atty.p, size_t(N) * C);
-            proj_forward(out_tmp.p, pick(a.atty, a.attyh), o.wo, N, C, C, attn_ternary());
+            proj_forward(out_tmp.p, pick(a.atty, a.attyh, attn_ternary()), o.wo, N, C, C, attn_ternary());
             add(a.resid1.p, x, out_tmp.p, size_t(N) * C);
             rmsnorm_forward(a.ln2.p, a.ln2h.p, a.rstd2.p, a.resid1.p, P(o.ln2), N, C);
             ffn_forward(l, a.resid2.p, a.resid1.p, N, false);
@@ -2328,11 +2442,13 @@ struct GpuTrainer::Impl {
             const float* x_in = l ? acts[l - 1].resid2.p : x0.p;
             ffn_backward(l, dC.p, dresid.p, N, false);
             rmsnorm_backward(dresid.p, G(o.ln2), dC.p, a.resid1.p, P(o.ln2), a.rstd2.p, N, C);
-            proj_backward(datty.p, dresid.p, pick(a.atty, a.attyh), o.wo, N, C, C, attn_ternary(), 0.0f);
+            proj_backward(datty.p, dresid.p, pick(a.atty, a.attyh, attn_ternary()), o.wo, N, C, C, attn_ternary(),
+                          0.0f);
             dqkv.zero(size_t(N) * 3 * C);
             attention_backward(dqkv.p, datty.p, a, B, Tn);
             if (cfg.rope_layer(l)) rope_apply(dqkv.p, B, Tn, true);
-            proj_backward(dC.p, dqkv.p, pick(a.ln1, a.ln1h), o.wqkv, N, C, 3 * C, attn_ternary(), 0.0f);
+            proj_backward(dC.p, dqkv.p, pick(a.ln1, a.ln1h, attn_ternary()), o.wqkv, N, C, 3 * C, attn_ternary(),
+                          0.0f);
             rmsnorm_backward(dresid.p, G(o.ln1), dC.p, x_in, P(o.ln1), a.rstd1.p, N, C);
         }
         embedding_bwd<<<blocks_for(size_t(N) * C), kBlock>>>(G(wte), dresid.p, tokens.p, N, C);
@@ -2553,8 +2669,19 @@ void GpuTrainer::get_grads(float* g) const {
 }
 void GpuTrainer::get_ternary_weights(float* q) {
     CHECK(impl_->cfg.ternary, "get_ternary_weights() needs a ternary model");
-    if (impl_->weights_dirty) impl_->quantize_weights();
-    to_host(q, impl_->qparams.p, impl_->n_params);
+    auto& m = *impl_;
+    if (m.weights_dirty) m.quantize_weights();
+    if (m.qparams.p) {
+        to_host(q, m.qparams.p, m.n_params);
+        return;
+    }
+    // bf16 products keep no ternary copy: made here by the same kernel.
+    DevBuf<float> tmp;
+    tmp.resize(m.n_params);
+    ternary_apply<<<dim3(kPartials, m.n_seg), kBlock>>>(tmp.p, nullptr, m.params.p, m.seg_off.p, m.seg_len.p,
+                                                       m.seg_gamma.p);
+    LAUNCH_CHECK();
+    to_host(q, tmp.p, m.n_params);
 }
 
 void GpuTrainer::set_adam_state(long step, const float* m, const float* v) {
@@ -2733,12 +2860,14 @@ void gpu_fused_attention(const float* qkv, const float* dout, float* out, float*
 
 void gpu_grouped_product(Matmul matmul, GroupedOp op, const std::vector<float>& A, const std::vector<float>& B,
                          std::vector<float>& C, const std::vector<int>& starts, int M, int N, int K, int lda, int ldb,
-                         int ldc, long long stride, float beta, int offset) {
+                         int ldc, long long stride, float beta, int offset, const std::vector<float>& row_scale,
+                         const std::vector<float>& group_scale) {
     const bool bf16 = matmul == Matmul::bf16;
     // The operands, offset elements into their buffers (offset 1 makes the
     // rows unaligned, for the fallback kernel); in bf16 for bf16 products.
     DevBuf<float> fa, fb, fc;
     DevBuf<__nv_bfloat16> ha, hb;
+    DevBuf<float> rs, gs;
     DevBuf<int> ds;
     auto up = [&](DevBuf<float>& f, DevBuf<__nv_bfloat16>& h, const std::vector<float>& x) -> const void* {
         f.resize(x.size() + offset);
@@ -2763,6 +2892,16 @@ void gpu_grouped_product(Matmul matmul, GroupedOp op, const std::vector<float>& 
     p.starts = ds.p;
     p.groups = int(starts.size()) - 1;
     p.beta = beta;
+    if (!row_scale.empty()) {
+        rs.resize(row_scale.size());
+        to_device(rs.p, row_scale.data(), row_scale.size());
+        p.row_scale = rs.p;
+    }
+    if (!group_scale.empty()) {
+        gs.resize(group_scale.size());
+        to_device(gs.p, group_scale.data(), group_scale.size());
+        p.group_scale = gs.p;
+    }
     const gg::Kind kind = bf16 ? gg::Kind::bf16 : matmul == Matmul::tf32 ? gg::Kind::tf32 : gg::Kind::fp32;
     const int rows = starts.back();
     if (op == GroupedOp::weight_grad) {
