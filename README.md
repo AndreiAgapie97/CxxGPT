@@ -358,6 +358,50 @@ years only 592 (realistic ages leave few), so those repeat with other names
 and wordings. The output is not part of the training mix; whether to train
 on it is a separate decision.
 
+### Generated math problems: fractions, percentages, ratios and units
+
+```sh
+./cxxgpt gen-math --topic fractions --out data/math/frac-train --split train --seed 1 --count 100000 \
+    --exclude data/licensed-10b/gsm8k-test.txt,data/licensed-10b/gsm8k-dev.txt
+```
+
+`--topic fractions` (`src/mathgen_fractions.h`) has the same files,
+options, splits and checks as the equations, with the task `fractions`.
+Its stories:
+
+- parts of an amount, one to three steps, as fractions or percentages:
+  "has 240 apples, sells 25% of the apples, then gives 1/3 of the remaining
+  apples to Leo";
+- a price cut or raised by a percentage, once or twice, in exact cents;
+- what percent: "18 of the 24 questions right", or a price that went from
+  $40 to $50;
+- an amount shared in a ratio (3:5, or 2:3:4 among three people), or a
+  class of boys and girls, asking for a share or a difference;
+- a ratio and one count ("cats to dogs is 2:3, and there are 18 dogs"),
+  asking for the other count or the total;
+- the same rate for another amount: prices for more or fewer items, a
+  recipe for more or fewer cookies;
+- units: minutes to hours, grams to kilograms, kilometers to meters, cents
+  to dollars.
+
+The numbers are drawn so that every step comes out exact (a part of an
+amount is always whole, a price change always whole cents); every answer is
+a whole number or a decimal with at most two places, as in GSM8K, and
+nothing is rounded. Money and measurements are kept in hundredths inside
+the program. The checker (`fraction_check`) shares no code with the
+generator: it works each story out again from its numbers (the parts as one
+product, prices in cents, every whole percent or ratio part size tried in
+turn), and calc.h checks every note.
+
+No generated question shares a 13-word run with GSM8K test or dev, but
+simple stories land on the same numbers as some of GSM8K's easiest
+questions (a $100 ticket down 20%; 20 cookies, 2/5 given away), so use
+`--exclude` here too: of 300,000 problems it draws about 230 again, after
+which none has a GSM8K test or dev question's numbers and answer. In 1M
+problems: proportions 70k different, price changes 69k, parts 60k, ratio
+splits 59k, units 30k, ratio-and-count 13k, what-percent 6.4k (drawn
+least often).
+
 ### Real data and GPU training
 
 ```sh
