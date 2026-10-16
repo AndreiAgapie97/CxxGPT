@@ -93,12 +93,12 @@ inline constexpr std::array<std::array<const char*, 6>, family_count> patterns =
       "A month later, the new price increases by {q}%.",
       "On top of that, the new price is marked up by {q}%.",
       "The new price then rises by a further {q}%."}},
-    {{"{name} answers {k} of the {n} questions on a test correctly.",
-      "On a quiz with {n} questions, {name} gets {k} right.",
-      "{name} makes {k} out of {n} free throws.",
-      "Out of {n} seeds that {name} plants, {k} sprout.",
-      "{name} hits the target with {k} of {n} arrows.",
-      "Of the {n} letters {name} sent, {k} got a reply."}},
+    {{"Out of {n} seeds that {name} plants, {k} sprout.",
+      "{name} asks {n} people a question for a survey, and {k} of them say yes.",
+      "Of the {n} students at {name}'s school, {k} walk to school.",
+      "{name} takes {n} practice shots at a basket and makes {k} of them.",
+      "Of the {n} letters {name} sent, {k} got a reply.",
+      "{name} checks {n} eggs from a farm and finds that {k} of them are brown."}},
     {{"The price of a {item} goes from ${a} to ${b}.",
       "Last year a {item} cost ${a}; this year it costs ${b}.",
       "A {item} that used to sell for ${a} now sells for ${b}.",
@@ -127,7 +127,7 @@ inline constexpr std::array<std::array<const char*, 6>, family_count> patterns =
       "The ratio of {first} to {second} in {place} is {a}:{b}, and there are {k} {known}.",
       "There are {k} {known} in {place}, where {first} and {second} are in the ratio {a}:{b}.",
       "{name} counts {k} {known} in {place}. The ratio of {first} to {second} there is {a}:{b}.",
-      "For every {a} {first} in {place} there are {b} {second}, and there are {k} {known}.",
+      "In {place}, {first} and {second} come in the ratio {a} to {b}, and there are {k} {known}.",
       "{name} finds {k} {known} in {place}, with {first} and {second} in the ratio {a}:{b}."}},
     {{"{n} {items} cost ${p}.",
       "{name} pays ${p} for {n} {items}.",
@@ -150,14 +150,14 @@ inline constexpr std::array<std::array<const char*, 6>, family_count> patterns =
     {{"Each bag of rice weighs {g} grams, and {name} buys {n} bags.",
       "{name} packs {n} jars of jam that weigh {g} grams each.",
       "A box holds {n} cans, each weighing {g} grams.",
-      "{name} has {n} apples that weigh {g} grams apiece.",
-      "There are {n} bars of soap, at {g} grams per bar.",
+      "{name} has {n} potatoes that weigh {g} grams apiece.",
+      "There are {n} jars of honey, at {g} grams per jar.",
       "{name} carries {n} books weighing {g} grams each."}},
     {{"{name} walks {k} kilometers every day for {d} days.",
       "Each day for {d} days, {name} cycles {k} kilometers.",
       "{name} runs {k} kilometers a day, {d} days in a row.",
-      "For {d} days, {name} swims {k} kilometers each day.",
-      "On each of {d} days, {name} rows {k} kilometers.",
+      "For {d} days, {name} drives {k} kilometers each day.",
+      "On each of {d} days, {name} skates {k} kilometers.",
       "{name} hikes {k} kilometers daily for {d} days."}},
     {{"{name} buys {n} stickers that cost {c} cents each.",
       "Each pencil costs {c} cents, and {name} buys {n} pencils.",
@@ -176,7 +176,8 @@ inline std::string money(int64_t hundredths) { return word_detail::money(hundred
 // to Leo." Each step takes a fraction (num/den) of what is left. The start
 // is a multiple of the smallest number that keeps every step whole.
 inline bool part_of_story(Story& s, std::string& answer, Place& place) {
-    static const std::array<const char*, 6> objects = {"marbles", "stickers", "apples", "cards", "beads", "stamps"};
+    // Things a person collects, gives away, trades or loses by the hundred.
+    static const std::array<const char*, 6> objects = {"marbles", "stickers", "buttons", "cards", "beads", "stamps"};
     static const std::array<int64_t, 7> denominators = {2, 3, 4, 5, 6, 8, 10};
     const std::string object = objects[s.rng.below(objects.size())];
     const int steps = 1 + int(s.rng.below(3));
@@ -226,6 +227,7 @@ inline bool part_of_story(Story& s, std::string& answer, Place& place) {
         s.line(f + " of " + str(current) + " is " + s.calc(expression, taken) + ", so " +
                s.calc(str(current) + "-" + str(taken), current - taken) + " are left.");
         current -= taken;
+        if (current < 2) return false;  // "1 are left" and "1 stamps" read badly
     }
     s.question = "How many " + object + " does " + s.out.name + " have left?";
     s.line("So " + s.out.name + " has " + str(current) + " " + object + " left.");
@@ -234,13 +236,25 @@ inline bool part_of_story(Story& s, std::string& answer, Place& place) {
     return true;
 }
 
+// Things with a price, and the range a real one costs in whole dollars.
+struct Priced { const char* name; int64_t low, high; };
+inline constexpr std::array<Priced, 8> priced = {{{"jacket", 40, 300}, {"bike", 100, 600}, {"lamp", 20, 150},
+                                                  {"backpack", 20, 120}, {"guitar", 80, 900}, {"tent", 60, 400},
+                                                  {"phone", 200, 900}, {"sofa", 300, 1500}}};
+
+// "12 dollars", "1 dollar".
+inline std::string dollars(const std::string& n) { return math_detail::count_of(n, "dollar", "dollars"); }
+
+// The unit after a number already written: " cups" after 2.5, " cup" after 1.
+inline std::string unit(const std::string& n, const std::string& one) { return n == "1" ? " " + one : " " + one + "s"; }
+
 // A price cut or raised by a percentage, once or twice; each change is on
 // the price just before it. In cents, so every step must be whole cents.
 inline bool price_change_story(Story& s, std::string& answer, Place& place) {
-    static const std::array<const char*, 6> items = {"jacket", "bike", "lamp", "backpack", "guitar", "tent"};
-    const std::string item = items[s.rng.below(items.size())];
+    const Priced& thing = priced[s.rng.below(priced.size())];
+    const std::string item = thing.name;
     const int changes = 1 + int(s.rng.below(2));
-    const int64_t price = 50 * s.draw(20, 800);  // $10.00 to $400.00
+    const int64_t price = 50 * s.draw(2 * thing.low, 2 * thing.high);  // in 50-cent steps
     s.out.inputs = {price};
     s.out.asked = changes == 1 ? int(s.rng.below(2)) : 0;
     s.sentence(change_open, {{"{item}", item}, {"${p}", "$" + money(price)}});
@@ -256,31 +270,32 @@ inline bool price_change_story(Story& s, std::string& answer, Place& place) {
         const Family family = i == 0 ? (down ? change_down : change_up) : (down ? change_then_down : change_then_up);
         s.sentence(family, {{"{q}", str(q)}, {"{item}", item}});
         s.line(std::string("The price ") + (down ? "drops" : "goes up") + " by " +
-               s.calc(number(current) + "*" + str(q) + "/100", number(delta)) + " dollars, so it is now " +
+               s.calc(number(current) + "*" + str(q) + "/100", number(delta)) + unit(number(delta), "dollar") +
+               ", so it is now " +
                s.calc(number(current) + (down ? "-" : "+") + number(delta), number(next)) + " dollars.");
         current = next;
     }
     const bool down = s.out.ops.back() == 'd';
     if (s.out.asked == 0) {
         s.question = "How much does the " + item + " cost now, in dollars?";
-        s.line("So the " + item + " costs " + number(current) + " dollars now.");
+        s.line("So the " + item + " costs " + dollars(number(current)) + " now.");
         answer = number(current);
     } else {
         s.question = down ? "How many dollars cheaper is the " + item + " now?"
                           : "How many dollars more does the " + item + " cost now?";
-        s.line("So the " + item + (down ? " is " + number(delta) + " dollars cheaper." :
-                                          " costs " + number(delta) + " dollars more."));
+        s.line("So the " + item + (down ? " is " + dollars(number(delta)) + " cheaper." :
+                                          " costs " + dollars(number(delta)) + " more."));
         answer = number(delta);
     }
     place = Place::anywhere;
     return true;
 }
 
-// "18 of 24 right: what percent?" (context 0), or a price that went from
-// one whole number of dollars to another (context 1).
+// "18 of 24 seeds sprout: what percent?" (context 0), or a price that went
+// from one whole number of dollars to another (context 1).
 inline bool what_percent_story(Story& s, std::string& answer, Place& place) {
-    static const std::array<const char*, 6> items = {"ticket", "haircut", "pizza", "book", "game", "plant"};
-    const std::string item = items[s.rng.below(items.size())];
+    const Priced& thing = priced[s.rng.below(priced.size())];
+    const std::string item = thing.name;
     const int context = s.out.context = int(s.rng.below(2));
     if (context == 0) {
         const int64_t p = s.draw(1, 99), step = 100 / std::gcd(p, int64_t(100));
@@ -296,16 +311,18 @@ inline bool what_percent_story(Story& s, std::string& answer, Place& place) {
         place = Place::not_last;
         return true;
     }
-    const int64_t p = s.draw(1, 90), step = 100 / std::gcd(p, int64_t(100));
-    const int64_t old = step * s.draw(1, std::max<int64_t>(1, 600 / step)), change = old * p / 100;
+    // A whole-dollar old price in the thing's range that p% of is whole.
+    const int64_t p = s.draw(1, 60), step = 100 / std::gcd(p, int64_t(100));
+    const int64_t lowest = (thing.low + step - 1) / step, highest = thing.high / step;
+    if (lowest > highest) return false;
+    const int64_t old = step * s.draw(lowest, highest), change = old * p / 100;
     const bool up = s.rng.below(2);
     const int64_t now = up ? old + change : old - change;
-    if (old < 4 || now < 1) return false;
     s.out.inputs = {old, now};
     s.sentence(percent_moved, {{"{item}", item}, {"${a}", "$" + str(old)}, {"${b}", "$" + str(now)}});
     s.question = std::string("By what percent did the price go ") + (up ? "up" : "down") + "?";
     s.line("The price changed by " + s.calc(up ? str(now) + "-" + str(old) : str(old) + "-" + str(now), change) +
-           " dollars.");
+           (change == 1 ? " dollar." : " dollars."));
     s.line("As a share of the old price, that is " + s.calc(str(change) + "/" + str(old) + "*100", p) + " percent.");
     s.line("So the price went " + std::string(up ? "up" : "down") + " by " + str(p) + " percent.");
     answer = str(p);
@@ -338,7 +355,7 @@ inline bool ratio_split_story(Story& s, std::string& answer, Place& place) {
     s.out.asked = int(s.rng.below(3));
     const std::array<std::string, 3> people = {s.out.name, s.out.other, s.out.third};
     const std::array<std::string, 2> groups = {"boys", "girls"};
-    const std::string thing = context == 2 ? " children" : " dollars";
+    const std::string thing = context == 2 ? "" : " dollars";  // a class part is just a number of children
     Fills fills = {{"{a}", str(parts[0])}, {"{b}", str(parts[1])}, {"{t}", str(total)}};
     if (context == 1) fills.push_back({"{c}", str(parts[2])});
     s.sentence(context == 0 ? ratio_money2 : context == 1 ? ratio_money3 : ratio_class, fills);
@@ -371,21 +388,24 @@ inline bool ratio_split_story(Story& s, std::string& answer, Place& place) {
 // "The ratio of cats to dogs is 2:3, and there are 18 dogs." Asked: the
 // other kind (0) or both together (1).
 inline bool ratio_known_story(Story& s, std::string& answer, Place& place) {
-    static const std::array<std::array<const char*, 3>, 4> settings = {{{"cats", "dogs", "the shelter"},
-                                                                       {"red marbles", "blue marbles", "the bag"},
-                                                                       {"oak trees", "pine trees", "the park"},
-                                                                       {"apples", "oranges", "the basket"}}};
-    const auto& setting = settings[s.rng.below(settings.size())];
+    // Each place, and the most of both kinds together that it could hold.
+    struct Setting { const char* first; const char* second; const char* place; int64_t most; };
+    static const std::array<Setting, 4> settings = {{{"cats", "dogs", "the shelter", 90},
+                                                     {"red marbles", "blue marbles", "the bag", 300},
+                                                     {"oak trees", "pine trees", "the park", 800},
+                                                     {"novels", "comic books", "the library", 1200}}};
+    const Setting& setting = settings[s.rng.below(settings.size())];
     std::vector<int64_t> parts;
     if (!ratio_parts(s, 2, parts)) return false;
     const int64_t unit = s.draw(2, 60);
+    if ((parts[0] + parts[1]) * unit > setting.most) return false;
     const size_t known = s.rng.below(2), unknown = 1 - known;
     const int64_t count = parts[known] * unit, other = parts[unknown] * unit;
     s.out.inputs = {parts[0], parts[1], int64_t(known), count};
     s.out.asked = int(s.rng.below(2));
-    const std::string first = setting[0], second = setting[1];
+    const std::string first = setting.first, second = setting.second;
     const std::array<std::string, 2> kinds = {first, second};
-    s.sentence(ratio_known_text, {{"{place}", setting[2]}, {"{first}", first}, {"{second}", second},
+    s.sentence(ratio_known_text, {{"{place}", setting.place}, {"{first}", first}, {"{second}", second},
                                   {"{a}", str(parts[0])}, {"{b}", str(parts[1])}, {"{k}", str(count)},
                                   {"{known}", kinds[known]}});
     s.question = s.out.asked == 0 ? "How many " + kinds[unknown] + " are there?"
@@ -407,38 +427,46 @@ inline bool ratio_known_story(Story& s, std::string& answer, Place& place) {
 // The same rate for another amount: a price for more or fewer items
 // (context 0), or a recipe for more or fewer cookies (context 1).
 inline bool proportion_story(Story& s, std::string& answer, Place& place) {
-    static const std::array<const char*, 6> items = {"notebooks", "pens", "mugs", "candles", "towels", "plants"};
-    const std::string item = items[s.rng.below(items.size())];
+    // Things sold by the piece, and what one really costs, in cents.
+    struct Piece { const char* name; int64_t low, high; };
+    static const std::array<Piece, 6> pieces = {{{"notebooks", 100, 800}, {"pens", 50, 400}, {"mugs", 300, 1500},
+                                                 {"candles", 200, 1500}, {"towels", 300, 2500},
+                                                 {"plants", 300, 3000}}};
+    const Piece& piece = pieces[s.rng.below(pieces.size())];
+    const std::string item = piece.name;
     const int context = s.out.context = int(s.rng.below(2));
+    place = Place::anywhere;
     if (context == 0) {
-        const int64_t each = 5 * s.draw(5, 400), n1 = s.draw(2, 12), n2 = s.draw(2, 30);
+        const int64_t each = 5 * s.draw(piece.low / 5, piece.high / 5), n1 = s.draw(2, 12), n2 = s.draw(2, 30);
         if (n1 == n2) return false;
         const int64_t cost = each * n1;
         s.out.inputs = {n1, cost, n2};
         s.sentence(proportion_price, {{"{n}", str(n1)}, {"{items}", item}, {"${p}", "$" + money(cost)}});
         s.question = "How much do " + str(n2) + " " + item + " cost, in dollars?";
-        s.line("One costs " + s.calc(number(cost) + "/" + str(n1), number(each)) + " dollars.");
+        s.line("One costs " + s.calc(number(cost) + "/" + str(n1), number(each)) + unit(number(each), "dollar") + ".");
         s.line("So " + str(n2) + " " + item + " cost " + s.calc(number(each) + "*" + str(n2), number(each * n2)) +
-               " dollars.");
+               unit(number(each * n2), "dollar") + ".");
         answer = number(each * n2);
-        place = Place::anywhere;
         return true;
     }
-    const int64_t cups = 50 * s.draw(1, 12), n1 = s.draw(6, 48), n2 = s.draw(6, 96);
+    // A real recipe: half a cup to 4 cups of flour, 8 to 24 cookies a cup.
+    const int64_t cups = 50 * s.draw(1, 8), n1 = s.draw(6, 96), n2 = s.draw(6, 120);
+    if (n1 * 100 < 8 * cups || n1 * 100 > 24 * cups) return false;
     if (n1 == n2 || cups * n2 % n1 != 0) return false;  // the answer needs more than two decimals
     const int64_t needed = cups * n2 / n1;
     s.out.inputs = {n1, cups, n2};
     s.sentence(proportion_recipe, {{"{c}", number(cups)}, {"{n}", str(n1)}});
     s.question = "How many cups of flour are needed for " + str(n2) + " cookies?";
     s.line("The flour grows with the number of cookies, so " + str(n2) + " cookies need " +
-           s.calc(number(cups) + "*" + str(n2) + "/" + str(n1), number(needed)) + " cups.");
+           s.calc(number(cups) + "*" + str(n2) + "/" + str(n1), number(needed)) + unit(number(needed), "cup") + ".");
     answer = number(needed);
-    place = Place::anywhere;
     return true;
 }
 
 // Minutes to hours (context 0), grams to kilograms (1), kilometers to
-// meters (2), cents to dollars (3).
+// meters (2), cents to dollars (3). Each wording's things have the sizes the
+// ranges allow: 100-400 g fits a bag of rice, a jar or a potato; up to 8 km a
+// day fits a walk, a run or a drive.
 inline bool units_story(Story& s, std::string& answer, Place& place) {
     const int context = s.out.context = int(s.rng.below(4));
     place = Place::anywhere;
@@ -455,23 +483,23 @@ inline bool units_story(Story& s, std::string& answer, Place& place) {
         s.question = "How many hours does " + s.out.name + " spend in all?";
         if (weeks) s.line(span + " is " + s.calc(str(count) + "*7", days) + " days.");
         s.line("In all that is " + s.calc(str(minutes) + "*" + str(days), total) + " minutes, which is " +
-               s.calc(str(total) + "/60", number(hours)) + " hours.");
+               s.calc(str(total) + "/60", number(hours)) + unit(number(hours), "hour") + ".");
         answer = number(hours);
         return true;
     }
     if (context == 1) {
-        const int64_t grams = 10 * s.draw(1, 200), count = s.draw(2, 80), total = grams * count;
+        const int64_t grams = 10 * s.draw(10, 40), count = s.draw(2, 80), total = grams * count;
         s.out.inputs = {grams, count, 0};
         s.sentence(units_weight, {{"{g}", str(grams)}, {"{n}", str(count)}});
         s.question = "How many kilograms is that in all?";
         s.line("In all that is " + s.calc(str(grams) + "*" + str(count), total) + " grams, which is " +
-               s.calc(str(total) + "/1000", number(total / 10)) + " kilograms.");
+               s.calc(str(total) + "/1000", number(total / 10)) + unit(number(total / 10), "kilogram") + ".");
         answer = number(total / 10);
         place = Place::not_last;
         return true;
     }
     if (context == 2) {
-        const int64_t km = 25 * s.draw(1, 100), days = s.draw(2, 30), total = km * days;  // km in hundredths
+        const int64_t km = 25 * s.draw(2, 32), days = s.draw(2, 30), total = km * days;  // km in hundredths
         s.out.inputs = {km, days, 0};
         s.sentence(units_distance, {{"{k}", number(km)}, {"{d}", str(days)}});
         s.question = "How many meters does " + s.out.name + " cover in all?";
@@ -485,7 +513,7 @@ inline bool units_story(Story& s, std::string& answer, Place& place) {
     s.sentence(units_cents, {{"{c}", str(cents)}, {"{n}", str(count)}});
     s.question = "How many dollars is that in all?";
     s.line("In all that is " + s.calc(str(count) + "*" + str(cents), total) + " cents, which is " +
-           s.calc(str(total) + "/100", number(total)) + " dollars.");
+           s.calc(str(total) + "/100", number(total)) + unit(number(total), "dollar") + ".");
     answer = number(total);
     place = Place::not_last;
     return true;

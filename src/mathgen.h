@@ -178,6 +178,12 @@ using Fills = std::vector<std::pair<std::string, std::string>>;
 
 inline std::string str(int64_t v) { return std::to_string(v); }
 
+// "1 year", "6 years": a number and its unit, singular for exactly one.
+inline std::string count_of(const std::string& n, const std::string& one, const std::string& many) {
+    return n + " " + (n == "1" ? one : many);
+}
+inline std::string years(int64_t n) { return count_of(str(n), "year", "years"); }
+
 // Everything one story attempt shares: the random source, the people, the
 // sentences and question being built, and the worked solution.
 struct Story {
@@ -357,7 +363,9 @@ namespace equation_detail {
 
 using math_detail::Fills;
 using math_detail::Story;
+using math_detail::count_of;
 using math_detail::str;
+using math_detail::years;
 using math_detail::without_notes;
 
 enum Family { think, add, subtract, multiply, divide, result, ages_sum_text, ages_future_text, tickets,
@@ -376,7 +384,7 @@ inline constexpr std::array<std::array<const char*, 6>, family_count> patterns =
     {{"{name} adds {a} to it.",
       "Then {name} adds {a}.",
       "Next, {name} increases the number by {a}.",
-      "{name} puts {a} more on top of it.",
+      "{name} makes the number {a} bigger.",
       "After that, {a} is added to the number.",
       "{name} raises the current value by {a}."}},
     {{"{name} subtracts {a} from it.",
@@ -386,17 +394,17 @@ inline constexpr std::array<std::array<const char*, 6>, family_count> patterns =
       "After that, {a} is subtracted from the number.",
       "{name} lowers the current value by {a}."}},
     {{"{name} multiplies it by {a}.",
-      "Then {name} multiplies the result by {a}.",
+      "Then {name} multiplies the number by {a}.",
       "Next, {name} makes the number {a} times as large.",
       "{name} multiplies the current value by {a}.",
       "After that, the number is multiplied by {a}.",
       "{name} scales the current value up by a factor of {a}."}},
     {{"{name} divides it by {a}.",
-      "Then {name} divides the result by {a}.",
-      "Next, {name} splits the number into {a} equal parts and keeps one part.",
+      "Then {name} divides the number by {a}.",
+      "Next, {name} divides that number by {a}.",
       "{name} divides the current value by {a}.",
       "After that, the number is divided by {a}.",
-      "{name} cuts the current value down to one part in {a}."}},
+      "{name} takes the current value and divides it by {a}."}},
     {{"The result is {a}.",
       "{name} ends up with {a}.",
       "The final number is {a}.",
@@ -444,7 +452,7 @@ inline constexpr std::array<std::array<const char*, 6>, family_count> patterns =
       "A rectangular {thing} has a perimeter of {p} {unit}, and its length is {relation}.",
       "{name} measures a rectangular {thing}: the perimeter is {p} {unit} and the length is {relation}.",
       "Going once around a rectangular {thing} covers {p} {unit}; the {thing}'s length is {relation}.",
-      "{name} puts a fence of {p} {unit} all the way around a rectangular {thing} whose length is {relation}."}},
+      "{name} puts a border of {p} {unit} all the way around a rectangular {thing} whose length is {relation}."}},
     {{"{name}, {other} and {third} share ${t}. {other} gets ${d} more than {name}, and {third} gets {k} times as much as {other}.",
       "{name}, {other} and {third} split ${t} between them. {other}'s share is ${d} more than {name}'s, and {third}'s share is {k} times {other}'s.",
       "A prize of ${t} goes to {name}, {other} and {third}. {other} receives ${d} more than {name}, while {third} receives {k} times what {other} receives.",
@@ -555,10 +563,10 @@ inline bool ages_sum_story(Story& s, int64_t& answer) {
     if (m < 1 || m > 100) return false;
     const std::string& other = s.out.other;
     std::string relation;
-    if (k == 1) relation = str(d) + " years older than " + other;
+    if (k == 1) relation = years(d) + " older than " + other;
     else if (d == 0) relation = str(k) + " times as old as " + other;
-    else if (d > 0) relation = str(d) + " years older than " + str(k) + " times " + other + "'s age";
-    else relation = str(-d) + " years younger than " + str(k) + " times " + other + "'s age";
+    else if (d > 0) relation = years(d) + " older than " + str(k) + " times " + other + "'s age";
+    else relation = years(-d) + " younger than " + str(k) + " times " + other + "'s age";
     s.out.inputs = {k, d, total};
     s.out.asked = int(s.rng.below(2));
     s.sentence(ages_sum_text, {{"{relation}", relation}, {"{s}", str(total)}});
@@ -568,10 +576,10 @@ inline bool ages_sum_story(Story& s, int64_t& answer) {
     s.line("Counting the x's: " + s.calc("1+" + str(k), k + 1) + ", so " + linear(k + 1, d) + " = " + str(total) + ".");
     const int64_t x = solve_linear(s, k + 1, d, 0, total);
     if (s.out.asked == 0) {
-        s.line("So " + other + " is " + str(x) + " years old.");
+        s.line("So " + other + " is " + years(x) + " old.");
         answer = x;
     } else {
-        s.line("So " + s.out.name + " is " + s.calc(at(k, x, d), m) + " years old.");
+        s.line("So " + s.out.name + " is " + s.calc(at(k, x, d), m) + (m == 1 ? " year old." : " years old."));
         answer = m;
     }
     return true;
@@ -580,7 +588,7 @@ inline bool ages_sum_story(Story& s, int64_t& answer) {
 // "Maya is 4 times as old as Leo; in 6 years she will be twice as old."
 // x is Leo's age now; Maya is k1 x now, and k1 x + n = k2 (x + n).
 inline bool ages_future_story(Story& s, int64_t& answer) {
-    const int64_t l = s.draw(1, 40), k1 = s.draw(2, 10), n = s.draw(1, 60);
+    const int64_t l = s.draw(1, 40), k1 = s.draw(2, 10), n = s.draw(2, 60);
     if ((k1 * l + n) % (l + n) != 0) return false;
     const int64_t k2 = (k1 * l + n) / (l + n), m = k1 * l;
     if (k2 < 2 || m > 100) return false;
@@ -596,7 +604,7 @@ inline bool ages_future_story(Story& s, int64_t& answer) {
            linear(k2, k2 * n) + ".");
     const int64_t x = solve_linear(s, k1, n, k2, k2 * n);
     if (s.out.asked == 0) {
-        s.line("So " + other + " is " + str(x) + " years old now.");
+        s.line("So " + other + " is " + years(x) + " old now.");
         answer = x;
     } else {
         s.line("So " + s.out.name + " is " + s.calc(at(k1, x, 0), m) + " years old now.");
@@ -695,15 +703,28 @@ inline bool consecutive_story(Story& s, int64_t& answer) {
 // "The length is 3 meters more than twice the width; the perimeter is 54
 // meters." x is the width; the length is k x + d.
 inline bool rectangle_story(Story& s, int64_t& answer) {
-    static const std::array<const char*, 5> things = {"garden", "room", "field", "rug", "pool"};
-    const int64_t w = s.draw(2, 120), k = s.draw(1, 4), d = s.draw(0, 40);
+    // Sizes a real one could have, in meters: the width's range, the most
+    // times the width the length may be, and the most meters added on top.
+    // In feet, the ranges are three times as large.
+    struct Thing { const char* name; int64_t width_min, width_max, times_max, add_max; };
+    static const std::array<Thing, 5> things = {{{"garden", 3, 30, 3, 15},
+                                                 {"room", 2, 8, 2, 4},
+                                                 {"field", 20, 150, 3, 50},
+                                                 {"rug", 1, 3, 2, 2},
+                                                 {"pool", 3, 15, 3, 10}}};
+    const Thing& thing_size = things[s.rng.below(things.size())];
+    const bool feet = s.rng.below(2);
+    const int64_t scale = feet ? 3 : 1;
+    const std::string thing = thing_size.name, unit = feet ? "feet" : "meters";
+    const int64_t w = s.draw(thing_size.width_min * scale, thing_size.width_max * scale);
+    const int64_t k = s.draw(1, thing_size.times_max), d = s.draw(0, thing_size.add_max * scale);
     if (k == 1 && d == 0) return false;
     const int64_t length = k * w + d, perimeter = 2 * (w + length), half = perimeter / 2;
-    const std::string thing = things[s.rng.below(things.size())], unit = s.rng.below(2) ? "feet" : "meters";
+    const auto measure = [&](int64_t n) { return count_of(str(n), feet ? "foot" : "meter", unit); };
     std::string relation;
-    if (k == 1) relation = str(d) + " " + unit + " longer than its width";
+    if (k == 1) relation = measure(d) + " longer than its width";
     else if (d == 0) relation = str(k) + " times its width";
-    else relation = str(d) + " " + unit + " more than " + str(k) + " times its width";
+    else relation = measure(d) + " more than " + str(k) + " times its width";
     s.out.inputs = {k, d, perimeter};
     s.out.asked = int(s.rng.below(3));
     s.sentence(rectangle_text, {{"{thing}", thing}, {"{relation}", relation}, {"{p}", str(perimeter)},
@@ -718,7 +739,7 @@ inline bool rectangle_story(Story& s, int64_t& answer) {
     s.line("Counting the x's: " + s.calc("1+" + str(k), k + 1) + ", so " + linear(k + 1, d) + " = " + str(half) + ".");
     const int64_t x = solve_linear(s, k + 1, d, 0, half);
     if (s.out.asked == 0) {
-        s.line("So the width is " + str(x) + " " + unit + ".");
+        s.line("So the width is " + measure(x) + ".");
         answer = x;
         return true;
     }
