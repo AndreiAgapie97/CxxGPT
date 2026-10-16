@@ -36,8 +36,9 @@ with tempfile.TemporaryDirectory() as directory:
     root = Path(directory)
     common = ["--seed", 41, "--train", 120, "--val", 12, "--test-per-cell", 2, "--max-diff", 3]
     # With --mistakes 0 the output must stay byte-identical to main's, so
-    # these SHA-256 digests were taken from unmodified main (d287a66) with the
-    # same flags. A mismatch means the generator changed. If that change is
+    # these SHA-256 digests were taken from main with the same flags (renewed
+    # 2026-10-16 when the curriculum lost its degenerate zeros, PR #60; the
+    # same Windows build reproduced the old digests first). A mismatch means the generator changed. If that change is
     # intended (it alters every problem, not only planted ones), regenerate
     # them from the new main: for each format set below,
     #   ./cxxgpt gen-reasoning --out base --seed 41 --train 120 --val 12 \
@@ -45,14 +46,14 @@ with tempfile.TemporaryDirectory() as directory:
     #   sha256sum base.train.tok base.val.tok base.test.txt
     baselines = [
         ([], {
-            "train.tok": "f9d99aec275bac673960d013a99d7b3595b261fa84d278e3ba9f240050a96f08",
-            "val.tok": "7ed07c983c8829e6905a075b60523d899ed81e35577d8c0f9e7567ec7a466d9e",
-            "test.txt": "c427e0e3ff047597f1e01c41ca1e7ee96313a853eb9c9126168f9b66d0c82ebd",
+            "train.tok": "9a38333ce0bbf411176e43e97492aeee84e6ebd099089140d6eff5973aa95184",
+            "val.tok": "7f2d7d3ecedd2d58df7346b491b871c363ab2f3769443a123537c12ed6e364c1",
+            "test.txt": "cb8263c52df03ffcc5ce0daef367b9f55499c7d79eecddeb45c833875a93fe0b",
         }),
         (["--chain-plan", "--expr-rewrite"], {
-            "train.tok": "1d0612d12505ef56a690f23f5dc2e723819744ad5149b55aef0282b8ac25561a",
-            "val.tok": "c35a29a476f94e8a167984f1893ed9a47edea983e5665944b15371884be3a5f7",
-            "test.txt": "5c4bf5213374d70de66a3955c4e73e7111723fc420674c8b001aa3f277268b0f",
+            "train.tok": "1fdb1f06a952aacb556779a8776d0e8e3e6435d4e0f712f0415eff9b5bbe7cbb",
+            "val.tok": "80371fabbbdc6f3d222732996828fba2d18047624fd0233ab56cfd667d209850",
+            "test.txt": "ec8e74e5ad84a898c9e63a42039182e522734c2b7d9019c793f1a06be99ad74b",
         }),
     ]
     for formats, baseline in baselines:
