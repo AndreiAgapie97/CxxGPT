@@ -1095,9 +1095,8 @@ int cmd_train(Args& a) {
             "        after a restart), save, eval, reason, stop (each once a change of the file; never\n"
             "        from a file already there at the start). stop works like Ctrl-C\n"
             "gpu:    --gpu (train on the GPU; needs cxxgpt-gpu, from make gpu)\n"
-            "        --matmul bf16 (inputs stored in bf16, the default; ternary models default to tf32,\n"
-            "        and with bf16 multiply their codes, exactly; tf32: finer, about 1.45x slower;\n"
-            "        fp32: exact, slowest)\n"
+            "        --matmul bf16 (inputs stored in bf16, the default; ternary models multiply their\n"
+            "        codes, exactly; tf32: finer, about 1.45x slower; fp32: exact, slowest)\n"
             "        --no-tf32 is an alias for fp32\n"
             "        attention is fused by default (no stored weight matrix; on the tensor cores\n"
             "        with tf32/bf16); --no-fused-attn uses cuBLAS products instead\n"
@@ -1175,9 +1174,10 @@ int cmd_train(Args& a) {
     CHECK(!request_fused || !disable_fused, "choose only one of --fused-attn and --no-fused-attn");
     const bool no_tf32 = a.flag("no-tf32");
     // bf16 products by default: 1.45x the tokens/s of tf32 on the night-1
-    // model, with the same loss curve. Ternary models default to tf32 for
-    // now; with bf16 they multiply their codes (gpu.cu's proj_forward).
-    const std::string asked = a.str("matmul", no_tf32 ? "fp32" : cfg.ternary ? "tf32" : "bf16");
+    // model, with the same loss curve. Ternary models too (2026-10-16): they
+    // multiply their codes (gpu.cu's proj_forward), 1.45x tf32's tokens/s,
+    // the same losses over 100-200 steps.
+    const std::string asked = a.str("matmul", no_tf32 ? "fp32" : "bf16");
     CHECK(!no_tf32 || asked == "fp32", "--no-tf32 conflicts with --matmul %s", asked.c_str());
     CHECK(asked == "fp32" || asked == "tf32" || asked == "bf16", "--matmul takes fp32, tf32 or bf16");
     // The CPU engine multiplies in exact fp32 with its own attention: it

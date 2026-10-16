@@ -342,15 +342,19 @@ both against the model in double precision on the GPU (`src/gpu_ref.cu`):
   With `--matmul fp32` they run the exact fp32 kernels
   (`src/attention.cuh`). Heads larger than 128 use the cuBLAS attention;
 - `--matmul bf16`, the default since 2026-10-14 (`--matmul tf32` goes
-  back; ternary models default to TF32): the model's matrix products take
+  back): the model's matrix products take
   inputs stored in bf16 (8 significant bits against TF32's 11), which the
   tensor cores multiply at twice the TF32 rate. Weights, gradients and the
   optimizer stay fp32 (the products use a bf16 copy of the weights), and
   so do the router and attention; Muon's products take bf16 inputs too.
   On the night-1 model at 8 x 16: 25,600 tokens/s against 17,600, with
   7.0 GB of GPU memory against 6.7.
-  Not for ternary models yet, so `probe.sh` measures the ternary row in
-  TF32 and the others in bf16 (`GPU="--gpu --matmul tf32"` for TF32).
+  Ternary models too, since 2026-10-16: their products multiply the
+  codes themselves (-1/0/+1 weights, int8 activations, exact in bf16)
+  and apply the scales after the sum. On the ternary night model: 2486
+  ms a step against TF32's 3600 (26,400 tokens/s against 18,200), 7.4 GB
+  against 7.7, the same losses over 100-200 steps (`GPU="--gpu --matmul
+  tf32"` goes back).
 
 Until 2026-10-16, `test_gpu` compared the GPU with the CPU engine in float,
 and two checks failed from the first run on the laptop's RTX 4070
