@@ -247,8 +247,8 @@ Options (see `gen-word --help`):
   distractor wording; a distractor number never appears in the calculation.
 - `--notes on|off`: include or omit GSM8K calculator notes such as
   `<<48/2=24>>24` (default on). This changes only the worked solution.
-- `--split train|test`: 84 training sentence patterns or 42 held-out test
-  patterns, grouped into 21 arithmetic situations. The opening patterns
+- `--split train|test`: 108 training sentence patterns or 54 held-out test
+  patterns, grouped into 27 arithmetic situations. The opening patterns
   differ too, so the splits cannot share a complete question, even with
   different seeds. Each file also omits duplicate questions.
 
@@ -275,12 +275,27 @@ An attempt is discarded if any intermediate value is negative, exceeds
 1,000,000, needs more than two decimal places, or gives fractional objects.
 The step count and story shape stay fixed while invalid attempts are retried.
 
-These generated stories are still less varied than human-written math.
-Long stories outside the running-quantity shape are repetitive: at 6-8
-steps, each of the five other shapes is one multiplication (or fraction, or
-percentage) followed by a string of additions, and on the test split, with
-only two patterns per sentence family, the same addition pattern often
-appears two or three times in one story. Success on its held-out wording alone is not evidence of improvement on
+An audit (2026-10-16) read the stories as a person would and added rules,
+each checked by the tests on every generated problem:
+- no "1 cards" or "1 dollars": no step leaves exactly 0 or 1, and added
+  amounts start at 2;
+- a payment is what a shopper would hand over: the next multiple of $5,
+  $10, $20, $50 or $100 above the bill, at most about twice the bill (not
+  $180 for two stickers at $0.75);
+- extra kept items say where they come from ("A friend gives Maya 4 more
+  cards, and Maya keeps them", not "Maya keeps 6 green cards");
+- a running quantity is cut down (an equal share, a fraction or a
+  percentage kept) at most twice and never twice in a row, and is sold or
+  bought at most once;
+- no wording is used twice in one story: extra items, purchases and kept
+  items each take turns among three sentence families (twelve wordings for
+  train, six for test), and a running quantity gets at most six gifts and
+  gives some away at most twice.
+
+These generated stories are still less varied than human-written math:
+at 7-8 steps, each of the five shapes other than the running quantity is
+one multiplication (or fraction, or percentage) followed by five or six
+additions, each worded differently. Success on its held-out wording alone is not evidence of improvement on
 GSM8K or SVAMP. No generated datasets are checked into the repository, and
 this command does not change the night data mix.
 
@@ -439,11 +454,17 @@ folders:
   is kept. Also the tokenizer, `tok.bpe` (16,384 tokens, learned from a
   sample of the training split; sha256 `6e811ced...`), and GSM8K's dev and
   test sets encoded with it (`gsm8k-dev`, `gsm8k-test`).
-- `data/targeted-math/`: 963,089 exact `gen-word` problems (1M generated,
-  minus those sharing a 13-word run with a GSM8K dev or test question or a
-  generated dev question; `operations/prepare_targeted_math.py`), and
-  GSM8K train without the 500 dev problems and 7 near-copies (6,966
-  problems).
+- `data/targeted-math/`: 973,193 exact `gen-word` problems (1M generated
+  after the 2026-10-16 audit, same seeds, minus 25,646 sharing a 13-word
+  run with a GSM8K dev or test question or a generated dev question, and
+  1,161 with a GSM8K dev or test question's numbers and answer;
+  `operations/build_targeted_math.py`, 199.6M tokens; every one of its
+  4,849,161 written calculations re-checked exactly), and GSM8K train
+  without the 500 dev problems and 7 near-copies (6,966 problems). The
+  RunPod model trained on the set made before the audit (963,089 problems,
+  `src/wordgen.h` at commit 3b6d880, with its flaws: "1 cards", payments
+  of $180 for $1.50, kept items from nowhere, a sentence repeated in 44%
+  of problems); it is kept as `data/targeted-math-runpod/`.
 
 `night.sh` trains on the run's last mix unless `MIX=` names others:
 

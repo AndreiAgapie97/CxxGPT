@@ -91,7 +91,8 @@ inline std::string money(int64_t value) {
 enum Family { boxes, production, earnings, containers, receive, give, share,
               fraction, percent, sell, buy, convert, compare_people, total_two,
               total_three, time_rate, part_fraction, part_percent, shopping,
-              extra_cost, part_extra, family_count };
+              extra_cost, part_extra, receive_b, receive_c, extra_cost_b, extra_cost_c, part_extra_b,
+              part_extra_c, family_count };
 
 // Six distinct question patterns per family: four for train, two held out
 // for test. Every sentence of a question, its distractor included, comes from
@@ -220,14 +221,67 @@ inline constexpr std::array<std::array<const char*, 6>, family_count> patterns =
       "A further item on the same bill is priced at ${a}.",
       "The cashier includes another purchase worth ${a}."}},
     // The part shape asks how many items are kept, so its extra items say
-    // plainly that they are kept too (a gift alone would be ambiguous).
-    {{"{name} also keeps {a} more {unit}.",
-      "{name} keeps another {a} {unit} as well.",
-      "On top of that, {name} keeps {a} green {unit}.",
-      "{name} also saves {a} yellow {unit} to keep.",
+    // plainly that they are kept too (a gift alone would be ambiguous), and
+    // where they come from (not "keeps 6 green cards" out of nowhere).
+    {{"A friend gives {name} {a} more {unit}, and {name} keeps them.",
+      "{name} also buys {a} {unit} and keeps them too.",
+      "On top of that, {name} finds {a} green {unit} and keeps them.",
+      "{name} also wins {a} yellow {unit} at a fair and keeps them.",
       "In addition, {name} retains {a} more {unit} received as a gift.",
-      "{name} sets aside a further {a} {unit} to keep."}}
+      "A cousin hands {name} a further {a} {unit}, which {name} keeps."}},
+    // Long stories add up to six amounts of one kind. Three families of
+    // each kind take turns (in_turn), so a story never needs a wording
+    // twice: twelve for train, six for test.
+    {{"{name} is given {a} more {unit}.",
+      "Soon after, {name} collects {a} more {unit}.",
+      "{name} adds {a} {unit} that a relative brought.",
+      "Later in the week, {name} obtains another {a} {unit}.",
+      "A teacher hands {name} {a} more {unit}.",
+      "{name} ends up with {a} extra {unit} from a classmate."}},
+    {{"{name}'s aunt sends {a} more {unit}.",
+      "{name} wins {a} more {unit} in a raffle.",
+      "Then {name} is handed another {a} {unit}.",
+      "{name} finds {a} more {unit} in a cupboard.",
+      "Someone at school passes {a} more {unit} to {name}.",
+      "{name} takes in {a} additional {unit} from an uncle."}},
+    {{"{name} picks up a snack for ${a} as well.",
+      "A greeting card for ${a} goes on the same bill.",
+      "{name} also adds a bag costing ${a}.",
+      "A small toy for ${a} is added to the purchase.",
+      "{name} grabs a drink priced at ${a} too.",
+      "One more thing, a notebook for ${a}, joins the bill."}},
+    {{"{name} also pays ${a} for gift wrapping.",
+      "The bill also includes a ${a} delivery fee.",
+      "{name} adds batteries costing ${a}.",
+      "A box of tissues for ${a} is also bought.",
+      "{name} throws in a pen worth ${a} as well.",
+      "There is also a ${a} charge for a sturdy bag."}},
+    {{"{name}'s grandmother sends {a} {unit}, and {name} keeps all of them.",
+      "{name} trades for {a} purple {unit} and keeps them.",
+      "A classmate gives {name} {a} {unit} to keep.",
+      "{name} keeps the {a} {unit} that came with a birthday card.",
+      "{name} receives {a} orange {unit} at school and keeps every one.",
+      "An uncle passes {a} {unit} to {name}, who keeps them."}},
+    {{"{name} also gets {a} white {unit} from a swap and keeps them.",
+      "A teacher rewards {name} with {a} {unit}, which {name} keeps.",
+      "{name} makes {a} more {unit} and keeps them as well.",
+      "Then {name} is given {a} pink {unit} and keeps them.",
+      "{name} collects {a} more {unit} at a market and keeps them.",
+      "A neighbor leaves {a} {unit} for {name}, who keeps them all."}}
 }};
+
+// The family for the index-th extra sentence of one kind: the three
+// families of that kind take turns (receive, receive_b, receive_c, ...).
+inline int in_turn(int family, size_t index) {
+    const size_t k = index % 3;
+    if (k == 0) return family;
+    if (family == receive) return k == 1 ? receive_b : receive_c;
+    if (family == extra_cost) return k == 1 ? extra_cost_b : extra_cost_c;
+    if (family == part_extra) return k == 1 ? part_extra_b : part_extra_c;
+    return family;
+}
+
+inline bool is_receive(int family) { return family == receive || family == receive_b || family == receive_c; }
 
 // Separate wording in each split, just like the arithmetic sentences.
 inline constexpr std::array<const char*, 24> distractors = {
@@ -304,8 +358,21 @@ struct Story {
 
     // Fills one sentence pattern of `family` (a split-specific variant) with
     // the story's people, unit and the numbers a..d.
+    // A family's wording is not used twice in one story until all of the
+    // split's wordings have been (four for train, two for test).
+    std::array<std::vector<int>, family_count> used_variants;
+
     void sentence(int family, int64_t a, int64_t b = 0, int64_t c = 0, int64_t d = 0) {
-        const int variant = options.test ? 4 + int(rng.below(2)) : int(rng.below(4));
+        std::vector<int>& used = used_variants[size_t(family)];
+        std::vector<int> fresh;
+        for (int v = options.test ? 4 : 0; v < (options.test ? 6 : 4); ++v)
+            if (std::find(used.begin(), used.end(), v) == used.end()) fresh.push_back(v);
+        if (fresh.empty()) {
+            used.clear();
+            for (int v = options.test ? 4 : 0; v < (options.test ? 6 : 4); ++v) fresh.push_back(v);
+        }
+        const int variant = fresh[rng.below(fresh.size())];
+        used.push_back(variant);
         std::string s = patterns[family][variant];
         replace(s, "{name}", name);
         replace(s, "{other}", other);
@@ -317,7 +384,7 @@ struct Story {
         replace(s, "${a}", "$" + money(a));
         replace(s, "${b}", "$" + money(b));
         replace(s, "${c}", "$" + money(c));
-        replace(s, "{a}", kind == Kind::money && (family == receive || family == give) ? money(a) : number(a));
+        replace(s, "{a}", kind == Kind::money && (is_receive(family) || family == give) ? money(a) : number(a));
         replace(s, "{b}", number(b));
         replace(s, "{c}", number(c));
         replace(s, "{d}", number(d));
@@ -337,6 +404,8 @@ struct Story {
     bool operation(char op, size_t left, size_t right, bool whole, const StepText& text) {
         int64_t value = 0;
         if (!calculate(op, out.values[left], out.values[right], whole, value)) return false;
+        // Nothing left, or exactly one ("1 cards", "1 dollars"), reads badly.
+        if (value == 0 || value == scale) return false;
         out.plan.push_back({op, 0, left, right, whole, text.label, text.before, text.after});
         out.values.push_back(value);
         return true;
@@ -348,24 +417,42 @@ inline bool chain_story(Story& s, int steps) {
     int64_t a = s.draw(2, 20) * scale, b = s.draw(2, 12) * scale;
     if (s.kind == Kind::money) a += s.draw(0, 3) * 25;
     if (s.kind == Kind::liters) b = s.draw(1, 16) * 25;
+    if (b == scale) return false;  // "1 liters of juice per jar"
     s.sentence(s.start, a, b);
     const size_t left = s.literal(a), right = s.literal(b);
     if (!s.operation('*', left, right, s.kind == Kind::objects,
                      {"The starting amount is", s.name + " starts with", s.unit()})) return false;
-    int done = 1;
+    // A story a person would tell: at most two steps that cut the amount
+    // down (an equal share, a fraction or a percentage kept), never two in
+    // a row, and at most one sale and one purchase. Gifts take turns among
+    // three families (at most six), giving away happens at most twice: no
+    // wording is needed twice.
+    int done = 1, cuts = 0, last = -1, gifts = 0, gives = 0;
+    bool sold = false, bought = false;
     while (done < steps) {
-        std::vector<int> choices = {receive, give, share, fraction};
-        if (steps - done >= 2) choices.push_back(percent);
-        if (s.kind == Kind::objects) choices.push_back(sell);
-        if (s.kind == Kind::money) choices.push_back(buy);
+        const bool can_cut = cuts < 2 && last != share && last != fraction && last != percent;
+        std::vector<int> choices;
+        if (gifts < 6) choices.push_back(receive);
+        if (gives < 2) choices.push_back(give);
+        if (can_cut) choices.insert(choices.end(), {share, fraction});
+        if (can_cut && steps - done >= 2) choices.push_back(percent);
+        if (s.kind == Kind::objects && !sold) choices.push_back(sell);
+        if (s.kind == Kind::money && !bought) choices.push_back(buy);
         if (s.kind == Kind::liters) choices.push_back(convert);
-        const int family = choices[s.rng.below(choices.size())];
-        a = s.draw(1, 24) * scale;
+        if (choices.empty()) return false;
+        int family = choices[s.rng.below(choices.size())];
+        if (family == receive) family = in_turn(receive, size_t(gifts++));
+        if (family == give) ++gives;
+        last = family;
+        if (family == share || family == fraction || family == percent) ++cuts;
+        if (family == sell) sold = true;
+        if (family == buy) bought = true;
+        a = s.draw(2, 24) * scale;
         if (family == share || family == fraction) a = s.draw(2, 5) * scale;
         if (family == percent) a = s.draw(1, 3) * 25 * scale;
         if (family == sell || family == buy) a = s.draw(1, 32) * 25;
         if (family == convert) a = 1000 * scale;
-        if ((family == receive || family == give) && s.kind != Kind::objects) {
+        if ((is_receive(family) || family == give) && s.kind != Kind::objects) {
             a += s.draw(0, 3) * 25;
             // Draw in liters first, then express the amount in the current unit.
             if (s.kind == Kind::milliliters) a *= 1000;
@@ -441,14 +528,20 @@ inline bool opening(Story& s, int family, const std::array<int64_t, 4>& inputs, 
 
 // Longer stories add `count` extra amounts (items, or purchases on the
 // bill), one sentence and one addition each.
-inline bool add_extras(Story& s, int count, int family, const StepText& text) {
-    for (int i = 0; i < count; ++i) {
-        const int64_t extra = s.out.shape == WordProblem::change ? s.draw(1, 32) * 25 : s.draw(1, 24) * scale;
+inline bool add_amounts(Story& s, const std::vector<int64_t>& amounts, int family, const StepText& text) {
+    for (const int64_t extra : amounts) {
+        const int turn = in_turn(family, s.out.additions.size());
         s.out.additions.push_back(extra);
-        s.sentence(family, extra);
+        s.sentence(turn, extra);
         const size_t previous = s.out.values.size() - 1, operand = s.literal(extra);
         if (!s.operation('+', previous, operand, s.kind == Kind::objects, text)) return false;
     }
+    return true;
+}
+
+inline bool add_extras(Story& s, int count, int family, const StepText& text) {
+    for (int i = 0; i < count; ++i)
+        if (!add_amounts(s, {s.draw(2, 24) * scale}, family, text)) return false;
     return true;
 }
 
@@ -537,15 +630,29 @@ inline bool part_story(Story& s, int steps) {
 }
 
 // A purchase (and maybe extra items on the bill), then change from a payment.
+// The payment is what a shopper would hand over: the next multiple of $5,
+// $10, $20, $50 or $100 above the bill, never more than about twice it
+// (no $180 for two stickers at $0.75).
 inline bool change_story(Story& s, int steps) {
     s.kind = Kind::money;
     auto in = draw_inputs(s);
     in[1] = s.draw(1, 32) * 25;
-    in[2] = s.draw(5, 20) * 20 * scale;
+    // The extra items are drawn first: the payment depends on the whole bill.
+    std::vector<int64_t> extra_items;
+    for (int i = 0; i < steps - 2; ++i) extra_items.push_back(s.draw(1, 32) * 25);
+    int64_t bill = in[0] / scale * in[1];
+    for (const int64_t extra : extra_items) bill += extra;
+    std::vector<int64_t> payments;
+    for (const int64_t note : {5, 10, 20, 50, 100}) {
+        const int64_t pay = (bill / (note * scale) + 1) * note * scale;
+        if (pay <= 2 * bill + 5 * scale && std::find(payments.begin(), payments.end(), pay) == payments.end())
+            payments.push_back(pay);
+    }
+    in[2] = payments[s.rng.below(payments.size())];
     if (!opening(s, shopping, in, '*',
                  {"In dollars, the items cost", s.name + " spends", "dollars on the " + s.object}))
         return false;
-    if (!add_extras(s, steps - 2, extra_cost, {"The bill now totals", s.name + "'s bill is now", "dollars"}))
+    if (!add_amounts(s, extra_items, extra_cost, {"The bill now totals", s.name + "'s bill is now", "dollars"}))
         return false;
     if (!close_with(s, '-', in[2], true, {"The change in dollars is", s.name + " gets", "dollars in change"}))
         return false;
