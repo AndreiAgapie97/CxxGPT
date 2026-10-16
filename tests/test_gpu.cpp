@@ -24,6 +24,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstdint>
 #include <cstring>
 #include <limits>
 #include <string>
@@ -67,6 +68,7 @@ struct Run {
     double clip = 0;
     bool fused = true;  // the GPU's fused attention kernels
     Matmul matmul = Matmul::fp32;
+    bool grouped = false;  // the experts' grouped products (set_grouped_experts, #49)
     // > 0: unlikelihood training (#34) on both sides, on batches whose
     // tokens come from 4 values, so runs repeat and the term fires.
     double ul_alpha = 0;
@@ -84,6 +86,7 @@ void compare(const char* name, const Config& cfg, double tol_loss, double tol_gr
     AdamW opt;
     opt.muon = muon;
     GpuTrainer gpu(cfg, cpu.infos, run.matmul, run.fused);
+    gpu.set_grouped_experts(run.grouped);
     gpu.set_params(cpu.params.data());
     gpu.set_adam_state(0, nullptr, nullptr);
     gpu.set_router_bias(cpu.router_bias);
@@ -673,6 +676,97 @@ void eval_on_gpu() {
 
 }  // namespace
 
+// x rounded to bf16 (to nearest, ties to even), as __float2bfloat16 does.
+double to_bf16(float x) {
+    uint32_t u;
+    std::memcpy(&u, &x, 4);
+    u += 0x7fffu + ((u >> 16) & 1u);
+    u &= 0xffff0000u;
+    float y;
+    std::memcpy(&y, &u, 4);
+    return y;
+}
+
+// The MoE experts' grouped products (grouped_gemm.cuh, #49) against a
+// double-precision product of the inputs as the kernels read them (rounded
+// to bf16 for bf16 products; TF32 rounding is left in the tolerance). All
+// three shapes the layers use, groups that are empty, tiny, uneven and
+// larger than a tile, sizes off the tiles, and unaligned rows (offset 1, or
+// a K not a multiple of 8), which the plain fp32 kernel takes. With beta 0
+// the old C is not read: it starts as NaN there.
+void grouped_products() {
+    struct Case {
+        const char* name;
+        std::vector<int> rows;  // per group
+        int M, N, K;            // M: weight_grad's rows of C_g
+    };
+    const Case cases[] = {
+        {"uneven", {37, 0, 130, 5, 1, 64}, 24, 48, 40},
+        {"tiles", {0, 300, 0, 129}, 136, 136, 72},
+        {"odd K", {17, 3, 0}, 9, 20, 37},
+        {"wide", {200, 0, 70}, 136, 300, 24},  // more than one 128 x 256 tile across
+        {"all empty", {0, 0, 0}, 16, 32, 16},
+    };
+    Rng rng(9);
+    double worst[3] = {0, 0, 0};
+    const Matmul kinds[3] = {Matmul::fp32, Matmul::tf32, Matmul::bf16};
+    const double tol[3] = {1e-6, 3e-3, 1e-5};
+    for (int k = 0; k < 3; ++k)
+        for (const Case& c : cases)
+            for (int op = 0; op < 3; ++op)
+                for (int offset : {0, 1}) {
+                    std::vector<int> starts{0};
+                    for (int r : c.rows) starts.push_back(starts.back() + r);
+                    const int R = starts.back(), G = int(c.rows.size());
+                    const GroupedOp gop = GroupedOp(op);
+                    const bool wg = gop == GroupedOp::weight_grad;
+                    // Shapes: A [R][K] (weight_grad: [R][M]); B per group [N][K]
+                    // (forward), [K][N] (input_grad), or [R][N] (weight_grad).
+                    const int lda = wg ? c.M : c.K, ldb = gop == GroupedOp::forward ? c.K : c.N, ldc = c.N;
+                    const long long stride = wg ? (long long)c.M * c.N : (long long)c.N * c.K;
+                    std::vector<float> A(size_t(R) * lda), B(wg ? size_t(R) * c.N : size_t(G) * stride);
+                    for (float& x : A) x = float(rng.normal());
+                    for (float& x : B) x = float(rng.normal());
+                    const float beta = wg ? 1.0f : 0.0f;
+                    std::vector<float> C(wg ? size_t(G) * stride : size_t(R) * c.N);
+                    for (float& x : C) x = wg ? float(rng.normal()) : std::numeric_limits<float>::quiet_NaN();
+                    const std::vector<float> C0 = C;
+                    gpu_grouped_product(kinds[k], gop, A, B, C, starts, c.M, c.N, c.K, lda, ldb, ldc, stride, beta,
+                                        offset);
+                    auto in = [&](float x) { return kinds[k] == Matmul::bf16 ? to_bf16(x) : double(x); };
+                    std::vector<float> want(C.size());
+                    for (int g = 0; g < G; ++g) {
+                        if (wg) {
+                            for (int m = 0; m < c.M; ++m)
+                                for (int n = 0; n < c.N; ++n) {
+                                    double s = beta * double(C0[size_t(g) * stride + size_t(m) * ldc + n]);
+                                    for (int r = starts[g]; r < starts[g + 1]; ++r)
+                                        s += in(A[size_t(r) * lda + m]) * in(B[size_t(r) * ldb + n]);
+                                    want[size_t(g) * stride + size_t(m) * ldc + n] = float(s);
+                                }
+                            continue;
+                        }
+                        for (int r = starts[g]; r < starts[g + 1]; ++r)
+                            for (int n = 0; n < c.N; ++n) {
+                                double s = 0;
+                                for (int kk = 0; kk < c.K; ++kk) {
+                                    const float b = gop == GroupedOp::forward ? B[size_t(g) * stride + size_t(n) * ldb + kk]
+                                                                              : B[size_t(g) * stride + size_t(kk) * ldb + n];
+                                    s += in(A[size_t(r) * lda + kk]) * in(b);
+                                }
+                                want[size_t(r) * ldc + n] = float(s);
+                            }
+                    }
+                    const double d = C.empty() ? 0.0 : rel_l2(C.data(), want.data(), C.size());
+                    bool finite = true;
+                    for (float x : C) finite &= std::isfinite(x);
+                    worst[k] = std::max(worst[k], d);
+                    EXPECT(finite && d <= tol[k], "grouped %s, %s, op %d, offset %d: %g apart%s", c.name,
+                           k == 0 ? "fp32" : k == 1 ? "tf32" : "bf16", op, offset, d, finite ? "" : ", not finite");
+                }
+    std::printf("  grouped expert products: fp32 %.1e, tf32 %.1e, bf16 %.1e apart\n", worst[0], worst[1], worst[2]);
+}
+
 // The step on the GPU (forward_train, finish_step: train --gpu since #50)
 // against the same step driven from the host as GpuBackend did it before:
 // the norm, the clip scale and the update check computed on the host from
@@ -788,6 +882,7 @@ int main() {
     extreme_cross_entropy();
     masked_accumulation();
     fused_kernels();
+    grouped_products();
 
     Config dense;
     dense.vocab = 61;
@@ -866,6 +961,16 @@ int main() {
     // times more than AdamW does, hence the looser weight tolerance.
     compare("dense muon", dense, 1e-5, 1e-4, 1e-3, {.muon = true});
     compare("moe muon", moe, 1e-5, 1e-4, 1e-3, {.muon = true, .clip = 0.5});
+
+    // The experts' grouped products (#49) in the same runs: exact, TF32,
+    // bf16, ternary, Muon, top-1 and unlikelihood.
+    compare("moe+shared, grouped", moe, 1e-5, 1e-4, 1e-4, {.grouped = true});
+    compare("moe top-1, grouped", moe1, 1e-5, 1e-4, 1e-4, {.clip = 0.5, .grouped = true});
+    compare("moe tf32, grouped", moe, 3e-4, 2e-1, 2e-2, {.matmul = Matmul::tf32, .grouped = true});
+    compare("moe bf16, grouped", moe, 1.2e-3, 9e-1, 8e-2, {.matmul = Matmul::bf16, .grouped = true});
+    compare("moe muon bf16, grouped", moe, 5e-5, 5e-1, 1e-2, {.muon = true, .matmul = Matmul::bf16, .grouped = true});
+    compare("ternary moe, grouped", ours, 1e-3, 3e-2, 1e-2, {.grouped = true});
+    compare("moe ul, grouped", moe, 1e-5, 1e-4, 1e-4, {.grouped = true, .ul_alpha = 0.5, .ul_ngram = 3});
 
     // The whole step on the GPU (#50), plain and clipped, AdamW and Muon.
     step_on_gpu("dense step", dense, false, 0.0);

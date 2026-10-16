@@ -6,8 +6,9 @@
 // sampling and ternary inference engine all work on GPU-trained weights.
 //
 // The weights, the optimizer state and the gradients are fp32. Matrix
-// products go through cuBLAS with fp32 outputs and sums; Matmul says how
-// their inputs are multiplied:
+// products go through cuBLAS with fp32 outputs and sums (the MoE experts'
+// optionally through our own grouped kernels, set_grouped_experts); Matmul
+// says how their inputs are multiplied:
 // - fp32: exactly, which the tests use to compare against the CPU engine;
 // - tf32 (GpuTrainer's default; train --gpu's for ternary models): on the
 //   tensor cores, each input rounded to 11 significant bits;
@@ -145,6 +146,13 @@ public:
     // with CUDA events. take_profile returns seconds per part since its last
     // call.
     void set_profile(bool on);
+    // The MoE experts' products as one grouped launch per projection that
+    // never waits for the host (grouped_gemm.cuh, #49), instead of cuBLAS
+    // per expert, sized by counts the host waits for in each layer. Off by
+    // default until it is as fast: on the RTX 4070 the nights' model trains
+    // about 8% slower with it (2026-10-16), since cuBLAS is more efficient
+    // on the big products of busy experts.
+    void set_grouped_experts(bool on);
     std::vector<std::pair<std::string, double>> take_profile();
 
     size_t num_params() const;
@@ -173,6 +181,19 @@ bool fused_attention_fits(int head_size);
 // TF32 or bf16 matmuls, for head sizes that are a multiple of 16 up to 128.
 // Otherwise it runs attention.cuh's fp32 kernels.
 bool fused_attention_on_tensor_cores(Matmul matmul, int head_size);
+
+// The MoE experts' grouped products (grouped_gemm.cuh) on their own, on host
+// arrays (for tests). Group g is rows [starts[g], starts[g + 1]):
+// - forward: C[rows, N] = beta C + A[rows, K] · B_gᵀ, B_g = B + g stride ([N][K]);
+// - input_grad: C[rows, N] = beta C + A[rows, K] · B_g ([K][N]);
+// - weight_grad: C_g[M, N] = beta C_g + A[rows, M]ᵀ · B[rows, N], C_g = C + g stride.
+// With bf16 products the inputs are rounded to bf16 first. offset > 0
+// places A and B that many elements into their buffers, so that rows are
+// not 16-byte aligned and the plain kernel takes them.
+enum class GroupedOp { forward, input_grad, weight_grad };
+void gpu_grouped_product(Matmul matmul, GroupedOp op, const std::vector<float>& A, const std::vector<float>& B,
+                         std::vector<float>& C, const std::vector<int>& starts, int M, int N, int K, int lda, int ldb,
+                         int ldc, long long stride, float beta, int offset);
 
 // The fused attention kernels on their own, on host arrays (for tests):
 // out and lse from qkv [B·Tn, 3·NH·HS], then dqkv += the backward pass of

@@ -27,6 +27,7 @@
 
 #include "attention.cuh"
 #include "attention_tc.cuh"
+#include "grouped_gemm.cuh"
 #include "unlikelihood.h"
 
 #define CUDA_CHECK(call)                                                                       \
@@ -579,6 +580,13 @@ __global__ void balance_router(StepState* s, float* bias, unsigned long long* st
     s->load_ratio = worst;
 }
 
+// The experts' first rows in the grouped order (moe_order): starts[0] = 0,
+// starts[e + 1] = starts[e] + counts[e]. One thread.
+__global__ void expert_starts(int* starts, const int* counts, int E) {
+    starts[0] = 0;
+    for (int e = 0; e < E; ++e) starts[e + 1] = starts[e] + counts[e];
+}
+
 // counts[e] tokens went to expert e in this layer: add them to the step's.
 __global__ void add_counts(unsigned long long* step, const int* counts, int E) {
     for (int e = threadIdx.x; e < E; e += blockDim.x) step[e] += (unsigned long long)counts[e];
@@ -1009,13 +1017,22 @@ struct GpuTrainer::Impl {
         DevBuf<float> rlogits, gate, xg, efc, esw, ey;
         DevBuf<__nv_bfloat16> ln1h, attyh, ln2h, swh, xgh, eswh;
         DevBuf<int> sel, order, row_of;
-        std::vector<int> expert_start;  // host copy, [E + 1]
+        DevBuf<int> starts;  // the experts' first rows [E + 1] (expert_starts)
+        std::vector<int> expert_start;  // their host copy, for the per-expert products
     };
     std::vector<LayerActs> acts;
     DevBuf<float> x0, lnf_out, rstdf, logits, losses, xq, out_tmp;
     DevBuf<float> dresid, dC, dqkv, datty, dfc, dsw, dey, dxg, drl, dS, dsum, dgate, dw_partial;
     DevBuf<__nv_bfloat16> lnfh, dfch, deyh, dlogitsh;
     DevBuf<int> tokens, targets, counts;
+    // The experts' products: one grouped launch per projection, without the
+    // host (grouped_gemm.cuh; set_grouped_experts), or cuBLAS per expert,
+    // sized by the router's counts copied to the host (pinned memory, so
+    // the copy runs behind other work) once counts_ready has passed. The
+    // default stays cuBLAS until the grouped kernels are as fast (#49).
+    bool grouped_experts = false;
+    int* counts_h = nullptr;
+    cudaEvent_t counts_ready = nullptr;
     int B_ = 0, T_ = 0, B_cur = 0, T_cur = 0, n_valid = 0;
     bool has_targets = false;
     // Unlikelihood (#34), as Model::unlikelihood: the negatives are found on
@@ -1030,10 +1047,6 @@ struct GpuTrainer::Impl {
     DevBuf<double> neg_w, row_w, row_ul;
     bool ul_active = false;
     GpuTrainer::ForwardParts parts;
-    // The experts' row counts, copied back to the host (pinned memory, so
-    // the copy can run behind other work) once counts_ready has passed.
-    int* counts_h = nullptr;
-    cudaEvent_t counts_ready = nullptr;
     // Incremental decoding (decode_begin, decode_step): the k and v caches
     // [layer][B, S, C], each sequence's first real position, and the logits
     // copied back for the host to pick the next token. The caches live in
@@ -1467,6 +1480,7 @@ struct GpuTrainer::Impl {
                 a.rlogits.resize(N * E); a.sel.resize(N * K); a.gate.resize(N * K);
                 a.order.resize(NK); a.row_of.resize(NK);
                 act(a.xg, a.xgh, NK * C); a.efc.resize(NK * 2 * Fe); act(a.esw, a.eswh, NK * Fe);
+                a.starts.resize(E + 1);
                 a.ey.resize(NK * C);
             }
         }
@@ -1510,6 +1524,79 @@ struct GpuTrainer::Impl {
         if (cfg.moe()) moe_backward(l, dx, dout, N);
     }
 
+    // The experts' products for all experts at once (grouped_gemm.cuh), as
+    // proj_forward and proj_backward do them for one expert's rows: expert
+    // e's weights at woff + e * per, its rows from starts[e].
+    gg::Kind grouped_kind() const {
+        return bf16_ops ? gg::Kind::bf16 : compute == CUBLAS_COMPUTE_32F ? gg::Kind::fp32 : gg::Kind::tf32;
+    }
+    // y[rows of e, OC] = x[rows of e, IC] · w_eᵀ
+    void experts_forward(float* y, Operand x, size_t woff, size_t per, const int* starts, int NK, int IC, int OC,
+                         bool q) {
+        Region r(*this, "matmul fwd");
+        if (q) {  // never with bf16 products
+            act_quantize(xq.p, x.f, NK, IC);
+            x = Operand(xq.p);
+        }
+        gg::Problem p;
+        if (bf16_ops) {
+            p.A = as_bf16(x, op_x, size_t(NK) * IC);
+            p.B = WB(W(woff, q));
+        } else {
+            CHECK(x.f, "an fp32 product got a bf16 input");
+            p.A = x.f;
+            p.B = W(woff, q);
+        }
+        p.C = y;
+        p.lda = IC, p.ldb = IC, p.ldc = OC;
+        p.strideB = (long long)per;
+        p.N = OC, p.K = IC;
+        p.starts = starts, p.groups = cfg.n_experts;
+        p.beta = 0.0f;
+        gg::launch<false, true, false>(grouped_kind(), p, NK);
+        LAUNCH_CHECK();
+    }
+    // dx[rows of e, IC] = dy · w_e (written, not added), and the weights'
+    // gradient: dw_e += dyᵀ · x over e's rows.
+    void experts_backward(float* dx, Operand dy, Operand x, size_t woff, size_t per, const int* starts, int NK,
+                          int IC, int OC, bool q) {
+        Region r(*this, "matmul bwd");
+        if (q) {
+            act_quantize(xq.p, x.f, NK, IC);
+            x = Operand(xq.p);
+        }
+        gg::Problem d, g;
+        if (bf16_ops) {
+            d.A = g.A = as_bf16(dy, op_dy, size_t(NK) * OC);
+            d.B = WB(W(woff, q));
+            g.B = as_bf16(x, op_x, size_t(NK) * IC);
+        } else {
+            CHECK(x.f && dy.f, "an fp32 product got a bf16 input");
+            d.A = g.A = dy.f;
+            d.B = W(woff, q);
+            g.B = x.f;
+        }
+        d.C = dx;
+        d.lda = OC, d.ldb = IC, d.ldc = IC;
+        d.strideB = (long long)per;
+        d.N = IC, d.K = OC;
+        d.starts = starts, d.groups = cfg.n_experts;
+        d.beta = 0.0f;
+        gg::launch<false, false, false>(grouped_kind(), d, NK);
+        LAUNCH_CHECK();
+        g.C = G(woff);
+        g.lda = OC, g.ldb = IC, g.ldc = IC;
+        g.strideC = (long long)per;
+        g.M = OC, g.N = IC;
+        g.starts = starts, g.groups = cfg.n_experts;
+        g.beta = 1.0f;
+        gg::launch<true, false, true>(grouped_kind(), g, NK);
+        LAUNCH_CHECK();
+    }
+
+    // Routing, then every expert's rows through its two projections. The
+    // router's counts never leave the GPU: the grouped products find each
+    // expert's rows in a.starts.
     void moe_forward(int l, float* out, int N, bool training) {
         auto& a = acts[l];
         const auto& o = layer[l];
@@ -1519,12 +1606,15 @@ struct GpuTrainer::Impl {
         counts.zero(E);
         moe_route<<<blocks_for(N), kBlock>>>(a.sel.p, a.gate.p, counts.p, a.rlogits.p,
                                              router_bias.p + size_t(l) * E, N, E, K);
+        expert_starts<<<1, 1>>>(a.starts.p, counts.p, E);
         LAUNCH_CHECK();
-        // The host needs the counts to size the experts' products. The copy
-        // goes first and the grouping of rows behind it, so the GPU groups
-        // while the host waits for the copy.
-        CUDA_CHECK(cudaMemcpyAsync(counts_h, counts.p, E * sizeof(int), cudaMemcpyDeviceToHost));
-        CUDA_CHECK(cudaEventRecord(counts_ready));
+        if (!grouped_experts) {
+            // The host needs the counts to size the experts' products. The
+            // copy goes first and the grouping of rows behind it, so the
+            // GPU groups while the host waits for the copy.
+            CUDA_CHECK(cudaMemcpyAsync(counts_h, counts.p, E * sizeof(int), cudaMemcpyDeviceToHost));
+            CUDA_CHECK(cudaEventRecord(counts_ready));
+        }
         moe_order<<<E, 1024>>>(a.order.p, a.row_of.p, a.sel.p, counts.p, NK);
         LAUNCH_CHECK();
         if (bf16_ops)
@@ -1536,21 +1626,28 @@ struct GpuTrainer::Impl {
             add_counts<<<1, kWarp>>>(step_load.p + size_t(l) * E, counts.p, E);
             LAUNCH_CHECK();
         }
-        CUDA_CHECK(cudaEventSynchronize(counts_ready));
-        a.expert_start.assign(E + 1, 0);
-        for (int e = 0; e < E; ++e) a.expert_start[e + 1] = a.expert_start[e] + counts_h[e];
-        routing.reset();
         const size_t efc_per = size_t(2) * Fe * C, eproj_per = size_t(C) * Fe;
-        const Operand xg = pick(a.xg, a.xgh), esw = pick(a.esw, a.eswh);
-        for (int e = 0; e < E; ++e) {
-            const int r0 = a.expert_start[e], n = a.expert_start[e + 1] - r0;
-            if (n == 0) continue;
-            proj_forward(a.efc.p + size_t(r0) * 2 * Fe, xg + size_t(r0) * C, o.efc + e * efc_per, n, C, 2 * Fe,
-                         cfg.ternary);
-            swiglu_forward(bf16_ops ? nullptr : a.esw.p + size_t(r0) * Fe,
-                           bf16_ops ? a.eswh.p + size_t(r0) * Fe : nullptr, a.efc.p + size_t(r0) * 2 * Fe, n, Fe);
-            proj_forward(a.ey.p + size_t(r0) * C, esw + size_t(r0) * Fe, o.eproj + e * eproj_per, n, Fe, C,
-                         cfg.ternary);
+        if (grouped_experts) {
+            routing.reset();
+            experts_forward(a.efc.p, pick(a.xg, a.xgh), o.efc, efc_per, a.starts.p, NK, C, 2 * Fe, cfg.ternary);
+            swiglu_forward(bf16_ops ? nullptr : a.esw.p, bf16_ops ? a.eswh.p : nullptr, a.efc.p, NK, Fe);
+            experts_forward(a.ey.p, pick(a.esw, a.eswh), o.eproj, eproj_per, a.starts.p, NK, Fe, C, cfg.ternary);
+        } else {
+            CUDA_CHECK(cudaEventSynchronize(counts_ready));
+            a.expert_start.assign(E + 1, 0);
+            for (int e = 0; e < E; ++e) a.expert_start[e + 1] = a.expert_start[e] + counts_h[e];
+            routing.reset();
+            const Operand xg = pick(a.xg, a.xgh), esw = pick(a.esw, a.eswh);
+            for (int e = 0; e < E; ++e) {
+                const int r0 = a.expert_start[e], n = a.expert_start[e + 1] - r0;
+                if (n == 0) continue;
+                proj_forward(a.efc.p + size_t(r0) * 2 * Fe, xg + size_t(r0) * C, o.efc + e * efc_per, n, C, 2 * Fe,
+                             cfg.ternary);
+                swiglu_forward(bf16_ops ? nullptr : a.esw.p + size_t(r0) * Fe,
+                               bf16_ops ? a.eswh.p + size_t(r0) * Fe : nullptr, a.efc.p + size_t(r0) * 2 * Fe, n, Fe);
+                proj_forward(a.ey.p + size_t(r0) * C, esw + size_t(r0) * Fe, o.eproj + e * eproj_per, n, Fe, C,
+                             cfg.ternary);
+            }
         }
         Region combine(*this, "moe routing");
         moe_combine<<<blocks_for(size_t(N) * C), kBlock>>>(out, a.ey.p, a.gate.p, a.row_of.p, N, C, K);
@@ -1567,18 +1664,26 @@ struct GpuTrainer::Impl {
                                                                       a.gate.p, a.row_of.p, NK, C, K);
             LAUNCH_CHECK();
         }
-        dxg.zero(size_t(NK) * C);
         const size_t efc_per = size_t(2) * Fe * C, eproj_per = size_t(C) * Fe;
-        const Operand dy = pick(dey, deyh), xg = pick(a.xg, a.xgh), esw = pick(a.esw, a.eswh);
-        for (int e = 0; e < E; ++e) {
-            const int r0 = a.expert_start[e], n = a.expert_start[e + 1] - r0;
-            if (n == 0) continue;
-            dsw.zero(size_t(n) * Fe);
-            proj_backward(dsw.p, dy + size_t(r0) * C, esw + size_t(r0) * Fe, o.eproj + e * eproj_per, n, Fe, C,
-                          cfg.ternary);
-            swiglu_backward(dfc.p, dfch.p, dsw.p, a.efc.p + size_t(r0) * 2 * Fe, n, Fe);
-            proj_backward(dxg.p + size_t(r0) * C, pick(dfc, dfch), xg + size_t(r0) * C, o.efc + e * efc_per, n, C,
-                          2 * Fe, cfg.ternary);
+        if (grouped_experts) {
+            experts_backward(dsw.p, pick(dey, deyh), pick(a.esw, a.eswh), o.eproj, eproj_per, a.starts.p, NK, Fe, C,
+                             cfg.ternary);
+            swiglu_backward(dfc.p, dfch.p, dsw.p, a.efc.p, NK, Fe);
+            experts_backward(dxg.p, pick(dfc, dfch), pick(a.xg, a.xgh), o.efc, efc_per, a.starts.p, NK, C, 2 * Fe,
+                             cfg.ternary);
+        } else {
+            dxg.zero(size_t(NK) * C);
+            const Operand dy = pick(dey, deyh), xg = pick(a.xg, a.xgh), esw = pick(a.esw, a.eswh);
+            for (int e = 0; e < E; ++e) {
+                const int r0 = a.expert_start[e], n = a.expert_start[e + 1] - r0;
+                if (n == 0) continue;
+                dsw.zero(size_t(n) * Fe);
+                proj_backward(dsw.p, dy + size_t(r0) * C, esw + size_t(r0) * Fe, o.eproj + e * eproj_per, n, Fe, C,
+                              cfg.ternary);
+                swiglu_backward(dfc.p, dfch.p, dsw.p, a.efc.p + size_t(r0) * 2 * Fe, n, Fe);
+                proj_backward(dxg.p + size_t(r0) * C, pick(dfc, dfch), xg + size_t(r0) * C, o.efc + e * efc_per, n,
+                              C, 2 * Fe, cfg.ternary);
+            }
         }
         Region r(*this, "moe routing");
         moe_scatter<<<blocks_for(size_t(N) * C), kBlock>>>(dx, dxg.p, a.row_of.p, N, C, K);
@@ -2141,6 +2246,7 @@ size_t GpuTrainer::num_params() const { return impl_->n_params; }
 size_t GpuTrainer::device_bytes() const { return g_device_bytes; }
 
 void GpuTrainer::set_profile(bool on) { impl_->profiling = on; }
+void GpuTrainer::set_grouped_experts(bool on) { impl_->grouped_experts = on; }
 std::vector<std::pair<std::string, double>> GpuTrainer::take_profile() { return impl_->take_profile(); }
 
 bool fused_attention_fits(int head_size) { return head_size <= attn::kMaxHS; }
@@ -2175,6 +2281,52 @@ void gpu_fused_attention(const float* qkv, const float* dout, float* out, float*
     down(out, d_out, N * C);
     down(lse, d_lse, rows);
     down(dqkv, d_dqkv, N * 3 * C);
+}
+
+void gpu_grouped_product(Matmul matmul, GroupedOp op, const std::vector<float>& A, const std::vector<float>& B,
+                         std::vector<float>& C, const std::vector<int>& starts, int M, int N, int K, int lda, int ldb,
+                         int ldc, long long stride, float beta, int offset) {
+    const bool bf16 = matmul == Matmul::bf16;
+    // The operands, offset elements into their buffers (offset 1 makes the
+    // rows unaligned, for the fallback kernel); in bf16 for bf16 products.
+    DevBuf<float> fa, fb, fc;
+    DevBuf<__nv_bfloat16> ha, hb;
+    DevBuf<int> ds;
+    auto up = [&](DevBuf<float>& f, DevBuf<__nv_bfloat16>& h, const std::vector<float>& x) -> const void* {
+        f.resize(x.size() + offset);
+        to_device(f.p + offset, x.data(), x.size());
+        if (!bf16) return f.p + offset;
+        h.resize(x.size() + offset);
+        if (x.empty()) return h.p + offset;
+        to_bf16<<<std::min(blocks_for(x.size()), 4096), kBlock>>>(h.p + offset, f.p + offset, x.size());
+        LAUNCH_CHECK();
+        return h.p + offset;
+    };
+    gg::Problem p;
+    p.A = up(fa, ha, A);
+    p.B = up(fb, hb, B);
+    fc.resize(C.size());
+    to_device(fc.p, C.data(), C.size());
+    ds.resize(starts.size());
+    to_device(ds.p, starts.data(), starts.size());
+    p.C = fc.p;
+    p.lda = lda, p.ldb = ldb, p.ldc = ldc;
+    p.M = M, p.N = N, p.K = K;
+    p.starts = ds.p;
+    p.groups = int(starts.size()) - 1;
+    p.beta = beta;
+    const gg::Kind kind = bf16 ? gg::Kind::bf16 : matmul == Matmul::tf32 ? gg::Kind::tf32 : gg::Kind::fp32;
+    const int rows = starts.back();
+    if (op == GroupedOp::weight_grad) {
+        p.strideC = stride;
+        gg::launch<true, false, true>(kind, p, rows);
+    } else {
+        p.strideB = stride;
+        if (op == GroupedOp::forward) gg::launch<false, true, false>(kind, p, rows);
+        else gg::launch<false, false, false>(kind, p, rows);
+    }
+    LAUNCH_CHECK();
+    to_host(C.data(), fc.p, C.size());
 }
 
 std::string GpuTrainer::device_name() {
