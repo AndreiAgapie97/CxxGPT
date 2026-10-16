@@ -725,6 +725,7 @@ DirectionalCheck directional_check(GpuReference& ref, const std::vector<ParamInf
         double rms = 0;
         for (size_t i = 0; i < info.size; ++i) rms += w0[info.offset + i] * w0[info.offset + i];
         rms = std::sqrt(rms / double(info.size));
+        // 1e-5 left rounding noise of 1e-5 on the routers' small gradients.
         const double h = 1e-4 * std::max(rms, 1e-2);
         double err = 0, size = 0;
         for (int d = 0; d < dirs; ++d) {
@@ -784,8 +785,8 @@ void reference_vs_cpu(const char* name, const Config& cfg, double ul_alpha = 0, 
             for (size_t e = 0; e < r.expert_load[l].size(); ++e) loads &= r.expert_load[l][e] == cpu.expert_load[l][e];
     const DirectionalCheck d = directional_check(ref, cpu.infos, cpu.params, cpu.grads, tok.data(), tgt.data(), B, Tn,
                                                  ul_alpha, ul_ngram, 7);
-    std::printf("  reference = cpu, %-16s loss %.1e, gradients %.1e (worst %s)%s\n", name, dl, d.worst,
-                d.tensor.c_str(), ul_alpha > 0 ? "" : "");
+    std::printf("  reference = cpu, %-16s loss %.1e, gradients %.1e (worst %s)\n", name, dl, d.worst,
+                d.tensor.c_str());
     EXPECT(dl < 1e-12, "reference %s: loss %.17g vs the CPU's %.17g", name, r.loss, lc);
     EXPECT(r.fired == cpu.last_fired && r.negatives == cpu.last_negatives,
            "reference %s: %zu negatives at %zu positions, the CPU %zu at %zu", name, r.negatives, r.fired,
@@ -794,6 +795,74 @@ void reference_vs_cpu(const char* name, const Config& cfg, double ul_alpha = 0, 
     EXPECT(loads, "reference %s: expert loads differ from the CPU's", name);
     EXPECT(d.worst < 1e-6, "reference %s: finite differences differ from the CPU's gradient of %s by %g", name,
            d.tensor.c_str(), d.worst);
+}
+
+// The reference's tools against the CPU code they replace: two optimizer
+// steps (AdamW, Muon) from the same weights and gradients, attention with
+// its backward pass (attention_ref.h), and ternary codes on planted
+// threshold cases. The CPU optimizer computes in float, so the steps (the
+// change in each weight, not the weights) agree to float rounding.
+void reference_tools_vs_cpu(const Config& cfg) {
+    for (const bool muon : {false, true}) {
+        Model<float> cpu(cfg);
+        cpu.init(13);
+        Rng rng(14);
+        AdamW opt;
+        opt.muon = muon;
+        ReferenceOptimizer ro;
+        ro.muon = muon;
+        std::vector<double> p(cpu.params.begin(), cpu.params.end()), m(p.size()), v(p.size()), g(p.size());
+        const std::vector<float> start = cpu.params;
+        for (int step = 1; step <= 2; ++step) {
+            for (size_t i = 0; i < g.size(); ++i) cpu.grads[i] = float(0.01 * rng.normal()), g[i] = cpu.grads[i];
+            opt.update(cpu, 1e-2);
+            reference_optimizer_step(ro, cpu.infos, 1e-2, step, p, g, m, v);
+        }
+        std::vector<float> dc(p.size()), dr(p.size()), mf(m.begin(), m.end()), vf(v.begin(), v.end());
+        for (size_t i = 0; i < p.size(); ++i) dc[i] = cpu.params[i] - start[i], dr[i] = float(p[i] - start[i]);
+        const double ds = rel_l2(dr.data(), dc.data(), dc.size());
+        const double dm = rel_l2(mf.data(), opt.m.data(), m.size());
+        const double dv = muon ? 0.0 : rel_l2(vf.data(), opt.v.data(), v.size());
+        std::printf("  reference = cpu, %-16s steps %.1e, m %.1e, v %.1e\n", muon ? "muon" : "adamw", ds, dm, dv);
+        EXPECT(ds < 1e-4 && dm < 1e-6 && dv < 1e-6, "reference %s: steps %g, m %g, v %g from the CPU's",
+               muon ? "muon" : "adamw", ds, dm, dv);
+    }
+
+    const int shapes[][4] = {{2, 2, 16, 5}, {2, 3, 16, 33}, {1, 2, 64, 70}, {1, 1, 128, 40}};
+    uint64_t seed = 31;
+    for (const auto& s : shapes) {
+        const auto k = attention_ref::make_case(s[0], s[1], s[2], s[3], seed++);
+        const std::vector<double> qkv(k.qkv.begin(), k.qkv.end()), dout(k.dout.begin(), k.dout.end());
+        std::vector<double> out, lse, dqkv(k.dqkv0.begin(), k.dqkv0.end());
+        reference_attention(qkv, dout, out, lse, dqkv, s[0], s[3], s[1], s[2]);
+        auto rel = [](const std::vector<double>& a, const std::vector<double>& b) {
+            double d = 0, r = 0;
+            for (size_t i = 0; i < b.size(); ++i) d += (a[i] - b[i]) * (a[i] - b[i]), r += b[i] * b[i];
+            return a.size() == b.size() ? std::sqrt(d / r) : INFINITY;
+        };
+        const double worst = std::max({rel(out, k.out), rel(lse, k.lse), rel(dqkv, k.dqkv)});
+        std::printf("  reference = cpu, attention %d x %d heads of %d, %d tokens: %.1e\n", s[0], s[1], s[2], s[3],
+                    worst);
+        EXPECT(worst < 1e-12, "reference attention (%d heads of %d, %d tokens) differs by %g", s[1], s[2], s[3], worst);
+    }
+
+    std::vector<float> w(4096), wq(w.size()), wc(w.size());
+    Rng rng(15);
+    for (auto& x : w) x = float(rng.normal() * 0.3);
+    const auto planted = plant_threshold_cases(w.data(), w.size());
+    reference_ternary(w.data(), wq.data(), w.size());
+    ternary_quantize(wc.data(), w.data(), int64_t(w.size()));
+    size_t codes = 0, values = 0;
+    for (size_t i = 0; i < w.size(); ++i) {
+        codes += ternary_sign(wq[i]) != ternary_sign(wc[i]);
+        values += wq[i] != wc[i];
+    }
+    const auto cases = threshold_cases();
+    for (size_t c = 0; c < cases.size(); ++c)
+        codes += ternary_sign(wq[planted[c]]) != cases[c].second;
+    std::printf("  reference = cpu, ternary codes: %zu codes, %zu values differ\n", codes, values);
+    EXPECT(codes == 0 && values == 0, "reference ternary: %zu codes and %zu values differ from the CPU's", codes,
+           values);
 }
 
 // GpuTrainer::init_params: Model::init's layout made on the GPU. The same
@@ -1142,6 +1211,12 @@ int main() {
     reference_vs_cpu("fp attention", fpa);
     reference_vs_cpu("dense ul", dense, 0.5, 2);
     reference_vs_cpu("moe ul", moe, 0.5, 3);
+    reference_vs_cpu("heads of 64", wide);
+    Config wide1 = wide;
+    wide1.seq_len = 40;
+    wide1.n_heads = 1;
+    reference_vs_cpu("head of 128", wide1);
+    reference_tools_vs_cpu(moe);
 
     // Muon moves the weights about as much as the gradients differ, ten
     // times more than AdamW does, hence the looser weight tolerance.

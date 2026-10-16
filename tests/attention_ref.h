@@ -42,9 +42,10 @@ inline Case make_case(int B, int NH, int HS, int Tn, uint64_t seed) {
     Rng rng(seed);
     std::vector<double> qkv(size_t(N) * 3 * C), dout(size_t(N) * C);
     k.dqkv.resize(size_t(N) * 3 * C);
-    for (auto& x : qkv) x = rng.normal();
-    for (auto& x : dout) x = rng.normal();
-    for (auto& x : k.dqkv) x = 0.1 * rng.normal();
+    // Rounded to float first: the exact results are for the inputs the kernels get.
+    for (auto& x : qkv) x = double(float(rng.normal()));
+    for (auto& x : dout) x = double(float(rng.normal()));
+    for (auto& x : k.dqkv) x = double(float(0.1 * rng.normal()));
     k.qkv.assign(qkv.begin(), qkv.end());
     k.dout.assign(dout.begin(), dout.end());
     k.dqkv0.assign(k.dqkv.begin(), k.dqkv.end());
