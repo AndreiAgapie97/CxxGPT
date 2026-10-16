@@ -119,8 +119,82 @@ std::vector<std::vector<int>> generate(M& model, const std::vector<std::vector<i
     std::vector<std::vector<int>> pending(B);
     std::vector<size_t> next(B, 0);
     std::vector<NoRepeat> repeats;
-    if (no_repeat > 0) repeats.assign(size_t(B), NoRepeat(no_repeat));
     int n_finished = 0;
+    // Slot b's next token is t (picked by the model, or a calculator token
+    // already due): the calculator may take over, then the token is written.
+    const auto take = [&](int b, int t, bool injected, int pos) {
+        if (tool != calc::Mode::none && !injected && t < tokenizer->vocab_size()) {
+            const std::string& bytes = tokenizer->token_bytes(t);
+            // A BPE token can carry the trigger and more punctuation, as
+            // in " -" or "=.". The result replaces the rest of the token:
+            // that rest is the model's own start of the answer (a sign, a
+            // point), and keeping it would garble the number. Longest
+            // prefix first, so that " $" keeps its "$" (" = $" is a
+            // trigger too) while " -" falls back to its " ".
+            for (size_t end = bytes.size(); end >= 1; --end) {
+                const auto result = calc::response(texts[b] + bytes.substr(0, end), tool);
+                if (!result) continue;
+                if (result->empty()) { if (counts) ++counts->malformed; break; }
+                auto replacement = tokenizer->encode(bytes.substr(0, end));
+                const auto answer = tokenizer->encode(*result);
+                replacement.insert(replacement.end(), answer.begin(), answer.end());
+                // Do not insert half a result at the context/token cap.
+                if (replacement.size() <= size_t(total - pos)) {
+                    t = replacement[0]; pending[b] = std::move(replacement); next[b] = 1;
+                    if (counts) ++counts->fired;
+                }
+                break;
+            }
+        }
+        cur[b] = t;
+        out[b].push_back(t);
+        if (!repeats.empty()) repeats[size_t(b)].add(t);
+        if (done(out[b])) finished[b] = 1, ++n_finished;
+        if (tool != calc::Mode::none) watch(b, t);
+    };
+    if constexpr (requires { M::picks_on_device; }) {
+        // The GPU chooses the tokens (pick_token and NoRepeat there, from
+        // the same generators); only their ids come back. The prompts go
+        // in first, all their positions but the last at once.
+        std::vector<uint64_t> states;
+        const bool sampling = temperature > 0 && (rng_per_sequence || rng);
+        if (sampling && rng_per_sequence)
+            for (const Rng& r : *rng_per_sequence) states.insert(states.end(), r.state(), r.state() + 4);
+        else if (sampling)
+            states.assign(rng->state(), rng->state() + 4);
+        model.pick_begin(sampling ? temperature : 0.0, no_repeat, states, sampling && !rng_per_sequence);
+        if (L > 1) {
+            std::vector<int> prefix(size_t(B) * (L - 1));
+            for (int b = 0; b < B; ++b)
+                for (int pos = 0; pos < L - 1; ++pos)
+                    prefix[size_t(b) * (L - 1) + pos] = pos < start[b] ? prompts[b][0] : prompts[b][pos - start[b]];
+            model.decode_prefill(prefix.data(), L - 1);
+        }
+        for (int b = 0; b < B; ++b) cur[b] = prompts[b].back();
+        std::vector<unsigned char> flags(B);
+        for (int pos = L - 1; pos < total; ++pos) {
+            for (int b = 0; b < B; ++b) {
+                const bool injected = next[b] < pending[b].size();
+                flags[b] = finished[b] ? 0
+                                       : (unsigned char)((pos >= L ? M::kPickAppend : 0) |
+                                                         (injected ? 0 : M::kPickChoose));
+            }
+            const int* picked = model.decode_pick(cur.data(), pos, flags.data());
+            for (int b = 0; b < B; ++b) {
+                if (finished[b]) continue;
+                const bool injected = next[b] < pending[b].size();
+                take(b, injected ? pending[b][next[b]++] : picked[b], injected, pos);
+            }
+            if (n_finished == B) break;
+        }
+        const std::vector<uint64_t> after = model.pick_end();
+        if (sampling && rng_per_sequence)
+            for (int b = 0; b < B; ++b) (*rng_per_sequence)[size_t(b)].set_state(after.data() + 4 * b);
+        else if (sampling)
+            rng->set_state(after.data());
+        return out;
+    }
+    if (no_repeat > 0) repeats.assign(size_t(B), NoRepeat(no_repeat));
     for (int pos = 0; pos < total; ++pos) {
         for (int b = 0; b < B; ++b) {
             if (pos < L) cur[b] = pos < start[b] ? prompts[b][0] : prompts[b][pos - start[b]];
@@ -133,37 +207,10 @@ std::vector<std::vector<int>> generate(M& model, const std::vector<std::vector<i
             const bool injected = next[b] < pending[b].size();
             Rng* r = rng_per_sequence ? &(*rng_per_sequence)[size_t(b)] : rng;
             const auto* row = logits + size_t(b) * model.cfg.vocab;
-            int t = injected       ? pending[b][next[b]++] :
-                    no_repeat > 0 ? pick_token(row, model.cfg.vocab, temperature, r, repeats[size_t(b)].blocked()) :
-                                    pick_token(row, model.cfg.vocab, temperature, r);
-            if (tool != calc::Mode::none && !injected && t < tokenizer->vocab_size()) {
-                const std::string& bytes = tokenizer->token_bytes(t);
-                // A BPE token can carry the trigger and more punctuation, as
-                // in " -" or "=.". The result replaces the rest of the token:
-                // that rest is the model's own start of the answer (a sign, a
-                // point), and keeping it would garble the number. Longest
-                // prefix first, so that " $" keeps its "$" (" = $" is a
-                // trigger too) while " -" falls back to its " ".
-                for (size_t end = bytes.size(); end >= 1; --end) {
-                    const auto result = calc::response(texts[b] + bytes.substr(0, end), tool);
-                    if (!result) continue;
-                    if (result->empty()) { if (counts) ++counts->malformed; break; }
-                    auto replacement = tokenizer->encode(bytes.substr(0, end));
-                    const auto answer = tokenizer->encode(*result);
-                    replacement.insert(replacement.end(), answer.begin(), answer.end());
-                    // Do not insert half a result at the context/token cap.
-                    if (replacement.size() <= size_t(total - pos)) {
-                        t = replacement[0]; pending[b] = std::move(replacement); next[b] = 1;
-                        if (counts) ++counts->fired;
-                    }
-                    break;
-                }
-            }
-            cur[b] = t;
-            out[b].push_back(t);
-            if (no_repeat > 0) repeats[size_t(b)].add(t);
-            if (done(out[b])) finished[b] = 1, ++n_finished;
-            if (tool != calc::Mode::none) watch(b, t);
+            const int t = injected       ? pending[b][next[b]++] :
+                          no_repeat > 0 ? pick_token(row, model.cfg.vocab, temperature, r, repeats[size_t(b)].blocked()) :
+                                          pick_token(row, model.cfg.vocab, temperature, r);
+            take(b, t, injected, pos);
         }
         if (n_finished == B) break;
     }

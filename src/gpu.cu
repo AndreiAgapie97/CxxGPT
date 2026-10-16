@@ -254,31 +254,33 @@ __global__ void rope(float* qkv, const float* cos_t, const float* sin_t, int N, 
 
 // Incremental decoding (Model::decode_step): the k and v of each sequence's
 // new token, from qkv[B, 3C], into the caches kc, vc [B, S, C] at pos.
-__global__ void kv_store(float* kc, float* vc, const float* qkv, int B, int S, int C, int pos) {
+__global__ void kv_store(float* kc, float* vc, const float* qkv, int B, int Q, int S, int C, int pos0) {
     const size_t i = size_t(blockIdx.x) * blockDim.x + threadIdx.x;
-    if (i >= size_t(B) * C) return;
-    const size_t b = i / C, c = i % C, at = (b * S + pos) * C + c;
-    kc[at] = qkv[b * 3 * C + C + c];
-    vc[at] = qkv[b * 3 * C + 2 * C + c];
+    if (i >= size_t(B) * Q * C) return;
+    const size_t n = i / C, c = i % C, b = n / Q, q = n % Q, at = (b * S + pos0 + q) * C + c;
+    kc[at] = qkv[n * 3 * C + C + c];
+    vc[at] = qkv[n * 3 * C + 2 * C + c];
 }
 
-// Incremental decoding's attention: block b * NH + h is head h of sequence
-// b, whose new query (in qkv[B, 3C]) attends to its cached keys and values
-// at positions start[b]..pos (left padding comes before start[b]). The
-// scores live in dynamic shared memory, pos + 1 floats.
+// Incremental decoding's attention, for Q new positions per sequence
+// (pos0 .. pos0 + Q - 1; rows b·Q + q of qkv [B·Q, 3C]): block
+// (b·Q + q)·NH + h is head h of that query, which attends to its sequence's
+// cached keys and values at positions start[b]..pos0 + q (left padding comes
+// before start[b]; the Q positions' keys are already in the cache). The
+// scores live in dynamic shared memory, pos0 + Q floats.
 __global__ void decode_attn(float* out, const float* qkv, const float* kc, const float* vc, const int* start,
-                            int S, int C, int NH, int HS, int pos, float scale) {
+                            int S, int C, int NH, int HS, int pos0, int Q, float scale) {
     extern __shared__ float p[];
     __shared__ float red[kWarp + 1];
-    const int b = blockIdx.x / NH, h = blockIdx.x % NH, s0 = start[b];
+    const int n = blockIdx.x / NH, h = blockIdx.x % NH, b = n / Q, pos = pos0 + n % Q, s0 = start[b];
     // A padding position (before the sequence starts) attends to nothing:
     // zeros, as on the CPU, rather than 0/0, which could reach the router.
     if (pos < s0) {
-        for (int i = threadIdx.x; i < HS; i += blockDim.x) out[size_t(b) * C + h * HS + i] = 0.0f;
+        for (int i = threadIdx.x; i < HS; i += blockDim.x) out[size_t(n) * C + h * HS + i] = 0.0f;
         return;
     }
     const int lane = threadIdx.x % kWarp, wid = threadIdx.x / kWarp, nw = blockDim.x / kWarp;
-    const float* q = qkv + size_t(b) * 3 * C + h * HS;
+    const float* q = qkv + size_t(n) * 3 * C + h * HS;
     const size_t base = size_t(b) * S * C + size_t(h) * HS;
     // One warp per cached position: its score q·k.
     for (int s = s0 + wid; s <= pos; s += nw) {
@@ -299,9 +301,145 @@ __global__ void decode_attn(float* out, const float* qkv, const float* kc, const
     for (int i = threadIdx.x; i < HS; i += blockDim.x) {
         float y = 0.0f;
         for (int s = s0; s <= pos; ++s) y += p[s] * vc[base + size_t(s) * C + i];
-        out[size_t(b) * C + h * HS + i] = y * inv;
+        out[size_t(n) * C + h * HS + i] = y * inv;
     }
 }
+
+// ---------------------------------------------------------------------------
+// Choosing the next token on the GPU (generate.h's pick_token and NoRepeat)
+// ---------------------------------------------------------------------------
+
+// What each sequence does at a decoding step (decode_pick's flags).
+constexpr unsigned char kAppend = 1;  // the token fed now was written by the sequence: it joins its text
+constexpr unsigned char kPick = 2;    // choose its next token (not finished, no calculator token due)
+
+// xoshiro256** (common.h's Rng), the same numbers on the GPU.
+__device__ __forceinline__ uint64_t rotl64(uint64_t x, int k) { return (x << k) | (x >> (64 - k)); }
+__device__ double rng_uniform(uint64_t* s) {
+    const uint64_t result = rotl64(s[1] * 5, 7) * 9, t = s[1] << 17;
+    s[2] ^= s[0];
+    s[3] ^= s[1];
+    s[1] ^= s[2];
+    s[0] ^= s[3];
+    s[2] ^= t;
+    s[3] = rotl64(s[3], 45);
+    return double(result >> 11) * 0x1.0p-53;
+}
+
+// NoRepeat for each sequence: kAppend adds the fed token to its text (a BOS
+// starts the text again); with kPick, every token that would complete a run
+// of N tokens already in the text a second time is marked blocked
+// (mask[b, t] = stamp, a number new at every step, so the mask never needs
+// clearing). One block per sequence; text [B, cap].
+__global__ void no_repeat_mark(int* mask, int stamp, int* text, int* len, int cap, const int* fed,
+                               const unsigned char* flags, int V, int N) {
+    const int b = blockIdx.x;
+    __shared__ int n;
+    if (threadIdx.x == 0) {
+        n = len[b];
+        if (flags[b] & kAppend) {
+            const int t = fed[b];
+            n = t == kBos ? 0 : n;
+            if (t != kBos && n < cap) text[size_t(b) * cap + n++] = t;
+            len[b] = n;
+        }
+    }
+    __syncthreads();
+    if (!(flags[b] & kPick) || N == 0 || n < N) return;
+    const int* x = text + size_t(b) * cap;
+    // Runs x[i .. i + N - 1] whose first N - 1 tokens are the text's last N - 1.
+    for (int i = threadIdx.x; i + N <= n; i += blockDim.x) {
+        bool same = true;
+        for (int j = 0; j < N - 1 && same; ++j) same = x[i + j] == x[n - N + 1 + j];
+        if (same) mask[size_t(b) * V + x[i + N - 1]] = stamp;
+    }
+}
+
+// One random number per sequence that samples now (kPick, temperature > 0),
+// in sequence order: from its own generator, or all from one (shared).
+__global__ void draw_uniforms(double* u, uint64_t* states, const unsigned char* flags, int B, bool shared) {
+    for (int b = 0; b < B; ++b)
+        if (flags[b] & kPick) u[b] = rng_uniform(states + 4 * (shared ? 0 : b));
+}
+
+// pick_token for each sequence with kPick (out[b] = -1 for the others):
+// the first largest logit among the tokens not blocked, or with temperature
+// > 0 a sample from exp((logit - best) / temperature) over them, using u[b];
+// if every token is blocked, the block is ignored. The sample's sum runs in
+// a fixed order: each thread's slice of the vocabulary in order, then the
+// slices in order (pick_token sums one token after another; the two can
+// differ in the last bits, which moves a sample only when u falls within
+// rounding of a boundary). One block of kBlock threads per sequence.
+__global__ void pick_tokens(int* out, const float* logits, const int* mask, int stamp, const double* u,
+                            const unsigned char* flags, int V, double temperature) {
+    const int b = blockIdx.x;
+    __shared__ float best_v[kBlock];
+    __shared__ int best_i[kBlock];
+    __shared__ double part[kBlock];
+    __shared__ int use_mask, chosen;
+    if (!(flags[b] & kPick)) {
+        if (threadIdx.x == 0) out[b] = -1;
+        return;
+    }
+    const float* l = logits + size_t(b) * V;
+    const int* mk = mask + size_t(b) * V;
+    const int per = (V + kBlock - 1) / kBlock, lo = threadIdx.x * per, hi = min(V, lo + per);
+    if (threadIdx.x == 0) use_mask = 1;
+    __syncthreads();
+    for (int round = 0; round < 2; ++round) {
+        float bv = -INFINITY;
+        int bi = -1;
+        for (int i = lo; i < hi; ++i)
+            if (!(use_mask && mk[i] == stamp) && (bi < 0 || l[i] > bv)) bv = l[i], bi = i;
+        best_v[threadIdx.x] = bv;
+        best_i[threadIdx.x] = bi;
+        __syncthreads();
+        if (threadIdx.x == 0) {
+            // Slices in order: a later slice wins only with a larger value,
+            // so ties go to the lowest index, as in pick_token.
+            int w = -1;
+            for (int j = 0; j < kBlock; ++j)
+                if (best_i[j] >= 0 && (w < 0 || best_v[j] > best_v[w])) w = j;
+            chosen = w < 0 ? -1 : best_i[w];
+            if (chosen < 0) use_mask = 0;  // every token blocked: ignore the block
+        }
+        __syncthreads();
+        if (chosen >= 0) break;
+    }
+    if (temperature <= 0.0) {
+        if (threadIdx.x == 0) out[b] = chosen;
+        return;
+    }
+    const double top = l[chosen];
+    double s = 0.0;
+    for (int i = lo; i < hi; ++i)
+        if (!(use_mask && mk[i] == stamp)) s += exp((double(l[i]) - top) / temperature);
+    part[threadIdx.x] = s;
+    __syncthreads();
+    if (threadIdx.x != 0) return;
+    double total = 0.0;
+    for (int j = 0; j < kBlock; ++j) total += part[j];
+    double left = u[b] * total;
+    int pick = chosen;
+    for (int j = 0; j < kBlock; ++j) {
+        if (left - part[j] >= 0) {
+            left -= part[j];
+            continue;
+        }
+        // The sample falls in slice j: walk it token by token.
+        const int a = j * per, e = min(V, a + per);
+        for (int i = a; i < e; ++i) {
+            if (use_mask && mk[i] == stamp) continue;
+            if ((left -= exp((double(l[i]) - top) / temperature)) < 0) {
+                pick = i;
+                break;
+            }
+        }
+        break;
+    }
+    out[b] = pick;
+}
+
 
 // attention_forward's softmax: each row of att[B, NH, Tn, Tn] holds raw
 // scores; becomes softmax(scale * scores) over s <= t, and 0 above.
@@ -1031,6 +1169,7 @@ struct GpuTrainer::Impl {
     // the copy runs behind other work) once counts_ready has passed. The
     // default stays cuBLAS until the grouped kernels are as fast (#49).
     bool grouped_experts = false;
+    bool decoding = false;  // decode_forward runs: always the grouped products
     int* counts_h = nullptr;
     cudaEvent_t counts_ready = nullptr;
     int B_ = 0, T_ = 0, B_cur = 0, T_cur = 0, n_valid = 0;
@@ -1062,8 +1201,12 @@ struct GpuTrainer::Impl {
     bool grads_scratch = false;
     std::vector<float> logits_h;
 
-    Impl(const Config& c, const std::vector<ParamInfo>& in, Matmul matmul, bool fused)
-        : cfg(c), infos(in), fused_attn(fused) {
+    // An evaluating trainer (GpuTrainer's inference): no gradients, no
+    // optimizer state, no backward activations; training calls refuse.
+    bool inference = false;
+
+    Impl(const Config& c, const std::vector<ParamInfo>& in, Matmul matmul, bool fused, bool infer)
+        : cfg(c), infos(in), fused_attn(fused), inference(infer) {
         cfg.validate();
         int devices = 0;
         const cudaError_t err = cudaGetDeviceCount(&devices);
@@ -1093,13 +1236,15 @@ struct GpuTrainer::Impl {
             fused_attention_prepare(HS, tc_attn);
         }
         params.resize(n_params);
-        grads.resize(n_params);
         if (cfg.ternary) qparams.resize(n_params);  // read only through W(), for ternary models
         if (bf16_ops) wbf.resize(n_params);
-        m.resize(n_params);
-        grads.zero();
-        m.zero();
-        layout_v();
+        if (!inference) {
+            grads.resize(n_params);
+            m.resize(n_params);
+            grads.zero();
+            m.zero();
+            layout_v();
+        }
 
         // Offsets by name, as Model's layout builds them.
         auto off = [&](const std::string& name, bool required) -> size_t {
@@ -1489,6 +1634,7 @@ struct GpuTrainer::Impl {
         tokens.resize(N); targets.resize(N);
         xq.resize(std::max(N, NK) * std::max({C, F, Fe}));
         out_tmp.resize(N * C);
+        if (inference) return;  // no backward pass
         dresid.resize(N * C); dC.resize(N * C); dqkv.resize(N * 3 * C); datty.resize(N * C);
         act(dfc, dfch, std::max(N * 2 * F, NK * 2 * Fe)); dsw.resize(std::max(N * F, NK * Fe));
         if (fused_attn) dsum.resize(rows); else dS.resize(att);
@@ -1608,7 +1754,8 @@ struct GpuTrainer::Impl {
                                              router_bias.p + size_t(l) * E, N, E, K);
         expert_starts<<<1, 1>>>(a.starts.p, counts.p, E);
         LAUNCH_CHECK();
-        if (!grouped_experts) {
+        const bool grouped = grouped_experts || decoding;
+        if (!grouped) {
             // The host needs the counts to size the experts' products. The
             // copy goes first and the grouping of rows behind it, so the
             // GPU groups while the host waits for the copy.
@@ -1627,7 +1774,7 @@ struct GpuTrainer::Impl {
             LAUNCH_CHECK();
         }
         const size_t efc_per = size_t(2) * Fe * C, eproj_per = size_t(C) * Fe;
-        if (grouped_experts) {
+        if (grouped) {
             routing.reset();
             experts_forward(a.efc.p, pick(a.xg, a.xgh), o.efc, efc_per, a.starts.p, NK, C, 2 * Fe, cfg.ternary);
             swiglu_forward(bf16_ops ? nullptr : a.esw.p, bf16_ops ? a.eswh.p : nullptr, a.efc.p, NK, Fe);
@@ -1701,6 +1848,7 @@ struct GpuTrainer::Impl {
     void forward_sums(const int* tokens_h, const int* targets_h, int B, int Tn, bool training, double* ce_sum,
                       double* ul_sum) {
         CHECK(targets_h, "GpuTrainer::forward needs targets");
+        CHECK(!training || !inference, "a training forward on an evaluating GpuTrainer (inference)");
         release_decode();  // training never runs with less memory than without decoding
         allocate(B, Tn);
         B_cur = B;
@@ -1814,6 +1962,7 @@ struct GpuTrainer::Impl {
 
     // Before reading the gradients: decoding must not have overwritten them.
     void check_grads(const char* what) const {
+        CHECK(!inference, "%s: this GpuTrainer only evaluates (inference)", what);
         CHECK(!grads_scratch, "%s after decoding, which used the gradient buffer: zero_grad() first", what);
     }
 
@@ -1821,7 +1970,9 @@ struct GpuTrainer::Impl {
         CHECK(B > 0 && int(start.size()) == B, "decode_begin: %zu starts for %d sequences", start.size(), B);
         // Decoding uses the first B rows of the training buffers; allocate()
         // for B rows would free and rebuild them all (B > B_ there).
-        if (size_t(B_) * T_ == 0) allocate(B, 1);
+        // With nothing allocated yet (an evaluation), room for prompt chunks
+        // of up to 512 rows in all (decode_prefill).
+        if (size_t(B_) * T_ == 0) allocate(B, std::max(1, std::min(cfg.seq_len, 512 / B)));
         CHECK(size_t(B) <= size_t(B_) * T_, "decode batch %d > the %d rows allocated", B, B_ * T_);
         CHECK(size_t(cfg.seq_len) * sizeof(float) <= 48 * 1024, "decode attention keeps a context of %d scores in "
               "shared memory: at most 12288", cfg.seq_len);
@@ -1847,11 +1998,18 @@ struct GpuTrainer::Impl {
         logits_h.resize(size_t(B) * cfg.vocab);
     }
 
-    const float* decode_step(const int* tokens_h, int pos) {
-        const int B = kv_B, N = B, C = cfg.d_model, V = cfg.vocab, NH = cfg.n_heads, HS = cfg.head_size();
+    // Positions pos0 .. pos0 + Q - 1 of every sequence (tokens [B, Q],
+    // sequence-major) through the layers into the caches: the prompt in
+    // chunks (Q > 1), or one new token each (Q = 1). With logits (Q = 1
+    // only), the next token's logits [B, vocab] go to `logits`, on the GPU.
+    void decode_forward(const int* tokens_h, int pos0, int Q, bool want_logits) {
+        const int B = kv_B, N = B * Q, C = cfg.d_model, V = cfg.vocab, NH = cfg.n_heads, HS = cfg.head_size();
         const int S = cfg.seq_len;
-        CHECK(B > 0, "decode_step without decode_begin");
-        CHECK(pos >= 0 && pos < S, "decode position %d outside the context of %d", pos, S);
+        CHECK(B > 0, "decoding without decode_begin");
+        CHECK(Q >= 1 && pos0 >= 0 && pos0 + Q <= S, "decode positions %d..%d outside the context of %d", pos0,
+              pos0 + Q - 1, S);
+        CHECK(size_t(N) <= size_t(B_) * T_, "%d decode rows > the %d allocated", N, B_ * T_);
+        CHECK(!want_logits || Q == 1, "logits for one position at a time");
         for (int n = 0; n < N; ++n) CHECK(tokens_h[n] >= 0 && tokens_h[n] < V, "token %d out of range", tokens_h[n]);
         if (weights_dirty) quantize_weights();
         upload(tokens.p, tokens_h, N);
@@ -1859,18 +2017,19 @@ struct GpuTrainer::Impl {
         LAUNCH_CHECK();
         const float scale = 1.0f / std::sqrt(float(HS));
         const float* x = x0.p;
+        decoding = true;  // the experts' products need no host (moe_forward)
         for (int l = 0; l < cfg.n_layers; ++l) {
             auto& a = acts[l];
             const auto& o = layer[l];
             rmsnorm_forward(a.ln1.p, a.ln1h.p, a.rstd1.p, x, P(o.ln1), N, C);
             proj_forward(a.qkv.p, pick(a.ln1, a.ln1h), o.wqkv, N, C, 3 * C, attn_ternary());
-            if (cfg.rope_layer(l)) rope_apply(a.qkv.p, B, 1, false, pos);
+            if (cfg.rope_layer(l)) rope_apply(a.qkv.p, B, Q, false, pos0);
             {
                 Region r(*this, "attention fwd");
-                kv_store<<<blocks_for(size_t(N) * C), kBlock>>>(kcache[l], vcache[l], a.qkv.p, N, S, C, pos);
+                kv_store<<<blocks_for(size_t(N) * C), kBlock>>>(kcache[l], vcache[l], a.qkv.p, B, Q, S, C, pos0);
                 LAUNCH_CHECK();
-                decode_attn<<<N * NH, kBlock, size_t(pos + 1) * sizeof(float)>>>(
-                    a.atty.p, a.qkv.p, kcache[l], vcache[l], kv_start.p, S, C, NH, HS, pos, scale);
+                decode_attn<<<N * NH, kBlock, size_t(pos0 + Q) * sizeof(float)>>>(
+                    a.atty.p, a.qkv.p, kcache[l], vcache[l], kv_start.p, S, C, NH, HS, pos0, Q, scale);
                 LAUNCH_CHECK();
             }
             if (bf16_ops) to_bf16_region(a.attyh.p, a.atty.p, size_t(N) * C);
@@ -1881,13 +2040,92 @@ struct GpuTrainer::Impl {
             add(a.resid2.p, a.resid1.p, out_tmp.p, size_t(N) * C);
             x = a.resid2.p;
         }
+        decoding = false;
+        if (!want_logits) return;
         rmsnorm_forward(lnf_out.p, lnfh.p, rstdf.p, x, P(lnf), N, C);
-        {
-            Region r(*this, "output layer and loss");
-            linear_forward(logits.p, pick(lnf_out, lnfh), P(wte), N, C, V);  // tied head
-        }
-        to_host(logits_h.data(), logits.p, size_t(N) * V);
+        Region r(*this, "output layer and loss");
+        linear_forward(logits.p, pick(lnf_out, lnfh), P(wte), N, C, V);  // tied head
+    }
+
+    const float* decode_step(const int* tokens_h, int pos) {
+        decode_forward(tokens_h, pos, 1, true);
+        to_host(logits_h.data(), logits.p, size_t(kv_B) * cfg.vocab);
         return logits_h.data();
+    }
+
+    // The prompts' first Lp positions (tokens [B, Lp]): as many positions
+    // at once as the activation buffers hold rows.
+    void decode_prefill(const int* tokens_h, int Lp) {
+        const int B = kv_B, chunk = std::max(1, int(size_t(B_) * T_ / size_t(B)));
+        std::vector<int> part;
+        for (int p0 = 0; p0 < Lp; p0 += chunk) {
+            const int Q = std::min(chunk, Lp - p0);
+            part.resize(size_t(B) * Q);
+            for (int b = 0; b < B; ++b)
+                std::copy(tokens_h + size_t(b) * Lp + p0, tokens_h + size_t(b) * Lp + p0 + Q,
+                          part.begin() + size_t(b) * Q);
+            decode_forward(part.data(), p0, Q, false);
+        }
+    }
+
+    // Choosing the next token on the GPU (pick_begin, decode_pick): the
+    // sampling temperature (0: argmax), the no-repeat run length (0: off)
+    // and the generators' states, one per sequence or one shared.
+    double pick_temp = 0.0;
+    int pick_no_repeat = 0, pick_stamp = 0;
+    bool pick_shared = false;
+    DevBuf<uint64_t> pick_states;
+    DevBuf<double> pick_u;
+    DevBuf<int> pick_mask, pick_text, pick_len, pick_out;
+    DevBuf<unsigned char> pick_flags;
+    std::vector<int> pick_out_h;
+
+    void pick_begin(double temperature, int no_repeat, const std::vector<uint64_t>& states, bool shared) {
+        const int B = kv_B, V = cfg.vocab;
+        CHECK(B > 0, "pick_begin without decode_begin");
+        CHECK(temperature <= 0 || states.size() == size_t(shared ? 4 : 4 * B),
+              "%zu generator words for %d sequences", states.size(), B);
+        pick_temp = temperature;
+        pick_no_repeat = no_repeat;
+        pick_shared = shared;
+        pick_states.resize(std::max<size_t>(states.size(), 4));
+        if (!states.empty()) to_device(pick_states.p, states.data(), states.size());
+        pick_u.resize(B);
+        pick_mask.resize(size_t(B) * V);
+        pick_mask.zero();
+        pick_stamp = 0;
+        pick_text.resize(size_t(B) * cfg.seq_len);
+        pick_len.resize(B);
+        pick_len.zero();
+        pick_out.resize(B);
+        pick_flags.resize(B);
+        pick_out_h.resize(B);
+    }
+
+    // One step: the tokens fed at pos (flags[b]: kAppend, kPick), then each
+    // picking sequence's next token, chosen on the GPU; only those B token
+    // ids come back (-1 for the sequences that did not pick).
+    const int* decode_pick(const int* tokens_h, int pos, const unsigned char* flags_h) {
+        const int B = kv_B, V = cfg.vocab;
+        decode_forward(tokens_h, pos, 1, true);
+        to_device(pick_flags.p, flags_h, B);
+        ++pick_stamp;
+        Region r(*this, "decode picks");
+        no_repeat_mark<<<B, kBlock>>>(pick_mask.p, pick_stamp, pick_text.p, pick_len.p, cfg.seq_len, tokens.p,
+                                      pick_flags.p, V, pick_no_repeat);
+        if (pick_temp > 0) draw_uniforms<<<1, 1>>>(pick_u.p, pick_states.p, pick_flags.p, B, pick_shared);
+        pick_tokens<<<B, kBlock>>>(pick_out.p, logits.p, pick_mask.p, pick_stamp, pick_u.p, pick_flags.p, V,
+                                   pick_temp);
+        LAUNCH_CHECK();
+        to_host(pick_out_h.data(), pick_out.p, B);
+        return pick_out_h.data();
+    }
+
+    // The generators' states after the picks (temperature > 0), to hand back.
+    std::vector<uint64_t> pick_end() {
+        std::vector<uint64_t> st(pick_temp > 0 ? (pick_shared ? 4 : size_t(4) * kv_B) : 0);
+        if (!st.empty()) to_host(st.data(), pick_states.p, st.size());
+        return st;
     }
 
     void backward(double loss_scale) {
@@ -2105,8 +2343,9 @@ struct GpuTrainer::Impl {
     }
 };
 
-GpuTrainer::GpuTrainer(const Config& cfg, const std::vector<ParamInfo>& infos, Matmul matmul, bool fused_attention)
-    : impl_(std::make_unique<Impl>(cfg, infos, matmul, fused_attention)) {}
+GpuTrainer::GpuTrainer(const Config& cfg, const std::vector<ParamInfo>& infos, Matmul matmul, bool fused_attention,
+                       bool inference)
+    : impl_(std::make_unique<Impl>(cfg, infos, matmul, fused_attention, inference)) {}
 
 GpuTrainer::~GpuTrainer() = default;
 
@@ -2126,6 +2365,7 @@ void GpuTrainer::get_ternary_weights(float* q) {
 }
 
 void GpuTrainer::set_adam_state(long step, const float* m, const float* v) {
+    CHECK(!impl_->inference, "set_adam_state(): this GpuTrainer only evaluates (inference)");
     impl_->adam_step = step;
     if (m) to_device(impl_->m.p, m, impl_->n_params);
     else impl_->m.zero();
@@ -2136,6 +2376,7 @@ void GpuTrainer::set_adam_state(long step, const float* m, const float* v) {
             to_device(impl_->v.p + impl_->v_at[i], v + impl_->infos[i].offset, impl_->infos[i].size);
 }
 void GpuTrainer::get_adam_state(long* step, float* m, float* v) const {
+    CHECK(!impl_->inference, "get_adam_state(): this GpuTrainer only evaluates (inference)");
     if (step) *step = impl_->adam_step;
     if (m) to_host(m, impl_->m.p, impl_->n_params);
     if (!v) return;
@@ -2167,6 +2408,7 @@ void GpuTrainer::set_unlikelihood(double alpha, int ngram) {
 }
 GpuTrainer::ForwardParts GpuTrainer::last_parts() const { return impl_->parts; }
 void GpuTrainer::zero_grad() {
+    CHECK(!impl_->inference, "zero_grad(): this GpuTrainer only evaluates (inference)");
     impl_->grads.zero();
     impl_->grads_scratch = false;
     impl_->begin_step();
@@ -2183,6 +2425,15 @@ GpuTrainer::StepStats GpuTrainer::finish_step(double lr, double beta1, double be
 
 void GpuTrainer::decode_begin(int B, const std::vector<int>& start) { impl_->decode_begin(B, start); }
 const float* GpuTrainer::decode_step(const int* tokens, int pos) { return impl_->decode_step(tokens, pos); }
+void GpuTrainer::decode_prefill(const int* tokens, int Lp) { impl_->decode_prefill(tokens, Lp); }
+void GpuTrainer::pick_begin(double temperature, int no_repeat, const std::vector<uint64_t>& states, bool shared) {
+    impl_->pick_begin(temperature, no_repeat, states, shared);
+}
+const int* GpuTrainer::decode_pick(const int* tokens, int pos, const unsigned char* flags) {
+    static_assert(kPickAppend == kAppend && kPickChoose == kPick, "decode_pick's flags");
+    return impl_->decode_pick(tokens, pos, flags);
+}
+std::vector<uint64_t> GpuTrainer::pick_end() { return impl_->pick_end(); }
 int GpuTrainer::decode_capacity(int max_batch) const {
     const Impl& m = *impl_;
     const size_t per = m.decode_bytes_per_sequence();
@@ -2210,7 +2461,10 @@ void GpuTrainer::adamw_step(double lr, double beta1, double beta2, double eps, d
     impl_->adamw_step(lr, beta1, beta2, eps, weight_decay, grad_scale);
 }
 
-void GpuTrainer::set_muon(bool on, double momentum, int ns_steps) { impl_->set_muon(on, momentum, ns_steps); }
+void GpuTrainer::set_muon(bool on, double momentum, int ns_steps) {
+    CHECK(!impl_->inference, "set_muon(): this GpuTrainer only evaluates (inference)");
+    impl_->set_muon(on, momentum, ns_steps);
+}
 
 // [layer][expert] doubles from a device array of counts, which is then cleared.
 static std::vector<std::vector<double>> take_counts(DevBuf<unsigned long long>& counts, int L, int E) {

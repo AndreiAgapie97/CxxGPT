@@ -154,7 +154,7 @@ patterns for inspection and do not establish the cause of a wrong answer.
 | `train` | trains or resumes a model (CPU, or GPU with `cxxgpt-gpu --gpu`) |
 | `eval-reasoning` | exact-answer accuracy per task and difficulty; greedy by default, or a vote over several sampled tries (below); `--tools calc-notes` or `calc-plain` also scores the same problems with an exact calculator filling in the model's arithmetic ([docs/calculator.md](docs/calculator.md)); `--gpu` (with `cxxgpt-gpu`) decodes on the GPU, with exact fp32 products by default, so the scores are the CPU's (`--matmul tf32` or `bf16` scores the model as training computes it) |
 | `eval-loss` | a checkpoint's loss on held-out token files, one line per file: by default on the same random windows as `train --val` (`--batch 8 --batches 20`, `night.sh`'s 160 windows; with training's `--batch` and `--eval-batches` it repeats training's last validation number), `--all` on every token once; `--gpu` (with `cxxgpt-gpu`), exact fp32 products by default |
-| `sample` | generates text from a prompt (`--tools` as for `eval-reasoning`) |
+| `sample` | generates text from a prompt (`--tools` as for `eval-reasoning`); `--gpu` (with `cxxgpt-gpu`) chooses every token on the GPU, the same text as the CPU's |
 | `bench-infer` | times the ternary inference engine against an fp32 baseline |
 | `leak-check` | finds questions (such as the GSM8K dev set) that share a run of 13 words with training files |
 | `qa-context` | how often random training windows train an answer without its question in view (`--data A.tok,B.tok --seq 512`) |

@@ -154,6 +154,7 @@ struct Tiling {
 // against 10.0 in TF32.
 using RowsTiling = Tiling<2, 4, 4, 4, 64, 3>;
 using ReduceTiling = Tiling<2, 4, 4, 2, 64, 2>;
+using SmallRowsTiling = Tiling<1, 4, 1, 2, 64, 2>;  // 16 x 128: decoding's few rows per expert
 constexpr int kThreads = 256;  // the plain kernel's
 
 __device__ __forceinline__ void cp_async16(void* smem, const void* gmem, int bytes) {
@@ -301,7 +302,17 @@ __global__ void __launch_bounds__(L::threads) grouped_tc(Problem p) {
 // Plain fp32 (exact products), and the fallback for unaligned rows
 // ---------------------------------------------------------------------------
 
-constexpr int kSM = 64, kSN = 64, kSK = 16;  // 256 threads, 4 x 4 results each
+// A plain tiling: SM x SN of C per block of 256 threads, each RM x RN
+// results (strided, so neighbouring threads read neighbouring shared
+// memory), SK columns of A per step.
+template <int SM_, int SN_, int SK_, int RM_, int RN_>
+struct PlainTiling {
+    static constexpr int SM = SM_, SN = SN_, SK = SK_, RM = RM_, RN = RN_;
+    static constexpr int TN = SN / RN;  // threads across
+    static_assert((SM / RM) * (SN / RN) == kThreads, "256 threads");
+};
+using PlainBig = PlainTiling<128, 128, 8, 8, 8>;
+using PlainSmall = PlainTiling<32, 64, 16, 2, 4>;  // decoding: a few rows per expert
 
 template <class T>
 __device__ __forceinline__ float value(T x, bool tf32) {
@@ -313,39 +324,48 @@ __device__ __forceinline__ float value(__nv_bfloat16 x, bool) {
     return __bfloat162float(x);
 }
 
-template <class T, bool TA, bool TB, bool Reduce>
+template <class T, class L, bool TA, bool TB, bool Reduce>
 __global__ void __launch_bounds__(kThreads) grouped_simt(Problem p, bool tf32) {
-    const Tile t = find_tile<Reduce, kSM, kSN>(p, sizeof(T));
+    constexpr int SM = L::SM, SN = L::SN, SK = L::SK, RM = L::RM, RN = L::RN;
+    const Tile t = find_tile<Reduce, SM, SN>(p, sizeof(T));
     if (!t.live) return;
-    __shared__ float As[kSK][kSM + 1], Bs[kSK][kSN + 1];  // As[k][m], Bs[k][n]
+    __shared__ float As[SK][SM + 4], Bs[SK][SN + 4];  // As[k][m], Bs[k][n]
     const T* A = reinterpret_cast<const T*>(t.A);
     const T* B = reinterpret_cast<const T*>(t.B);
-    const int tm = threadIdx.x / 16, tn = threadIdx.x % 16;  // results m = tm + 16 i, n = tn + 16 j
-    float acc[4][4] = {};
-    for (int k0 = 0; k0 < t.K; k0 += kSK) {
-        for (int i = threadIdx.x; i < kSK * kSM; i += kThreads) {
-            const int k = i / kSM, m = i % kSM, gk = k0 + k, gm = t.m0 + m;
+    const int tm = threadIdx.x / L::TN, tn = threadIdx.x % L::TN;  // results m = tm + (SM / RM) i, n = tn + TN j
+    float acc[RM][RN] = {};
+    for (int k0 = 0; k0 < t.K; k0 += SK) {
+        // Neighbouring threads read neighbouring addresses of A and B as
+        // they are stored.
+        for (int i = threadIdx.x; i < SK * SM; i += kThreads) {
+            const int k = TA ? i / SM : i % SK, m = TA ? i % SM : i / SK, gk = k0 + k, gm = t.m0 + m;
             const bool in = gk < t.K && gm < t.M;
             As[k][m] = in ? value(A[TA ? size_t(gk) * p.lda + gm : size_t(gm) * p.lda + gk], tf32) : 0.0f;
         }
-        for (int i = threadIdx.x; i < kSK * kSN; i += kThreads) {
-            const int k = i / kSN, n = i % kSN, gk = k0 + k, gn = t.n0 + n;
+        for (int i = threadIdx.x; i < SK * SN; i += kThreads) {
+            const int k = TB ? i % SK : i / SN, n = TB ? i / SK : i % SN, gk = k0 + k, gn = t.n0 + n;
             const bool in = gk < t.K && gn < p.N;
             Bs[k][n] = in ? value(B[TB ? size_t(gn) * p.ldb + gk : size_t(gk) * p.ldb + gn], tf32) : 0.0f;
         }
         __syncthreads();
 #pragma unroll
-        for (int k = 0; k < kSK; ++k)
+        for (int k = 0; k < SK; ++k) {
+            float a[RM], b[RN];
 #pragma unroll
-            for (int i = 0; i < 4; ++i)
+            for (int i = 0; i < RM; ++i) a[i] = As[k][tm + (SM / RM) * i];
 #pragma unroll
-                for (int j = 0; j < 4; ++j) acc[i][j] += As[k][tm + 16 * i] * Bs[k][tn + 16 * j];
+            for (int j = 0; j < RN; ++j) b[j] = Bs[k][tn + L::TN * j];
+#pragma unroll
+            for (int i = 0; i < RM; ++i)
+#pragma unroll
+                for (int j = 0; j < RN; ++j) acc[i][j] += a[i] * b[j];
+        }
         __syncthreads();
     }
 #pragma unroll
-    for (int i = 0; i < 4; ++i)
+    for (int i = 0; i < RM; ++i)
 #pragma unroll
-        for (int j = 0; j < 4; ++j) put(p, t, t.m0 + tm + 16 * i, t.n0 + tn + 16 * j, acc[i][j]);
+        for (int j = 0; j < RN; ++j) put(p, t, t.m0 + tm + (SM / RM) * i, t.n0 + tn + L::TN * j, acc[i][j]);
 }
 
 // ---------------------------------------------------------------------------
@@ -376,22 +396,43 @@ void launch_tc(const Problem& p, int total_rows) {
     grouped_tc<T, L, TA, TB, Reduce><<<grid, L::threads, bytes>>>(p);
 }
 
+template <class T, class L, bool TA, bool TB, bool Reduce>
+void launch_plain(const Problem& p, int total_rows, bool tf32) {
+    const dim3 grid = Reduce ? dim3((p.M + L::SM - 1) / L::SM, (p.N + L::SN - 1) / L::SN, p.groups)
+                             : dim3((total_rows + L::SM - 1) / L::SM + p.groups, (p.N + L::SN - 1) / L::SN);
+    if (grid.x == 0 || grid.y == 0 || grid.z == 0) return;
+    grouped_simt<T, L, TA, TB, Reduce><<<grid, kThreads>>>(p, tf32);
+}
+
 // One grouped product. total_rows (rows mode): the groups' rows together,
-// which bounds the number of row tiles the launch needs.
-template <bool TA, bool TB, bool Reduce, class L = std::conditional_t<Reduce, ReduceTiling, RowsTiling>>
+// which bounds the number of row tiles the launch needs. With few rows per
+// group (decoding: about B·top-k / experts), tiles of fewer rows waste less.
+template <bool TA, bool TB, bool Reduce>
 void launch(Kind kind, const Problem& p, int total_rows) {
     const bool bf16 = kind == Kind::bf16;
     const size_t esz = bf16 ? 2 : 4;
+    const bool few = !Reduce && p.groups > 0 && total_rows / p.groups < 64;
     if (kind != Kind::fp32 && aligned16(p, esz, Reduce)) {
-        if (bf16) launch_tc<__nv_bfloat16, L, TA, TB, Reduce>(p, total_rows);
-        else launch_tc<float, L, TA, TB, Reduce>(p, total_rows);
+        if (Reduce) {
+            if (bf16) launch_tc<__nv_bfloat16, ReduceTiling, TA, TB, Reduce>(p, total_rows);
+            else launch_tc<float, ReduceTiling, TA, TB, Reduce>(p, total_rows);
+        } else if (few) {
+            if (bf16) launch_tc<__nv_bfloat16, SmallRowsTiling, TA, TB, Reduce>(p, total_rows);
+            else launch_tc<float, SmallRowsTiling, TA, TB, Reduce>(p, total_rows);
+        } else {
+            if (bf16) launch_tc<__nv_bfloat16, RowsTiling, TA, TB, Reduce>(p, total_rows);
+            else launch_tc<float, RowsTiling, TA, TB, Reduce>(p, total_rows);
+        }
         return;
     }
-    const dim3 grid = Reduce ? dim3((p.M + kSM - 1) / kSM, (p.N + kSN - 1) / kSN, p.groups)
-                             : dim3((total_rows + kSM - 1) / kSM + p.groups, (p.N + kSN - 1) / kSN);
-    if (grid.x == 0 || grid.y == 0 || grid.z == 0) return;
-    if (bf16) grouped_simt<__nv_bfloat16, TA, TB, Reduce><<<grid, kThreads>>>(p, false);
-    else grouped_simt<float, TA, TB, Reduce><<<grid, kThreads>>>(p, kind == Kind::tf32);
+    const bool tf32 = kind == Kind::tf32;
+    if (few) {
+        if (bf16) launch_plain<__nv_bfloat16, PlainSmall, TA, TB, Reduce>(p, total_rows, false);
+        else launch_plain<float, PlainSmall, TA, TB, Reduce>(p, total_rows, tf32);
+    } else {
+        if (bf16) launch_plain<__nv_bfloat16, PlainBig, TA, TB, Reduce>(p, total_rows, false);
+        else launch_plain<float, PlainBig, TA, TB, Reduce>(p, total_rows, tf32);
+    }
 }
 
 }  // namespace gg

@@ -31,6 +31,7 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 #include <memory>
 #include <string>
 #include <utility>
@@ -42,8 +43,11 @@ enum class Matmul { fp32, tf32, bf16 };
 
 class GpuTrainer {
 public:
+    // inference: only for evaluation (forward without training, decoding):
+    // no gradients, optimizer state or backward buffers, 3 floats per
+    // parameter less GPU memory; the training calls refuse.
     GpuTrainer(const Config& cfg, const std::vector<ParamInfo>& infos, Matmul matmul = Matmul::tf32,
-               bool fused_attention = false);
+               bool fused_attention = false, bool inference = false);
     // Preserve the earlier precision-selector API and its cuBLAS attention.
     GpuTrainer(const Config& cfg, const std::vector<ParamInfo>& infos, bool tf32)
         : GpuTrainer(cfg, infos, tf32 ? Matmul::tf32 : Matmul::fp32, false) {}
@@ -138,6 +142,21 @@ public:
     // How many sequences' caches fit (in the gradient buffer or the GPU
     // memory free now), at most max_batch; 0 if not even one does.
     int decode_capacity(int max_batch) const;
+    // Decoding with every choice on the GPU (generate.h, for GpuDecoder):
+    // decode_prefill feeds the prompts' first Lp positions (tokens [B, Lp])
+    // in chunks, with no logits. pick_begin sets the temperature (0: argmax),
+    // the no-repeat run length (0: off) and the generators' states (4 words
+    // each, Rng::state(): one per sequence, or one shared by all in sequence
+    // order). decode_pick feeds tokens[b] at pos, then chooses each picking
+    // sequence's next token as pick_token does, and returns those B ids (-1
+    // where flags[b] has no kPickChoose); kPickAppend: the fed token was the
+    // sequence's own, so it counts for the no-repeat block. pick_end returns
+    // the generators' states afterwards.
+    static constexpr unsigned char kPickAppend = 1, kPickChoose = 2;
+    void decode_prefill(const int* tokens, int Lp);
+    void pick_begin(double temperature, int no_repeat, const std::vector<uint64_t>& states, bool shared);
+    const int* decode_pick(const int* tokens, int pos, const unsigned char* flags);
+    std::vector<uint64_t> pick_end();
     size_t decode_bytes_per_sequence() const;  // the caches of one sequence
     static size_t free_device_bytes();         // as the GPU reports it now
 
@@ -170,8 +189,18 @@ private:
 struct GpuDecoder {
     Config cfg;
     GpuTrainer& gpu;
+    static constexpr bool picks_on_device = true;  // generate() picks through decode_pick
+    static constexpr unsigned char kPickAppend = GpuTrainer::kPickAppend, kPickChoose = GpuTrainer::kPickChoose;
     void decode_begin(int B, const std::vector<int>& start) { gpu.decode_begin(B, start); }
     const float* decode_step(const int* tokens, int pos) { return gpu.decode_step(tokens, pos); }
+    void decode_prefill(const int* tokens, int Lp) { gpu.decode_prefill(tokens, Lp); }
+    void pick_begin(double temperature, int no_repeat, const std::vector<uint64_t>& states, bool shared) {
+        gpu.pick_begin(temperature, no_repeat, states, shared);
+    }
+    const int* decode_pick(const int* tokens, int pos, const unsigned char* flags) {
+        return gpu.decode_pick(tokens, pos, flags);
+    }
+    std::vector<uint64_t> pick_end() { return gpu.pick_end(); }
 };
 
 // Whether the fused attention kernels take this head size (up to 128).

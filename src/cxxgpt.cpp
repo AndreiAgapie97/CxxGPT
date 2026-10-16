@@ -782,21 +782,16 @@ int cmd_eval_reasoning(Args& a) {
     int gpu_batch = 0;
     if (use_gpu) {
         const Matmul mm = matmul == "fp32" ? Matmul::fp32 : matmul == "bf16" ? Matmul::bf16 : Matmul::tf32;
-        gpu = std::make_unique<GpuTrainer>(model.cfg, model.infos, mm, false);
+        gpu = std::make_unique<GpuTrainer>(model.cfg, model.infos, mm, false, /*inference=*/true);
         gpu->set_params(model.params.data());
         gpu->set_router_bias(model.router_bias);
         gpu_batch = gpu->decode_capacity(batch);
-        if (gpu_batch < vote.tries) {
-            // One problem's tries are decoded together, so they must fit at once.
-            std::printf("gpu: room for %d answers at a time (%zu MB each, %zu MB free), fewer than --tries %d; "
-                        "on the CPU instead\n",
-                        gpu_batch, gpu->decode_bytes_per_sequence() >> 20, GpuTrainer::free_device_bytes() >> 20,
-                        vote.tries);
-            gpu.reset();
-        } else {
-            std::printf("gpu: %s, %s matmuls, %d answers at a time\n", GpuTrainer::device_name().c_str(),
-                        matmul.c_str(), gpu_batch);
-        }
+        // One problem's tries are decoded together, so they must fit at once.
+        CHECK(gpu_batch >= vote.tries,
+              "the GPU has room for %d answers at a time (%zu MB each, %zu MB free), fewer than --tries %d",
+              gpu_batch, gpu->decode_bytes_per_sequence() >> 20, GpuTrainer::free_device_bytes() >> 20, vote.tries);
+        std::printf("gpu: %s, %s matmuls, %d answers at a time\n", GpuTrainer::device_name().c_str(),
+                    matmul.c_str(), gpu_batch);
     }
 #endif
     std::vector<Problem> test = load_problems(test_path);
@@ -1052,11 +1047,10 @@ struct GpuBackend : Backend {
                       bool keep_completions) override {
         const int batch = gpu.decode_capacity(64);
         if (batch == 0) {
-            std::printf("reasoning eval: the GPU decoder needs %zu MB per answer, and the gradient buffer and %zu "
-                        "MB of free GPU memory are not enough; on the CPU instead\n",
+            std::printf("reasoning eval skipped: the GPU decoder needs %zu MB per answer, and the gradient buffer "
+                        "and %zu MB of free GPU memory are not enough\n",
                         gpu.decode_bytes_per_sequence() >> 20, GpuTrainer::free_device_bytes() >> 20);
-            sync();
-            return eval_reasoning(model, problems, tok, 64, max_new, 8, keep_completions);
+            return {};
         }
         std::printf("reasoning eval on the GPU, %d answers at a time\n", batch);
         GpuDecoder dec{model.cfg, gpu};
@@ -1302,6 +1296,7 @@ int cmd_train(Args& a) {
         if (reason_test.empty()) return;
         const double t0 = now_seconds();
         const EvalResult r = be.reason(reason_test, tok, max_new, !reason_report_prefix.empty());
+        if (r.total == 0) return;  // skipped (no room on the GPU)
         std::printf("reasoning eval at step %ld (%.1f s):\n", at_step, now_seconds() - t0);
         print_eval(r, 1);  // one wrong answer, to see what the model writes
         if (!reason_report_prefix.empty()) {
@@ -1504,7 +1499,7 @@ int cmd_eval_loss(Args& a) {
     if (use_gpu) {
         const Matmul mm = matmul == "fp32" ? Matmul::fp32 : matmul == "bf16" ? Matmul::bf16 : Matmul::tf32;
         const bool fused = fused_attention_fits(model.cfg.head_size());  // as train's default
-        gpu = std::make_unique<GpuTrainer>(model.cfg, model.infos, mm, fused);
+        gpu = std::make_unique<GpuTrainer>(model.cfg, model.infos, mm, fused, /*inference=*/true);
         gpu->set_params(model.params.data());
         gpu->set_router_bias(model.router_bias);
         std::printf("gpu: %s, %s matmuls, %s attention\n", GpuTrainer::device_name().c_str(), matmul.c_str(),
@@ -1550,7 +1545,16 @@ int cmd_sample(Args& a) {
     const calc::Mode tool = calculator_mode(a);
     const int no_repeat = a.integer_int("no-repeat", 0);  // as for eval-reasoning
     CHECK(no_repeat == 0 || no_repeat >= 2, "--no-repeat must be 0 (off) or at least 2");
+    // On the GPU (cxxgpt-gpu): every token chosen there; exact fp32 products
+    // by default, as eval-reasoning --gpu.
+    const bool use_gpu = a.flag("gpu");
+    CHECK(use_gpu || !a.has("matmul"), "--matmul needs --gpu");
+    const std::string matmul = a.str("matmul", "fp32");
+    CHECK(matmul == "fp32" || matmul == "tf32" || matmul == "bf16", "--matmul takes fp32, tf32 or bf16");
     a.done();
+#ifndef CXXGPT_CUDA
+    CHECK(!use_gpu, "this cxxgpt was built without CUDA; use cxxgpt-gpu (make gpu) for --gpu");
+#endif
     Model<float> model(peek_checkpoint_config(ckpt));
     load_checkpoint(ckpt, model, nullptr, nullptr);
     Tokenizer tok;
@@ -1573,10 +1577,21 @@ int cmd_sample(Args& a) {
     };
     // A BOS would start the next document: this one is over.
     calc::Counts counts;
-    const auto out = generate(
-        model, {ids}, n,
-        [&](const std::vector<int>& g) { return g.back() == kBos || (answer && completion_done(text_of(g))); },
-        temp, &rng, nullptr, tool, &tok, &counts, no_repeat);
+    const auto stop = [&](const std::vector<int>& g) {
+        return g.back() == kBos || (answer && completion_done(text_of(g)));
+    };
+    std::vector<std::vector<int>> out;
+#ifdef CXXGPT_CUDA
+    if (use_gpu) {
+        const Matmul mm = matmul == "fp32" ? Matmul::fp32 : matmul == "bf16" ? Matmul::bf16 : Matmul::tf32;
+        GpuTrainer gpu(model.cfg, model.infos, mm, false, /*inference=*/true);
+        gpu.set_params(model.params.data());
+        gpu.set_router_bias(model.router_bias);
+        GpuDecoder dec{model.cfg, gpu};
+        out = generate(dec, {ids}, n, stop, temp, &rng, nullptr, tool, &tok, &counts, no_repeat);
+    }
+#endif
+    if (!use_gpu) out = generate(model, {ids}, n, stop, temp, &rng, nullptr, tool, &tok, &counts, no_repeat);
     std::vector<int> gen = out[0];
     if (!gen.empty() && gen.back() == kBos) gen.pop_back();
     const std::string text = text_of(gen);

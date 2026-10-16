@@ -640,6 +640,7 @@ void eval_on_gpu() {
     for (int i = 0; i < 24; ++i) test.push_back(problem(1 + i % 2));
 
     GpuDecoder dec{cfg, gpu};
+    std::vector<std::string> plain;  // the greedy completions without the block
     auto check = [&](const char* name, const VoteOpts& vote, calc::Mode tool) {
         const EvalResult c = eval_reasoning(cpu, test, tok, 12, 40, 8, true, vote, tool);
         const EvalResult g = eval_reasoning(dec, test, tok, 8, 40, 8, true, vote, tool);
@@ -658,9 +659,14 @@ void eval_on_gpu() {
                     c.correct, c.total, finished, c.completions.size(), c.tool_calls.fired);
         EXPECT(same, "eval on the GPU, %s: the EvalResult differs from the CPU's (%d / %d right against %d)", name,
                g.correct, g.total, c.correct);
-        // The comparison means something only if answers were finished.
-        EXPECT(finished * 2 > c.completions.size(), "eval on the GPU, %s: only %zu of %zu answers finished", name,
-               finished, c.completions.size());
+        if (vote.tries == 1 && vote.no_repeat == 0 && tool == calc::Mode::none) plain = c.completions;
+        // The comparison means something only if answers were finished, or
+        // (no-repeat) if the block changed them.
+        if (vote.no_repeat == 0)
+            EXPECT(finished * 2 > c.completions.size(), "eval on the GPU, %s: only %zu of %zu answers finished", name,
+                   finished, c.completions.size());
+        else
+            EXPECT(c.completions != plain, "eval on the GPU, %s: the block never fired", name);
         if (tool != calc::Mode::none) EXPECT(c.tool_calls.fired > 0, "eval on the GPU, %s: no calculator calls", name);
     };
     std::printf("  eval on the GPU: trained loss %.3f -> %.3f\n", first, last);
@@ -672,6 +678,23 @@ void eval_on_gpu() {
     check("maj@4, temp 0.7", votes, calc::Mode::none);
     check("greedy, calc", {}, calc::Mode::notes);
     check("maj@4, calc", votes, calc::Mode::notes);
+    // The no-repeat block, chosen on the GPU (no_repeat_mark), at a run
+    // length that fires on these answers.
+    VoteOpts block;
+    block.no_repeat = 3;
+    check("greedy, no-rep 3", block, calc::Mode::none);
+    votes.no_repeat = 3;
+    check("maj@4, no-rep 3", votes, calc::Mode::notes);
+
+    // One generator shared by all sequences in slot order (sample's), the
+    // same tokens and the same generator state afterwards.
+    std::vector<std::vector<int>> prompts;
+    for (int i = 0; i < 5; ++i) prompts.push_back(tok.encode(test[size_t(i)].prompt()));
+    Rng rc(21), rg(21);
+    const auto never = [](const std::vector<int>&) { return false; };
+    const auto oc = generate(cpu, prompts, 30, never, 1.0, &rc);
+    const auto og = generate(dec, prompts, 30, never, 1.0, &rg);
+    EXPECT(oc == og && rc.next() == rg.next(), "shared-generator sampling differs between the CPU and the GPU");
 }
 
 }  // namespace

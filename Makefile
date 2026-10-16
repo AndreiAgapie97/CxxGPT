@@ -50,7 +50,8 @@ CUDA_ARCH ?= native
 NVCCFLAGS ?= -O3 -std=c++20 -arch=$(CUDA_ARCH) -Xcompiler -Wall,-Wextra $(NVCC_EXTRA)
 CUDA_LIBS ?= -L$(CUDA_HOME)/lib64 -Wl,-rpath,$(CUDA_HOME)/lib64 -lcublas -lcudart
 
-gpu.o: src/gpu.cu src/gpu.h src/attention.cuh src/attention_tc.cuh src/config.h src/common.h
+gpu.o: src/gpu.cu src/gpu.h src/attention.cuh src/attention_tc.cuh src/grouped_gemm.cuh src/unlikelihood.h \
+       src/no_repeat.h src/config.h src/common.h
 	$(NVCC) $(NVCCFLAGS) -c $< -o $@
 
 cxxgpt-gpu: src/cxxgpt.cpp gpu.o $(HEADERS)

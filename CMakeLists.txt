@@ -57,7 +57,8 @@ if(CXXGPT_CUDA)
                 -Werror all-warnings -Xcompiler "$<IF:$<CONFIG:Debug>,/MDd,/MD>,/W3,/WX"
                 -DNOMINMAX -D_CRT_SECURE_NO_WARNINGS
                 -c "${CMAKE_CURRENT_SOURCE_DIR}/src/gpu.cu" -o "${gpu_obj}"
-        DEPENDS src/gpu.cu src/gpu.h src/attention.cuh src/attention_tc.cuh src/config.h src/common.h
+        DEPENDS src/gpu.cu src/gpu.h src/attention.cuh src/attention_tc.cuh src/grouped_gemm.cuh src/unlikelihood.h
+                src/no_repeat.h src/config.h src/common.h
         COMMENT "nvcc src/gpu.cu"
         VERBATIM)
     add_executable(cxxgpt-gpu src/cxxgpt.cpp "${gpu_obj}")
