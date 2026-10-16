@@ -155,8 +155,8 @@ Math problem-solving accuracy is the first evaluation focus.
   story's quantities alone. Audited 2026-10-16 (README, "Generated word
   problems"): no "1 cards", realistic payments, kept items with a source,
   at most two cuts per chain, no wording used twice in a story; the tests
-  check each rule. `data/targeted-math` was made before the audit (commit
-  3b6d880) and keeps the old flaws until the owner decides to rebuild it.
+  check each rule. `data/targeted-math` was rebuilt with it (README, "The
+  training data").
 - GSM8K dev set: `scripts/get_data.py` holds out 500 GSM8K train problems
   (the 500 questions with the smallest sha256); `DEV=1 scripts/night.sh`
   validates on it instead of the test set. `cxxgpt leak-check` finds
@@ -187,7 +187,9 @@ Math problem-solving accuracy is the first evaluation focus.
   "Data provenance"): the laptop continues the RunPod model (267M MoE,
   97.6M active, from random weights; `runs/runpod-2026-10-16/fresh-eu.ckpt`,
   step 46,946, 3.9% on GSM8K test) on its last mix, `night.sh`'s default:
-  `data/targeted-math/` (963,089 exact `gen-word` problems x4, GSM8K
+  `data/targeted-math/` (973,193 audited `gen-word` problems x4, rebuilt
+  2026-10-16 by `operations/build_targeted_math.py`; the RunPod model saw
+  the pre-audit set, kept as `data/targeted-math-runpod/`; GSM8K
   train without the dev problems and 7 near-copies x64) and 12 shards of
   textbooks, DOAB books and arXiv papers from `data/licensed-10b/` (10B
   Common Pile tokens, CC BY/CC0, with each document's attribution), about

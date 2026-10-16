@@ -332,14 +332,17 @@ folders:
   is kept. Also the tokenizer, `tok.bpe` (16,384 tokens, learned from a
   sample of the training split; sha256 `6e811ced...`), and GSM8K's dev and
   test sets encoded with it (`gsm8k-dev`, `gsm8k-test`).
-- `data/targeted-math/`: 963,089 exact `gen-word` problems (1M generated,
-  minus those sharing a 13-word run with a GSM8K dev or test question or a
-  generated dev question; `operations/prepare_targeted_math.py`; made by
-  `src/wordgen.h` as of commit 3b6d880, sha256 `41cc54c3...`, before the
-  2026-10-16 audit, so they still have its flaws: "1 cards", payments of
-  $180 for $1.50, kept items from nowhere), and
-  GSM8K train without the 500 dev problems and 7 near-copies (6,966
-  problems).
+- `data/targeted-math/`: 973,193 exact `gen-word` problems (1M generated
+  after the 2026-10-16 audit, same seeds, minus 25,646 sharing a 13-word
+  run with a GSM8K dev or test question or a generated dev question, and
+  1,161 with a GSM8K dev or test question's numbers and answer;
+  `operations/build_targeted_math.py`, 199.6M tokens; every one of its
+  4,849,161 written calculations re-checked exactly), and GSM8K train
+  without the 500 dev problems and 7 near-copies (6,966 problems). The
+  RunPod model trained on the set made before the audit (963,089 problems,
+  `src/wordgen.h` at commit 3b6d880, with its flaws: "1 cards", payments
+  of $180 for $1.50, kept items from nowhere, a sentence repeated in 44%
+  of problems); it is kept as `data/targeted-math-runpod/`.
 
 `night.sh` trains on the run's last mix unless `MIX=` names others:
 
