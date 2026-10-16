@@ -165,11 +165,11 @@ quarter of its steps, half the drop is done.
    the clone has `data/licensed-10b/` (the corpus, `tok.bpe`, GSM8K dev
    and test), `data/targeted-math/` (word problems, GSM8K train) and
    `runs/runpod-2026-10-16/` (the checkpoints and the run's logs).
-   `night.sh` names any file it cannot find. `scripts/prepare_data.sh`
-   still downloads GSM8K into `data/gsm8k/` (4 MB from GitHub; the same
-   dev and test questions), which `night.sh` no longer needs; CI checks on
-   every push that GSM8K's files are still where `get_data.py` expects
-   them (`get_data.py --check`).
+   `night.sh` names any file it cannot find. `scripts/get_data.py gsm8k`
+   downloads GSM8K's JSON Lines into `data/gsm8k/` (4 MB from GitHub; the
+   same dev and test questions), which `night.sh` does not need; CI checks
+   on every push that GSM8K's files are still where it expects them
+   (`get_data.py --check`).
 
 ### The dev set (`DEV=1`)
 

@@ -192,16 +192,14 @@ Math problem-solving accuracy is the first evaluation focus.
   same folder: never pair a checkpoint with another tokenizer (equal
   vocabulary sizes, so nothing would catch it). `night.sh STEP0=46946
   LR=1.2e-4` continues the checkpoint (docs/LAPTOP.md, "Continuing the
-  RunPod model"; not yet run on the laptop). `scripts/prepare_clean.sh`
-  still builds the laptop's first mix (`data/clean-20261015/`, with
-  `data/tok.bpe`), which the RunPod model cannot read. Only openly licensed
+  RunPod model"; not yet run on the laptop). Only openly licensed
   text, human-written problems and our own generators' output train the
   models, never text an AI model wrote.
 - `src/cxxgpt.cpp`: the CLI (train, sample, eval, data prep, benchmarks).
 - `scripts/get_data.py`: downloads GSM8K into `data/gsm8k/` as JSON Lines
-  (for `prep-qa`), with the 500 dev problems held out of train;
-  `scripts/prepare_data.sh` encodes them. Tested against a local fake
-  server; CI's `data-sources` job checks the real files (`--check`).
+  (for `prep-qa`), with the 500 dev problems held out of train (the same
+  500 as the RunPod data's). Tested against a local fake server; CI's
+  `data-sources` job checks the real files (`--check`).
 - `scripts/compare.sh`: the architecture comparison on the curriculum.
 - For the laptop (native Windows since 2026-10-15; the scripts run in Git
   Bash): `scripts/build_windows.cmd` (build, kernel, engine and GPU tests;

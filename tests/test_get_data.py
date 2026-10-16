@@ -107,10 +107,9 @@ class DatasetTest(unittest.TestCase):
         self.assertEqual({hashlib.sha256(q.encode()).hexdigest() for q in dq}, set(digests[:500]))
 
     def test_identical_rerun_keeps_timestamps(self):
-        # Run the real script, as prepare_data.sh does, twice. The second run
-        # writes the same bytes, so it must leave the files (and their
-        # timestamps) alone; otherwise prepare_data.sh re-encodes GSM8K on
-        # every rerun.
+        # Run the real script twice. The second run writes the same bytes, so
+        # it must leave the files (and their timestamps) alone: anything made
+        # from them would otherwise look out of date after every rerun.
         script = Path(__file__).resolve().parents[1] / "scripts/get_data.py"
         env = dict(os.environ, GSM8K_ENDPOINT=self.url + "/gsm8k")
 
@@ -135,55 +134,6 @@ class DatasetTest(unittest.TestCase):
         run()
         self.assertNotEqual((self.root / "gsm8k/train.jsonl").stat().st_mtime_ns, 1_000_000_000)
         self.assertNotEqual((self.root / "gsm8k/train.jsonl").read_bytes(), first["gsm8k/train.jsonl"])
-
-    def test_preparation_produces_dev_and_refreshes_filtered_tokens(self):
-        repo = Path(__file__).resolve().parents[1]
-        data_root = self.root / "prepared"
-        for name in ["gsm8k/train.jsonl", "gsm8k/dev.jsonl", "gsm8k/test.jsonl"]:
-            path = data_root / name
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text("fixture\n")
-        mock_python = self.root / "skip-downloads"
-        mock_python.write_text("#!/bin/sh\nexit 0\n")
-        mock_python.chmod(0o755)
-        mock_cxxgpt = self.root / "mock-cxxgpt"
-        mock_cxxgpt.write_text(f"""#!{sys.executable}
-import json, os, pathlib, sys
-args = sys.argv[1:]
-with open(os.environ["MOCK_ARGS"], "a") as log:
-    log.write(json.dumps(args) + "\\n")
-out = args[args.index("--out") + 1]
-pathlib.Path(out + ".txt").write_text("questions")
-pathlib.Path(out + ".tok").write_text("tokens")
-""")
-        mock_cxxgpt.chmod(0o755)
-        log = self.root / "commands.jsonl"
-        env = dict(os.environ, DATA=str(data_root), CX=str(mock_cxxgpt), PY=str(mock_python), MOCK_ARGS=str(log))
-
-        def prepare(check=True):
-            return subprocess.run(["bash", "scripts/prepare_data.sh"], cwd=repo, env=env,
-                                  check=check, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-
-        # No tokenizer yet: the script never makes one (prepare_clean.sh does),
-        # so it stops before encoding anything.
-        result = prepare(check=False)
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("prepare_clean.sh", result.stdout)
-        self.assertFalse(log.exists())
-        (data_root / "tok.bpe").write_text("fixture\n")
-        prepare()
-        self.assertTrue((data_root / "gsm8k/dev.txt").exists())
-        self.assertTrue((data_root / "gsm8k/dev.tok").exists())
-        calls = [json.loads(line) for line in log.read_text().splitlines()]
-        self.assertEqual([call[0] for call in calls], ["prep-qa"] * 3)
-        self.assertEqual((data_root / "tok.bpe").read_text(), "fixture\n")
-        prepare()
-        self.assertEqual(calls, [json.loads(line) for line in log.read_text().splitlines()])
-        # A token file older than its source is made again.
-        os.utime(data_root / "gsm8k/train.tok", (1, 1))
-        prepare()
-        calls = [json.loads(line) for line in log.read_text().splitlines()]
-        self.assertEqual(len(calls), 4)
 
 
 if __name__ == "__main__":

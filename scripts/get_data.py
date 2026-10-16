@@ -144,8 +144,8 @@ def check_text(url, n, *needles):
 def replace_if_changed(part, dest):
     """Moves part over dest, unless dest already holds the same bytes.
 
-    An identical rerun then leaves dest and its timestamp alone, so
-    prepare_data.sh does not re-encode token files that are still valid.
+    An identical rerun then leaves dest and its timestamp alone, so files
+    made from it do not look out of date.
     Returns True when dest was already up to date."""
     # filecmp remembers results by size and timestamp; a new .part file can
     # match an earlier one's on a coarse clock, so compare afresh each time.

@@ -139,7 +139,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: shellcheck scripts/*.sh
-      - run: python3 -m py_compile scripts/get_data.py scripts/prep_public.py
+      - run: python3 -m py_compile scripts/get_data.py
       - run: make cxxgpt
       - name: every command answers --help
         run: for c in bpe-train text2tok train sample gen-reasoning prep-qa eval-reasoning bench-infer; do ./cxxgpt $c --help > /dev/null; done

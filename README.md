@@ -81,7 +81,7 @@ Linux CUDA jobs compile the same `gpu.cu`.
 `scripts\build_windows.cmd` does all of this from any terminal: it finds
 Visual Studio and clang-cl, builds the laptop's way (with CUDA when `nvcc`
 is installed) and runs the kernel, engine and GPU tests. The training
-scripts (`night.sh`, `probe.sh`, `prepare_data.sh`, `report.sh`) run in Git
+scripts (`night.sh`, `probe.sh`, `report.sh`) run in Git
 Bash and use `build\`'s programs there ([docs/LAPTOP.md](docs/LAPTOP.md)).
 
 Windows CI builds the same targets another way: it finds Visual Studio with
@@ -342,10 +342,6 @@ The RunPod model's checkpoints, in `runs/runpod-2026-10-16/`:
 `fresh-eu.ckpt` (step 46,946, with the optimizer, for continuing it; 17/500
 dev, 51/1319 = 3.9% test, greedy) and `best-math-inference.ckpt` (the best
 on dev, from about step 45,000, weights only: 20/500 dev, 47/1319 test).
-
-`scripts/prepare_clean.sh` still builds the laptop's first mix
-(`data/clean-20261015/`, from the Common Pile downloads, with
-`data/tok.bpe`), which the RunPod model cannot read: other token ids.
 
 **Data provenance (2026-10-16).** What the models learn from, and why: a
 model meant to be published should depend only on openly licensed text,

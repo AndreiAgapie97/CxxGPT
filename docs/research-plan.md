@@ -65,14 +65,11 @@ benchmaxxing by selection, with nothing dishonest intended.
   test file is unchanged. (The first version of PR 5 picked the 500 with
   `random.sample` and seed `20261014`; that split was never used, and this
   one replaces it.)
-- `scripts/prepare_data.sh` also writes `gsm8k/dev.txt` and `dev.tok`.
-  `DEV=1 scripts/night.sh` uses those files for both `--val` and
-  `--reason-test`. The default remains `DEV=0`, using the test files. Use
-  `DEV=1` when choosing settings.
-- Rerun `scripts/prepare_data.sh` after a change to the split. It rebuilds
-  question/token pairs when their JSONL source is newer, so an old
-  `train.tok` cannot silently retain the removed problems. No prepared data
-  files are stored in the repository.
+- The RunPod data holds the same 500 out (`data/licensed-10b/gsm8k-dev.txt`
+  and `.tok`, with its tokenizer). `DEV=1 scripts/night.sh` uses those
+  files for both `--val` and `--reason-test`. The default remains `DEV=0`,
+  using the test files. Use `DEV=1` when choosing settings. No prepared
+  data files are stored in the repository.
 - To audit literal overlap, run
   `./cxxgpt leak-check --questions data/gsm8k/dev.txt --train A.txt,B.txt`.
   The question file may
