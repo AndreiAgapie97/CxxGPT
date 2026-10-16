@@ -77,6 +77,64 @@ The commands below are for Git Bash, in the CxxGPT folder; on Windows,
   and power drop, a thermal reason) or sat idle waiting (load drops, clock
   stays up: another program busy on the CPU, such as a build, or Windows).
 
+## Changing a run while it trains
+
+A run never has to start again from random weights to change course.
+
+**Without stopping it: the control file.** Next to the checkpoint,
+`runs/$RUN.ckpt.control` (another name with `--control FILE`). The trainer
+looks at it before every step and acts as soon as it changes. From a
+second Git Bash window:
+```sh
+echo "lr-scale 0.5" > runs/clean1.ckpt.control
+```
+One command a line:
+- `lr-scale X`: the learning rate is the schedule's times X from the next
+  step. It holds while the line is in the file, after a restart too.
+  Remove the line, or write `lr-scale 1`, to go back.
+- `save`: a checkpoint now.
+- `eval`: the validation loss now.
+- `reason`: the reasoning exam now (when the run has `--reason-test`).
+- `stop`: save and stop, as Ctrl-C does.
+
+`save`, `eval`, `reason` and `stop` run once each time the file changes.
+A file already there when training starts only keeps its `lr-scale`; a
+`stop` left over from an earlier run does not stop the new one. Write the
+whole file each time (`>`, not `>>`): a line left out is gone, and an
+`lr-scale` left out goes back to 1. The trainer prints a `control:` line
+for each command, and the log gets a `# control step N: ...` row.
+
+**With a short stop: change the command and resume.** Ctrl-C (or `stop`)
+saves everything: the weights, the optimizer's state, the step and the
+data order. The same command with `--resume` and other options continues
+from there: another data mix (`--data`), a new learning rate (`--lr`,
+`--steps`, `--min-lr-frac`), unlikelihood, the sampler, the exams. Only
+the model's shape is fixed by the checkpoint. This is how the RunPod run
+moved to its math mix at step 32,414.
+
+**A schedule for runs without a planned end: `--schedule wsd`.** The
+default schedule (cosine) brings the learning rate down slowly towards
+`--steps`, so the end has to be planned from the start: resuming with
+another `--steps` makes the rate jump. With `--schedule wsd`, the rate
+stays flat after the warmup and comes down only over the last
+`--decay-steps` (by default a fifth of `--steps`). Before that, the rate
+does not depend on `--steps`, so the run can be made longer at any
+resume. To get a model to score, cool down a copy of its checkpoint:
+```sh
+cp runs/clean1.ckpt runs/clean1-cool.ckpt
+build/cxxgpt-gpu.exe train --gpu ... --resume --out runs/clean1-cool.ckpt \
+    --schedule wsd --steps $((STEP + 2000)) --decay-steps 2000
+```
+where `STEP` is the step `clean1.ckpt` holds and `...` stands for the
+run's own options, with logs of the copy's own (`--log`, `--load-log`,
+`--reason-report`). The copy starts its cooldown from the run's exact
+state; `clean1.ckpt` is not touched, so the run itself resumes afterwards
+at the full rate. The laptop's GPU trains one model at a time: run the
+cooldown while the main run is stopped (or on another GPU). With 20% of
+the steps as cooldown, WSD matched cosine in a published comparison
+(Hagele et al., 2024). The cooldown makes most of its drop early: after a
+quarter of its steps, half the drop is done.
+
 ## The plan
 
 ### First evening (about two hours, mostly downloads)

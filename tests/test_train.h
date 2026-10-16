@@ -2,6 +2,7 @@
 #pragma once
 
 #include "../src/train.h"
+#include "../src/train_control.h"
 #include "test_util.h"
 #include "test_accumulation.h"
 
@@ -152,7 +153,78 @@ inline void test_ternary_learning_and_resume() {
     std::printf("  ternary MoE learned: %.3f -> %.3f; checkpoint continuation identical\n", initial, final);
 }
 
+// Warmup-stable-decay: before the cooldown the rate does not depend on the
+// run's length (what lets a run go on, or a cooldown branch off it), and the
+// cooldown runs from max_lr down to min_frac * max_lr without going back up.
+inline void test_wsd_schedule() {
+    const double lr = 1e-3, min_frac = 0.1;
+    EXPECT(lr_wsd(0, 10, 1000, 200, lr, min_frac) == lr_at(0, 10, 1000, lr, min_frac) &&
+               lr_wsd(9, 10, 1000, 200, lr, min_frac) == lr,
+           "WSD warmup differs from the cosine schedule's");
+    for (int64_t step : {10, 400, 799})
+        for (int64_t total : {1000, 5000, 1000000})
+            EXPECT(lr_wsd(step, 10, total, 200, lr, min_frac) == lr, "step %ld of %ld: rate %g before the cooldown",
+                   long(step), long(total), lr_wsd(step, 10, total, 200, lr, min_frac));
+    EXPECT(lr_wsd(800, 10, 1000, 200, lr, min_frac) == lr, "the cooldown does not start at max_lr");
+    double prev = lr;
+    for (int64_t step = 801; step < 1000; ++step) {
+        const double x = lr_wsd(step, 10, 1000, 200, lr, min_frac);
+        EXPECT(x < prev && x > lr * min_frac, "cooldown step %ld: %g after %g", long(step), x, prev);
+        prev = x;
+    }
+    // Half the cooldown done: 1 - sqrt(1/2) of the way down.
+    const double half = lr * (min_frac + (1 - min_frac) * (1 - std::sqrt(0.5)));
+    EXPECT(std::abs(lr_wsd(900, 10, 1000, 200, lr, min_frac) / half - 1) < 1e-15, "cooldown midpoint");
+    EXPECT(lr_wsd(1000, 10, 1000, 200, lr, min_frac) == lr * min_frac &&
+               lr_wsd(5000, 10, 1000, 200, lr, min_frac) == lr * min_frac,
+           "after the last step the rate is not min_frac * max_lr");
+    // A branched cooldown: the checkpoint at step 3000, resumed with --steps
+    // 3500 --decay-steps 500, starts at max_lr and decays from its first step.
+    EXPECT(lr_wsd(3000, 10, 3500, 500, lr, min_frac) == lr && lr_wsd(3001, 10, 3500, 500, lr, min_frac) < lr,
+           "a branched cooldown does not start at the checkpoint's step");
+    // No room after the warmup: the cooldown starts right after it.
+    EXPECT(lr_wsd(10, 10, 20, 50, lr, min_frac) == lr && lr_wsd(11, 10, 20, 50, lr, min_frac) < lr,
+           "a cooldown longer than the run");
+    // Without a cooldown, flat until the last step.
+    EXPECT(lr_wsd(19, 10, 20, 0, lr, min_frac) == lr, "zero decay steps");
+}
+
+inline void test_control_file() {
+    ControlCommands c = parse_control("# a comment\n\n  lr-scale 0.25 \r\nsave\neval\nreason\nstop\n");
+    EXPECT(c.errors.empty() && c.lr_scale == 0.25 && c.save && c.eval && c.reason && c.stop,
+           "control commands not read (%zu errors)", c.errors.size());
+    c = parse_control("lr-scale\nlr-scale 0\nlr-scale -1\nlr-scale 1e999\nlr-scale 0.5x\nsave now\nsavee\nstop 1 2\n");
+    EXPECT(c.errors.size() == 8 && c.lr_scale == 1 && !c.save && !c.stop, "bad control lines accepted (%zu errors)",
+           c.errors.size());
+    // Windows PowerShell 5's `"lr-scale 2" > FILE`: UTF-16 with a byte-order mark.
+    std::string utf16 = "\xFF\xFE";
+    for (char ch : std::string("lr-scale 2\r\nsave\r\n")) utf16 += std::string{ch, '\0'};
+    c = parse_control(utf16);
+    EXPECT(c.errors.empty() && c.lr_scale == 2 && c.save, "UTF-16 control file not read");
+    c = parse_control("\xEF\xBB\xBF" "stop");  // UTF-8 byte-order mark, no final newline
+    EXPECT(c.errors.empty() && c.stop, "UTF-8 control file with a byte-order mark not read");
+
+    const std::string path = test_path("train.control");
+    std::filesystem::remove(path);
+    ControlFile file(path);
+    EXPECT(!file.poll(), "a missing control file reads as a change");
+    auto write = [&](const char* text) { std::ofstream(path, std::ios::binary) << text; };
+    write("lr-scale 0.5\nsave\n");
+    auto got = file.poll();
+    EXPECT(got && got->lr_scale == 0.5 && got->save, "a new control file was not read");
+    EXPECT(!file.poll(), "an unchanged control file reads again");
+    write("lr-scale 0.5\nstop\n");
+    got = file.poll();
+    EXPECT(got && got->lr_scale == 0.5 && got->stop && !got->save, "a changed control file was not read");
+    std::filesystem::remove(path);
+    got = file.poll();
+    EXPECT(got && got->lr_scale == 1 && !got->stop && got->errors.empty(), "a deleted control file is not empty");
+    EXPECT(!file.poll(), "a deleted control file reads twice");
+}
+
 inline void test_train() {
+    test_wsd_schedule();
+    test_control_file();
     test_masked_accumulation();
     test_clipping_reference();
     test_adamw_reference();

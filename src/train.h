@@ -191,6 +191,26 @@ inline double lr_at(int64_t step, int64_t warmup, int64_t total_steps, double ma
     return max_lr * (min_frac + (1 - min_frac) * 0.5 * (1 + std::cos(3.141592653589793 * t)));
 }
 
+// Warmup-stable-decay ("WSD"): linear warmup, then max_lr flat, then a
+// cooldown over the last decay_steps before total_steps, down to
+// min_frac * max_lr (and that value after total_steps). Until the cooldown
+// starts, the rate does not depend on total_steps, so a run can go on as long
+// as wanted, and a cooldown can be branched off any checkpoint by resuming a
+// copy with --steps (its step + D) --decay-steps D. The cooldown is
+// "1 - sqrt": the share of the drop done is the square root of the share of
+// the cooldown done, so most of the drop comes early (Hagele et al. 2024,
+// "Scaling Laws and Compute-Optimal Training Beyond Fixed Training
+// Durations": with 20% of the steps it matched cosine).
+inline double lr_wsd(int64_t step, int64_t warmup, int64_t total_steps, int64_t decay_steps, double max_lr,
+                     double min_frac) {
+    if (step < warmup) return max_lr * double(step + 1) / double(warmup);
+    if (step >= total_steps) return max_lr * min_frac;
+    const int64_t decay_start = std::max(warmup, total_steps - decay_steps);
+    if (step < decay_start) return max_lr;
+    const double t = double(step - decay_start) / double(total_steps - decay_start);
+    return max_lr * (min_frac + (1 - min_frac) * (1 - std::sqrt(t)));
+}
+
 // ---------------------------------------------------------------------------
 // Token data: a stream of uint16 token ids, plus an optional per-token mask
 // (1 = the model is trained to predict this token, 0 = context only).

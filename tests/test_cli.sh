@@ -692,6 +692,73 @@ grep -q 'saved .* at step 0' "$TEST_DIR/bad-timed.log"
 require_absent -q 'diverged\|lower --lr' "$TEST_DIR/bad-timed.log"
 "$CXXGPT_TRAINING_CLI" unchanged-zero-step "$TEST_DIR/unstable.ckpt" "$TEST_DIR/bad-timed.ckpt"
 printf 'CLI: good/bad-attempt time limits preserve progress; divergence protection remains separate\n'
+# The WSD schedule: warmup, flat, then the cooldown over --decay-steps.
+"$CXXGPT" train "${COMMON[@]}" --steps 10 --warmup 2 --schedule wsd --decay-steps 4 --log-every 1 \
+    --eval-every 0 --out "$TEST_DIR/wsd.ckpt" --log "$TEST_DIR/wsd.csv" > "$TEST_DIR/wsd.log"
+grep -q '^schedule: wsd, lr 0.001 from step 2, cooling down to 0.0001 over steps 6-10$' "$TEST_DIR/wsd.log"
+# Row s logs step s-1's rate: flat from row 2 to row 7 (the cooldown's first
+# step is still the full rate), then falling.
+awk -F, 'NR > 1 && !/^#/ { lr[$1] = $4 + 0 }
+    END { for (s = 2; s <= 7; ++s) if (lr[s] != 0.001) exit 1
+          for (s = 8; s <= 10; ++s) if (!(lr[s] < lr[s - 1] && lr[s] > 0.0001)) exit 1 }' "$TEST_DIR/wsd.csv"
+# A cooldown branched off a flat run's checkpoint: a copy resumed with
+# --steps STEP+D --decay-steps D trains exactly as the run above.
+"$CXXGPT" train "${COMMON[@]}" --steps 6 --warmup 2 --schedule wsd --decay-steps 0 --eval-every 0 \
+    --out "$TEST_DIR/wsd-flat.ckpt" > "$TEST_DIR/wsd-flat.log"
+cp "$TEST_DIR/wsd-flat.ckpt" "$TEST_DIR/wsd-cool.ckpt"
+"$CXXGPT" train "${COMMON[@]}" --steps 10 --warmup 2 --schedule wsd --decay-steps 4 --eval-every 0 --resume \
+    --out "$TEST_DIR/wsd-cool.ckpt" > "$TEST_DIR/wsd-cool.log"
+grep -q '^learning rate at step 6: 0.001$' "$TEST_DIR/wsd-cool.log"
+cmp "$TEST_DIR/wsd.ckpt" "$TEST_DIR/wsd-cool.ckpt"
+for bad in "--schedule linear" "--decay-steps 3" "--schedule wsd --decay-steps 9"; do
+    status=0
+    # shellcheck disable=SC2086
+    "$CXXGPT" train "${COMMON[@]}" --steps 10 --warmup 2 $bad --out "$TEST_DIR/bad-schedule.ckpt" \
+        > "$TEST_DIR/bad-schedule.log" 2>&1 || status=$?
+    [[ "$status" == 1 ]]
+    grep -q -- '--schedule\|--decay-steps' "$TEST_DIR/bad-schedule.log"
+    [[ ! -e "$TEST_DIR/bad-schedule.ckpt" ]]
+done
+printf 'CLI: WSD schedule, branched cooldown and schedule options passed\n'
+
+# The control file: a stop already there at the start is old, so ignored;
+# commands written while training act at the next step.
+CONTROL="$TEST_DIR/control.ckpt.control"
+printf 'stop\n' > "$CONTROL"
+"$CXXGPT" train "${COMMON[@]}" --steps 1000000 --log-every 1 --eval-every 0 --save-every 0 \
+    --out "$TEST_DIR/control.ckpt" --log "$TEST_DIR/control.csv" > "$TEST_DIR/control.log" 2>&1 &
+trainer=$!
+wait_for_line() {
+    for ((poll=0; poll<3000; ++poll)); do
+        grep -q -- "$1" "$TEST_DIR/control.log" && return 0
+        kill -0 "$trainer" 2>/dev/null || return 1
+        sleep 0.01
+    done
+    return 1
+}
+if ! wait_for_line '^step  *5 |'; then kill -TERM "$trainer"; wait "$trainer"; exit 1; fi
+grep -q "^control file .* is already there: lr-scale 1 holds" "$TEST_DIR/control.log"
+printf 'lr-scale 0.5\nsave\neval\nreason\n' > "$CONTROL"
+if ! wait_for_line '^control: validation'; then kill -TERM "$trainer"; wait "$trainer"; exit 1; fi
+[[ -f "$TEST_DIR/control.ckpt" ]]
+printf 'lr-scale 0.5\nstop\n' > "$CONTROL"
+wait "$trainer"
+grep -q '^control: lr-scale 0.5 (lr 0.0005 now) at step ' "$TEST_DIR/control.log"
+grep -q '^control: saved .*control.ckpt at step ' "$TEST_DIR/control.log"
+grep -q '^control: stop at step ' "$TEST_DIR/control.log"
+grep -q '^control: reason skipped: no --reason-test at step ' "$TEST_DIR/control.log"
+grep -q 'saved .* (interrupted)' "$TEST_DIR/control.log"
+grep -q '^# control step [0-9]*: lr-scale 0.5' "$TEST_DIR/control.csv"
+grep -q '^# control step [0-9]*: validation ' "$TEST_DIR/control.csv"
+# The rate halves from the lr-scale on: the first row has the full rate, the last half of it.
+awk -F, 'NR > 1 && !/^#/ { if (!first) first = $4 + 0; last = $4 + 0 }
+    END { if (!(first > 0.00099 && last < 0.00051 && last > 0.00049)) exit 1 }' "$TEST_DIR/control.csv"
+# The lr-scale holds after a restart; the stop in the file does not stop it.
+"$CXXGPT" train "${COMMON[@]}" --steps 1 --resume --eval-every 0 --out "$TEST_DIR/control.ckpt" \
+    > "$TEST_DIR/control-resume.log"
+grep -q "^control file .* is already there: lr-scale 0.5 holds" "$TEST_DIR/control-resume.log"
+require_absent -q '^control: stop' "$TEST_DIR/control-resume.log"
+printf 'CLI: control file (old commands ignored, lr-scale, save, eval, stop, restart) passed\n'
 "$CXXGPT" train "${COMMON[@]}" --steps 20 --time-limit 0.000000000001 --eval-every 999 \
     --out "$TEST_DIR/final-val.ckpt" --log "$TEST_DIR/final-val.csv" > "$TEST_DIR/final-val.log"
 grep -q '^step *1 | val .*final validation' "$TEST_DIR/final-val.log"

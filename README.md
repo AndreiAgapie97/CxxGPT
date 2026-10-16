@@ -129,7 +129,11 @@ problems:
 `cxxgpt train --help` also explains each. Useful ones: `--muon` (the Muon
 optimizer), `--gpu` (with `cxxgpt-gpu`), `--time-limit MINUTES` (stop and
 save in time), `--resume`, `--reason-test FILE --reason-every N` (accuracy
-during training).
+during training), `--schedule wsd` (a flat learning rate, then a cooldown
+over the last `--decay-steps`, so a run can be made longer or cooled down
+from any checkpoint) and the control file, `OUT.control`: `lr-scale X`,
+`save`, `eval`, `reason` or `stop` written into it act on the running
+training (docs/LAPTOP.md, "Changing a run while it trains").
 
 Add `--reason-report runs/model.reason` to `train` to save every evaluated
 question and answer, with the existing heuristic failure labels, in

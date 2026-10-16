@@ -212,6 +212,17 @@ Math problem-solving accuracy is the first evaluation focus.
   git-ignored). `docs/LAPTOP.md` is the runbook.
 - `train --init FILE --ternary` turns a full-precision model ternary for
   the rest of its training (same weights, used differently).
+- Steering a run without a cold start (2026-10-16, docs/LAPTOP.md
+  "Changing a run while it trains"): `train --schedule wsd` (default
+  cosine) keeps the learning rate flat after the warmup and cools down
+  over the last `--decay-steps` (1 - sqrt, `lr_wsd` in `src/train.h`), so
+  a run can be made longer at a resume, or a copy of a checkpoint cooled
+  down with `--resume --steps STEP+D --decay-steps D` (trains exactly as
+  an uninterrupted run, `tests/test_cli.sh`). The control file
+  (`src/train_control.h`; `--control`, default `OUT.control`), read before
+  every step when it changed: `lr-scale X` (holds while written, also
+  after a restart), `save`, `eval`, `reason`, `stop` (once a change; never
+  from a file already there at the start).
 - Overnight safety: a step with a non-finite gradient is skipped, ten in a
   row stop the run without overwriting the last checkpoint, and
   checkpoints are written to a temporary file and renamed.

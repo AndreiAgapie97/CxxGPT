@@ -48,6 +48,7 @@
 #include "reason_report.h"
 #include "tokenizer.h"
 #include "train.h"
+#include "train_control.h"
 #include "wordgen.h"
 
 namespace {
@@ -1073,6 +1074,11 @@ int cmd_train(Args& a) {
             "        --nope-every 0 (N: every Nth layer has no position encoding; 1: none has)\n"
             "train:  --batch 16 --accum 1 --steps 2000 --lr 1e-3 --min-lr-frac 0.1\n"
             "        --warmup 100 --wd 0.1 --clip 1.0 --bias-rate 1e-3 --seed 1\n"
+            "        --schedule cosine (cosine: the rate falls from --lr to --lr x --min-lr-frac at --steps;\n"
+            "        wsd: flat at --lr, then a cooldown over the last --decay-steps, default a fifth of\n"
+            "        --steps; before the cooldown the rate does not depend on --steps, so a run can be\n"
+            "        made longer, or a copy of its checkpoint resumed with --steps STEP+D --decay-steps D\n"
+            "        to cool down a model to evaluate while the run goes on)\n"
             "        --muon (Muon instead of AdamW for the matrices in the blocks)\n"
             "        --sampler random (qa: a window starting inside a question-answer document that fits\n"
             "        in one moves back to its start, so the answer is trained with its question)\n"
@@ -1084,6 +1090,10 @@ int cmd_train(Args& a) {
             "        --load-log FILE.csv (per-layer expert shares; layers/experts start at 0)\n"
             "        --eval-every 200 --eval-batches 20 --save-every 500\n"
             "        --time-limit MINUTES --threads N --profile\n"
+            "control: --control FILE (default OUT.control): while training runs, write commands into it,\n"
+            "        one a line: lr-scale X (the schedule's rate times X, while the line is there, also\n"
+            "        after a restart), save, eval, reason, stop (each once a change of the file; never\n"
+            "        from a file already there at the start). stop works like Ctrl-C\n"
             "gpu:    --gpu (train on the GPU; needs cxxgpt-gpu, from make gpu)\n"
             "        --matmul bf16 (inputs stored in bf16, the default; ternary models default to tf32,\n"
             "        which bf16 does not take; tf32: finer, about 1.45x slower; fp32: exact, slowest)\n"
@@ -1130,6 +1140,18 @@ int cmd_train(Args& a) {
     const int Tn = std::min(cfg.seq_len, a.integer_int("seq", cfg.seq_len));
     const int64_t steps = a.integer("steps", 2000), warmup = a.integer("warmup", 100);
     const double lr = a.real("lr", 1e-3), min_frac = a.real("min-lr-frac", 0.1);
+    const std::string schedule = a.str("schedule", "cosine");
+    CHECK(schedule == "cosine" || schedule == "wsd", "--schedule takes cosine or wsd");
+    CHECK(schedule == "wsd" || !a.has("decay-steps"), "--decay-steps needs --schedule wsd");
+    const int64_t room = std::max<int64_t>(0, steps - warmup);  // steps after the warmup
+    const int64_t decay_steps = a.integer("decay-steps", room / 5);
+    CHECK(decay_steps >= 0 && decay_steps <= room, "--decay-steps must be between 0 and --steps - --warmup (%ld)",
+          long(room));
+    const auto lr_schedule = [&](int64_t s) {
+        return schedule == "wsd" ? lr_wsd(s, warmup, steps, decay_steps, lr, min_frac)
+                                 : lr_at(s, warmup, steps, lr, min_frac);
+    };
+    const std::string control_path = a.str("control", out + ".control");
     const double clip = a.real("clip", 1.0), bias_rate = a.real("bias-rate", 1e-3);
     const int64_t seed = a.integer("seed", 1);
     const int log_every = a.integer_int("log-every", 10), eval_every = a.integer_int("eval-every", 200);
@@ -1287,6 +1309,26 @@ int cmd_train(Args& a) {
     FILE* const load_warnings = load_log ? stdout : nullptr;
     std::signal(SIGINT, on_signal);
     std::signal(SIGTERM, on_signal);
+    if (schedule == "wsd")
+        std::printf("schedule: wsd, lr %.3g from step %ld, cooling down to %.3g over steps %ld-%ld\n", lr,
+                    long(warmup), lr * min_frac, long(std::max(warmup, steps - decay_steps)), long(steps));
+    else
+        std::printf("schedule: cosine, lr %.3g after %ld warmup steps, down to %.3g at step %ld\n", lr,
+                    long(warmup), lr * min_frac, long(steps));
+    // A control file already there keeps its lr-scale; its other commands
+    // are from before (a stop left from the last run would stop this one).
+    ControlFile control(control_path);
+    double lr_scale = 1;
+    if (const auto c = control.poll()) {
+        lr_scale = c->lr_scale;
+        std::printf("control file %s is already there: lr-scale %g holds; the other commands in it wait "
+                    "for a change of the file\n", control_path.c_str(), lr_scale);
+        for (const auto& e : c->errors) std::printf("control: %s: %s, ignored\n", control_path.c_str(), e.c_str());
+    } else {
+        std::printf("control file: %s (lr-scale X, save, eval, reason, stop; see train --help)\n",
+                    control_path.c_str());
+    }
+    if (opt.step > 0) std::printf("learning rate at step %ld: %.3g\n", opt.step, lr_scale * lr_schedule(opt.step));
 
     // Optional exact-answer reasoning eval during training, on an even
     // sample of the test set.
@@ -1337,6 +1379,46 @@ int cmd_train(Args& a) {
     long last_validation_step = -1;
     long saved_step = resume ? first_step : -1;  // what --out holds
     for (; step < steps && !g_stop;) {
+        // The control file, when it has changed: acted on before the step.
+        if (const auto c = control.poll()) {
+            auto note = [&](const std::string& what) {
+                std::printf("control: %s at step %ld\n", what.c_str(), step);
+                if (log) std::fprintf(log, "# control step %ld: %s\n", step, what.c_str());
+            };
+            for (const auto& e : c->errors) std::printf("control: %s: %s, ignored\n", control_path.c_str(), e.c_str());
+            if (c->lr_scale != lr_scale) {
+                lr_scale = c->lr_scale;
+                char what[96];
+                std::snprintf(what, sizeof what, "lr-scale %g (lr %.3g now)", lr_scale, lr_scale * lr_schedule(step));
+                note(what);
+            }
+            if (c->save) {
+                be.sync();
+                if (save_checkpoint(out, model, opt, data_rng, true)) saved_step = opt.step;
+                note("saved " + out);
+            }
+            if (c->eval) {
+                if (val_hi >= val_lo + Tn + 1) {
+                    const double vloss = eval_loss(be, *val, val_lo, val_hi, B, Tn, eval_batches);
+                    last_validation_step = step;
+                    char what[64];
+                    std::snprintf(what, sizeof what, "validation %.5f", vloss);
+                    note(what);
+                } else {
+                    note("eval skipped: no validation range a window long");
+                }
+            }
+            if (c->reason) {
+                if (reason_test.empty()) note("reason skipped: no --reason-test");
+                else reason_eval(step);
+            }
+            if (log) std::fflush(log);
+            if (c->stop) {
+                note("stop");
+                g_stop = 1;
+                break;
+            }
+        }
         const double t0 = now_seconds();
         group.sample(data, data_rng, 0, train_end, qa.get());
         if (!group.total_valid) {
@@ -1347,7 +1429,7 @@ int cmd_train(Args& a) {
             }
             continue;  // no Adam moments, decay, balancing, or schedule step
         }
-        const double lr_now = lr_at(step, warmup, steps, lr, min_frac);
+        const double lr_now = lr_scale * lr_schedule(step);
         const Backend::StepResult r = be.train_step(group, lr_now, clip, bias_rate, &load_interval);
         const Backend::UnlikelihoodStats ul_step = be.take_unlikelihood();  // this attempt's only
         const double loss = r.loss, gnorm = r.gnorm;
