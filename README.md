@@ -389,7 +389,8 @@ and masked text (the question, planted mistakes) never counts, so copying
 the question costs nothing. The log keeps the cross-entropy as `loss` and
 adds `ul` (the term without ALPHA, per trained token) and how often it
 fires. It runs on the CPU engine and on the GPU (`train --gpu`), which
-`test_gpu` checks against the CPU engine.
+`test_gpu` checks against the model in double precision on the GPU
+(`src/gpu_ref.cu`).
 
 How often it fires (share of trained tokens with a token to push down,
 windows of 512):

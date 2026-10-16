@@ -76,9 +76,10 @@ Math problem-solving accuracy is the first evaluation focus.
   with `1 - p` summed from the other tokens (exact near p = 1). The log
   keeps the cross-entropy as `loss` and adds the term and how often it
   fires (also as two more CSV columns). On the GPU the negatives are
-  found on the host and the term computed in two kernels (`ul_fwd`,
-  `ul_fix`, `src/gpu.cu`); `test_gpu` checks the loss, term and gradient
-  against the CPU engine, a saturated term, and a term that never fires.
+  found on the device too (`ul_count`, `ul_offsets`, `ul_write`) and the
+  term computed in two kernels (`ul_fwd`, `ul_fix`, `src/gpu.cu`);
+  `test_gpu` checks the negatives, loss, term and gradient against the
+  fp64 GPU reference, a saturated term, and a term that never fires.
 - `src/gpu.cu` (interface `src/gpu.h`): the CUDA training backend, the
   same model op for op, fp32 with cuBLAS. `train --gpu` stores the
   products' inputs in bf16 by default (`--matmul bf16`, fp32 master
@@ -90,17 +91,29 @@ Math problem-solving accuracy is the first evaluation focus.
   attention's tokens/s on the night-1 model, at 8 x 16, which only fits
   with them), in exact fp32 otherwise (`src/attention.cuh`, also tested on
   a CPU emulator, `tests/cuda_emu.h`).
-  `--profile` times each part of a step. `tests/test_gpu.cpp` compares it
-  with the CPU engine. Training's reasoning exams run on the GPU too
-  (`GpuTrainer::decode_begin/decode_step`, a KV cache kept in the gradient
-  buffer between steps; tested against `Model::decode_step`): 16 s instead
-  of 5 minutes for 250 problems on the night-1 model. Build with `make gpu`, giving `cxxgpt-gpu` (`train
-  --gpu`) and `test_gpu`. On the laptop's RTX 4070, everything passes
-  except two checks, neither on what the nights run, both on a gradient
-  (a norm weight's, or since 2026-10-15 `l1.wproj` for the second): the
-  fp32 fused kernels at `heads of 64` (70 tokens, where cuBLAS also
-  misses the bound) and `head of 128` (about 2-3x cuBLAS's error);
-  docs/LAPTOP.md "GPU options". While the host waits for the GPU it
+  `--profile` times each part of a step. Since 2026-10-16 the step's
+  sums (loss, gradient norm, clip, the skip of a non-finite step, router
+  balancing) stay on the GPU, MoE experts run as one grouped product per
+  projection without waiting for the host (`src/grouped_gemm.cuh`, #49;
+  `--moe-cublas` is the old path), tokens for decoding are chosen there
+  (only ids come back), and new models are initialized there
+  (`GpuTrainer::init_params`, other weights than the CPU's `Model::init`
+  for the same seed).
+  `tests/test_gpu.cpp` checks it against `src/gpu_ref.cu`, the model in
+  double precision on the GPU (plain kernels, one output per thread,
+  sharing no code with `gpu.cu`): losses, gradients by finite differences
+  along random directions, optimizer steps, decoding (the reference's
+  whole forward on each prefix) and eval-reasoning results. The
+  reference itself is checked against the CPU engine in double (losses to
+  2e-16, finite differences within 7e-7 of the CPU's gradients). Bounds
+  are 3-5x what the RTX 4070 measured, and everything passes: the two
+  fp32 attention checks that missed their bounds against the CPU's float
+  engine (#27) were that engine's error (7e-7 to 2e-6 against the
+  reference). It takes about 2.5 minutes. Training's reasoning exams run
+  on the GPU too (`GpuTrainer::decode_begin/decode_step`, a KV cache kept
+  in the gradient buffer between steps): 16 s instead of 5 minutes for
+  250 problems on the night-1 model. Build with `make gpu`, giving
+  `cxxgpt-gpu` (`train --gpu`) and `test_gpu`. While the host waits for the GPU it
   sleeps (`cudaDeviceScheduleBlockingSync`): a quarter of a core instead
   of a whole one during training, at the same speed.
 - `docs/research.md`: the research log from the merged `gpt/research`
@@ -249,9 +262,18 @@ Math problem-solving accuracy is the first evaluation focus.
   --cuda-gpu-arch=sm_89 --cuda-device-only`, then `--cuda-host-only`)
   against the toolkit headers from the PyPI `nvidia-*` wheels. Run
   `make gpu-test` on a GPU before trusting a change to `gpu.cu`.
-- Every numeric change is tested against a double-precision reference.
-  Wherever the code claims two paths agree (SIMD and scalar, decode and
-  forward, engine and training model), a test checks it.
+- Every numeric change is tested against a double-precision reference:
+  GPU code against the fp64 model on the GPU (`src/gpu_ref.cu`, in
+  `test_gpu`, which also checks that reference against the CPU engine),
+  CPU code against the CPU engine's double-precision tests. Wherever the
+  code claims two paths agree (SIMD and scalar, decode and forward,
+  engine and training model), a test checks it.
+- The GPU is the default for training and evaluation, and new model
+  features come to the GPU first. The CPU engine stays (owner's decision,
+  2026-10-16: its tests run in CI), and refuses, with a clear message,
+  any option or configuration it does not implement, rather than
+  computing something else (`train` without `--gpu` refuses `--matmul
+  tf32/bf16` and `--fused-attn`/`--no-fused-attn`).
 - Benchmarks:
   - use honest baselines: vectorized fp32 on the same threads, and later
     real runtimes;

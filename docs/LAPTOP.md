@@ -44,9 +44,8 @@ about an hour, once.
    scripts\build_windows.cmd
    ```
    The programs land in `build\` (`cxxgpt.exe`, `cxxgpt-gpu.exe`,
-   `test_gpu.exe`, ...). It should end with `All set`, after the two known
-   `test_gpu` failures (GPU options, below). If anything else fails, keep
-   the output; Claude can work from it.
+   `test_gpu.exe`, ...). It should end with `GPU tests passed` and
+   `All set`. If anything fails, keep the output; Claude can work from it.
 6. For the downloads (`prepare_data.sh`), a Python environment with
    pyarrow, in Git Bash: `python -m venv .venv && .venv/Scripts/pip install pyarrow`.
 7. Install Claude Code and start it in the project
@@ -288,7 +287,7 @@ day.
 ### GPU options
 
 Two GPU speed options; `test_gpu`, which `build_windows.cmd` runs, checks
-both against the CPU engine:
+both against the model in double precision on the GPU (`src/gpu_ref.cu`):
 - fused attention, on by default since 2026-10-14 (`--no-fused-attn`
   turns it off; `--fused-attn` insists on it). Its kernels never store the
   attention weights, which saves about 1.2 GB of GPU memory at the night-1
@@ -310,9 +309,11 @@ both against the CPU engine:
   Not for ternary models yet, so `probe.sh` measures the ternary row in
   TF32 and the others in bf16 (`GPU="--gpu --matmul tf32"` for TF32).
 
-Two `test_gpu` checks have failed since the first run on the laptop's
-RTX 4070 (2026-10-14), under WSL and natively alike, so `test_gpu` ends
-without `all passed` until they are fixed:
+Until 2026-10-16, `test_gpu` compared the GPU with the CPU engine in float,
+and two checks failed from the first run on the laptop's RTX 4070
+(2026-10-14), under WSL and natively alike. Against the fp64 reference both
+pass, at 1.6e-6 and 7.4e-7 against a bound of 1e-5 (#27): the errors below
+were the CPU float engine's, not the fused kernels'. The old record:
 - `heads of 64` (70 tokens, fused fp32): 4.1e-4 against 1e-4. The cuBLAS
   attention misses that bound too there (1.8e-4); at 24, 128, 256 and 512
   tokens both are within it and equal (6.0e-5 fused, 6.9e-5 cuBLAS at
