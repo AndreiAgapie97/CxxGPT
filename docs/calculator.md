@@ -100,20 +100,16 @@ beyond each space, as in `16 x 7`. Any other `x` is a letter: `3x + 2 = `
 and `2x - 4 = ` are algebra, counted as malformed like `a + 3 = `, and
 `3x = ` is no call. Uppercase `X` and LaTeX `\\times` are not recognized.
 
-This choice follows the public upstream examples below, read as documentation
-and prompt source; no dataset was downloaded for this change:
+This choice follows GSM8K's own documentation and the forms worked
+solutions commonly write:
 
 - [GSM8K README](https://github.com/openai/grade-school-math/blob/master/README.md)
   uses `$50 x 3 = $<<50*3=150>>150`: `x` in prose and `*` in notes.
-- [MetaMath GSM8K answer-generation prompt](https://github.com/meta-math/MetaMath/blob/main/code_for_generating_data/configs/ansaug_cot_gsm8k.txt)
-  includes `3 hours x 2 chapters = 6 hours` and `25*2= 50`. Units inside an
+- Written solutions also use `5 * 4 = 20` and `5 x 3 = 15`, and sometimes
+  `3 hours x 2 chapters = 6 hours` or `25*2= 50`. Units inside an
   expression and delimiters without the surrounding spaces remain outside
-  this first plain-mode grammar.
-- [NeMo-Skills GSM8K solution examples](https://github.com/NVIDIA/NeMo-Skills/blob/main/nemo_skills/prompt/few_shot_examples/gsm8k.py),
-  from the OpenMathInstruct-2 project's repository, include `5 * 4 = 20`
-  and `5 x 3 = 15`. This is evidence from public solution prompts, not a
-  frequency survey of the OpenMath2 dataset. `×` is additionally accepted
-  as an unambiguous typographic alias; no dataset-frequency claim is made.
+  this first plain-mode grammar. `×` is additionally accepted as an
+  unambiguous typographic alias; no dataset-frequency claim is made.
 
 These deliberately narrow rules will miss equations containing currency
 symbols on both operands, worded units or mathematical markup. They avoid

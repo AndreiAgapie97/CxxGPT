@@ -22,11 +22,9 @@
 #         TERNARY=all turns attention ternary too. Full-precision nights
 #         first, ternary ones at the end.
 #   MIX: the training files, comma-separated, "*N" repeats one N times;
-#        by default the audited mix scripts/prepare_clean.sh writes into
+#        by default the training mix scripts/prepare_clean.sh writes into
 #        $CLEAN (data/clean-20261015): textbooks x2, wiki, DOAB and arXiv
-#        books and papers, word problems, GSM8K train x8. The mix of nights
-#        1 and 2 (web text, stories, OpenMath, MetaMath; issue #46) is in
-#        data/old/ and runs only when named in MIX.
+#        books and papers, word problems, GSM8K train x8.
 #   DEV=1: use the held-out GSM8K dev files for both validation and exams.
 # Validation defaults to the GSM8K test set, which training never sees: the loss
 # on its worked solutions every 500 steps, and exact answers every 500 too

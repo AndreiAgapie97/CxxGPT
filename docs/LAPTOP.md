@@ -46,8 +46,8 @@ about an hour, once.
    The programs land in `build\` (`cxxgpt.exe`, `cxxgpt-gpu.exe`,
    `test_gpu.exe`, ...). It should end with `GPU tests passed` and
    `All set`. If anything fails, keep the output; Claude can work from it.
-6. For the downloads (`prepare_data.sh`), a Python environment with
-   pyarrow, in Git Bash: `python -m venv .venv && .venv/Scripts/pip install pyarrow`.
+6. For the data scripts, Python 3 (python.org's installer, `python` in
+   Git Bash). They need only its standard library.
 7. Install Claude Code and start it in the project
    (code.claude.com has the Windows installer), `claude` in the CxxGPT
    folder. To follow and steer that session from the Claude app (phone or
@@ -159,59 +159,31 @@ quarter of its steps, half the drop is done.
    The first nights train in full precision (the sizes without
    `-ternary`); the `d768-moe-ternary` row is the speed of the last
    nights, once the model is switched to ternary (below).
-3. **Data:** downloads the public datasets (GSM8K, TinyStories,
-   FineWeb-Edu, OpenMathInstruct-2, MetaMathQA), trains our tokenizer on a
-   sample of them, and writes the token files. Safe to rerun if
-   interrupted:
+3. **Data:** the training mix, its tokenizer when there is none yet, and
+   GSM8K (README, "The training data"; it needs the Common Pile downloads
+   in `data/public-20261015/` and the GSM8K split in
+   `data/math-pilot-20261015/`). Safe to rerun if interrupted:
    ```sh
-   scripts/prepare_data.sh
+   scripts/prepare_clean.sh
    ```
-   About 5.5 GB of downloads (each extra FineWeb-Edu file, `FINEWEB_FILES=2`
-   and up, adds 2.2 GB); everything fits well under 50 GB. CI checks on
-   every push that these files are still where the script expects them
-   (`get_data.py --check`).
+   It runs `scripts/prepare_data.sh` for GSM8K (4 MB from GitHub). CI
+   checks on every push that GSM8K's files are still where the script
+   expects them (`get_data.py --check`).
 
 ### The dev set (`DEV=1`)
 
 We choose settings on a dev set, never on the GSM8K test set (which gives
 the headline numbers only). `get_data.py` holds 500 GSM8K train problems
 out as `data/gsm8k/dev.jsonl` (the 500 whose question text has the smallest
-sha256 digest, so every preparation picks the same ones), and drops them,
-and the MetaMath and OpenMath2 rows made from them, from the training files.
+sha256 digest, so every preparation picks the same ones), and drops them
+from the training files.
 
-- **Rerun `scripts/prepare_data.sh` once before the first `DEV=1` night.**
-  Data prepared before this change has no `gsm8k/dev.txt` or `dev.tok`, and
-  its MetaMath and OpenMath2 files still contain the dev problems. The rerun
-  downloads only GSM8K train again (4 MB, now kept unchanged as
-  `gsm8k/raw/train.jsonl`), rewrites the filtered files from the downloads
-  it already has, and re-encodes only the token files whose source changed.
-  A second rerun leaves everything as it is.
-- While it runs, `get_data.py` prints how many rows each filter removed:
-  `MetaMathQA dev filter: removed N rows` and `OpenMath2 dev filter:
-  removed N rows`. Expected sizes: 500 is 6.7% of GSM8K train's 7473
-  problems, so about 6.7% of each set's GSM8K-derived rows. MetaMathQA has
-  about 240,000 of those (its other 155,000 come from MATH), so expect
-  roughly 16,000; for OpenMath2, about 6.7% of the `train_1M` rows whose
-  `problem_source` is `gsm8k`. A count near zero means the filter did not
-  match anything: stop and tell me. (TODO: replace these estimates with the
-  counts measured on the laptop's data.)
-- Then check once, by exact text, that no dev question is left in the
-  training files (a few minutes; it streams the files):
-  ```sh
-  ./cxxgpt leak-check --questions data/gsm8k/dev.txt \
-    --train data/gsm8k/train.txt,data/old/metamath/train.txt,data/old/openmath2/train.txt
-  ```
-  For each file it prints how many of the 500 dev questions share a run of
-  13 words with it, and up to three of them. Expect 0 or close to 0 for
-  `gsm8k/train.txt`. MetaMath and OpenMath2 can keep a few: their
-  rephrased or augmented problems are new texts that no filter can trace
-  back. (TODO: record the measured numbers here.)
+- `prepare_clean.sh` checks by exact text that no dev question is left in
+  the training files: for each file, how many of the 500 dev questions
+  share a run of 13 words with it (`cxxgpt leak-check`). All zero.
 - `DEV=1 ... scripts/night.sh` then validates and takes its exams on
   `data/gsm8k/dev.tok` and `dev.txt` instead of the test files. The default
-  stays `DEV=0` (the test set), so the night-1 command is unchanged.
-- Night 1 trained on all of GSM8K train, dev problems included, so the dev
-  set is only clean for a model trained from scratch, not for one that
-  starts from night 1's weights (`INIT=runs/night1.ckpt`).
+  stays `DEV=0` (the test set).
 
 ### Night 1
 
@@ -296,13 +268,12 @@ can differ by a problem or two. Another program on the GPU (a training
 run, a second eval) slows it down several times: a greedy run alongside a
 training run took 447 s.
 
-### Night 3 on: a new model on the audited data
+### A model on the training data
 
-The data audit of 2026-10-15 (issue #46) found too many wrong solutions in
-OpenMath2, so night 3 starts a new model from random weights on the
-audited data (README, "The audited data"). Build it once (about 10
-minutes; it needs the Common Pile downloads in `data/public-20261015/` and
-the GSM8K split in `data/math-pilot-20261015/`):
+A model starts from random weights on the training data (README, "The
+training data"). Build it once (about 10 minutes; it needs the Common Pile
+downloads in `data/public-20261015/` and the GSM8K split in
+`data/math-pilot-20261015/`):
 ```sh
 scripts/prepare_clean.sh
 ```
@@ -319,17 +290,14 @@ RUN=clean1 DEV=1 HOURS=30 TOKS=25900 scripts/night.sh --sampler qa --time-limit 
 Its exams mid-run come before the learning rate has come down, so they
 read lower than a one-night run's last exam would at the same step.
 
-The section below is the plan from before the audit.
-
 ### Following nights
 
-Worked math solutions take a larger share (OpenMathInstruct-2, MetaMathQA,
-GSM8K train), with the checkpoint from night 1 as the starting point. What
-exactly depends on what night 1 shows; we decide it together each morning.
-Starting from night 1 looks like this (the model comes from the
-checkpoint; the learning-rate schedule starts over):
+What each night trains on depends on what the last one shows; we decide
+it together each morning. Starting from an earlier run's checkpoint looks
+like this (the model comes from the checkpoint; the learning-rate schedule
+starts over):
 ```sh
-RUN=night2 INIT=runs/night1.ckpt MIX="..." TOKS=... BATCH=... ACCUM=... scripts/night.sh
+RUN=clean2 INIT=runs/clean1.ckpt MIX="..." TOKS=... BATCH=... ACCUM=... scripts/night.sh
 ```
 The model trains in full precision first, and the last night or two
 switch it to ternary, which is what our kernels run: `TERNARY=1` with

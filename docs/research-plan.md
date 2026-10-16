@@ -67,27 +67,10 @@ benchmaxxing by selection, with nothing dishonest intended.
   one replaces it.)
 - `scripts/prepare_data.sh` also writes `gsm8k/dev.txt` and `dev.tok`.
   `DEV=1 scripts/night.sh` uses those files for both `--val` and
-  `--reason-test`. The default remains `DEV=0`, using the test files so the
-  original night-1 command is unchanged. Use `DEV=1` when choosing settings.
-- MetaMath and OpenMath2 are built from GSM8K train problems, so taking the
-  500 out of `gsm8k/train` alone is not enough:
-  - MetaMathQA rows carry `original_question`; drop the rows whose original is
-    a dev problem.
-  - OpenMath2 rows with `problem_source` `gsm8k` repeat the problem text; drop
-    exact matches. Rows from `augmented_gsm8k` are new problems with no link
-    back to their source, so a small leak remains. Write it down.
-- The downloader now applies both filters after normalizing whitespace and
-  prints the number of excluded rows separately for MetaMathQA and OpenMath2.
-  MetaMath rows without `original_question` stop preparation rather than
-  silently bypassing the filter. Preparing either dataset by itself first
-  creates/loads the same GSM8K dev split.
-- The remaining `augmented_gsm8k` leak is **not removed**: those rows have no
-  original-question link, and exact text matching cannot identify reworded
-  versions of a dev problem. The dev set is therefore not guaranteed free of
-  semantic overlap. The filter deliberately does not discard all augmented
-  problems or try to infer their origins.
-- Rerun `scripts/prepare_data.sh` to replace old, unfiltered math data. It
-  rebuilds question/token pairs when their JSONL source is newer, so an old
+  `--reason-test`. The default remains `DEV=0`, using the test files. Use
+  `DEV=1` when choosing settings.
+- Rerun `scripts/prepare_data.sh` after a change to the split. It rebuilds
+  question/token pairs when their JSONL source is newer, so an old
   `train.tok` cannot silently retain the removed problems. No prepared data
   files are stored in the repository.
 - To audit literal overlap, run
@@ -164,21 +147,17 @@ balancing fix along: more experts means more of them to keep alive.
 
 ## Data: teaching it better without code
 
-**What night 1 learns from.** These are rough shares by token-file size, from
-night 1's default `MIX` in `night.sh`:
+**What the models learn from.** Rough shares of the training mix (README,
+"The training data"), by tokens:
 
 | Source | Share | What it is |
 |---|---|---|
-| FineWeb-Edu | ~37% | educational web pages |
-| OpenMath2 | ~32% | math problems with worked solutions |
-| TinyStories | ~24% | simple children's stories |
-| MetaMath | ~6.5% | rephrased GSM8K and MATH problems |
-| GSM8K train, ×4 | ~0.3% | the 7,473 real problems |
-
-- About a quarter of training goes to children's stories. They help grammar
-  early on, but they do not teach reasoning.
-- A night trains on about 19% of the 1.96 B tokens, so even at ×4 a night
-  shows each GSM8K problem less than once on average.
+| DOAB books | ~39% | open academic books |
+| arXiv | ~17% | openly licensed papers |
+| textbooks, ×2 | ~21% | open textbooks |
+| Wikimedia | ~15% | Wikipedia, Wikibooks, Wikisource, Wikinews articles |
+| word problems | ~8% | 1M exact `gen-word` problems |
+| GSM8K train, ×8 | ~0.4% | the 6,966 real problems left after the dev set |
 
 **1. A math cool-down at the end.**
 - What a model sees in the last stretch of training, while the learning rate
@@ -186,8 +165,10 @@ night 1's default `MIX` in `night.sh`:
   their last phase on their best, most task-relevant data, and report clear
   gains on math tests from it.
 - For us: a night that continues from the previous one (`INIT=`) with a
-  math-heavy `MIX`: mostly OpenMath2, MetaMath and GSM8K, little web text, no
-  TinyStories. No code: `night.sh` takes `MIX` from the environment.
+  math-heavy `MIX`: mostly word problems and GSM8K, less general text. No
+  code: `night.sh` takes `MIX` from the environment. With `--schedule wsd`
+  the cool-down is a branch off any checkpoint (docs/LAPTOP.md, "Changing a
+  run while it trains").
 - With `--init`, the schedule starts over (warmup, then decay from `LR`). A
   cool-down probably wants a lower peak `LR` than a fresh night. Pick it in
   the test below.
@@ -196,21 +177,19 @@ night 1's default `MIX` in `night.sh`:
   one did what.
 
 **2. A better everyday mix.**
-- Replace most of TinyStories with more math and more educational web text.
-- Raise GSM8K's repeat factor. Up to about 4 passes over the same data cost
-  little compared with fresh data (Muennighoff et al., 2023), and today's ×4
-  gives less than one pass per night.
+- Raise GSM8K's repeat factor (×8 now). Up to about 4 passes over the same
+  data cost little compared with fresh data (Muennighoff et al., 2023).
 
 **3. Answers with their questions (issue #15).**
 - Random training windows often start inside a math problem, so the answer
   is trained without the question that says what to compute. `cxxgpt
-  qa-context` measured it: about 44% of the nights' trained math tokens see
-  none of their question (OpenMath2 48%, MetaMath 23%, GSM8K 11%). That may
-  be why the model often does correct arithmetic on the wrong quantity.
+  qa-context` measured it: 11% of GSM8K's trained answer tokens see none of
+  their question. That may be why the model often does correct arithmetic
+  on the wrong quantity.
 - `train --sampler qa` starts such windows at the problem's beginning when
-  the problem fits in a window: whole question in view for GSM8K 74% -> 100%,
-  MetaMath 63% -> 92%, OpenMath2 40% -> 54% (its long problems keep random
-  starts). Each math window then trains 3-7% fewer answer tokens.
+  the problem fits in a window: whole question in view for GSM8K 74% -> 100%
+  (longer problems keep random starts). Each math window then trains fewer
+  answer tokens.
 - The A/B, before any night uses it:
   1. From scratch, a small model (the smallest `probe.sh` size) on a math
      mix with the dev set held out (`leak-check` first: data prepared before
@@ -231,9 +210,9 @@ night 1's default `MIX` in `night.sh`:
      qa` against one without, 1-2 hours each first. Those weights have
      seen the dev questions, so judge on the GSM8K test, sparingly, per the
      measurement rules.
-- Not covered: OpenMath2's long problems (38% of its answer tokens still
-  see none of their question). They need longer windows (`--seq 1024`, with
-  the position encoding stretched) or shorter solutions; a later step.
+- Not covered: problems longer than a window. They need longer windows
+  (`--seq 1024`, with the position encoding stretched) or shorter
+  solutions; a later step.
 
 **How to test 1 and 2.**
 - Two continuations from the same checkpoint, same length and `LR`: one with
@@ -322,9 +301,10 @@ Without them, comparisons between nights are not trustworthy.
 **Open questions, to decide by experiment.**
 - Should training predict the result tokens inside `<<...>>`, or mask them out
   of the loss? Masking frees capacity; predicting keeps some arithmetic skill.
-- Only GSM8K train has the notes; MetaMath and OpenMath2 don't. We could add
-  notes automatically wherever a solution writes `a op b = c` and the
-  arithmetic checks out. That gives more examples, all verified.
+- GSM8K train has the notes, and `gen-word` writes them when asked
+  (`--notes`). We could add notes automatically wherever a solution writes
+  `a op b = c` and the arithmetic checks out. That gives more examples, all
+  verified.
 - The curriculum generator could emit notes too, for fast experiments.
 
 **Keeping it from becoming a benchmark trick.**

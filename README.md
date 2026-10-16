@@ -286,43 +286,31 @@ this command does not change the night data mix.
 ### Real data and GPU training
 
 ```sh
-scripts/prepare_clean.sh             # the audited mix (below), night.sh's default
-scripts/prepare_data.sh              # the mix of nights 1-2: download, tokenizer, token files
+scripts/prepare_clean.sh             # the training mix (below), night.sh's default
+scripts/prepare_data.sh              # GSM8K: download, the dev split, token files
 scripts/probe.sh                     # GPU speed and memory per model size, and the
                                      #   night.sh command for each
 TOKS=... MODEL=... scripts/night.sh  # one night of training, checked on GSM8K
-scripts/report.sh night1             # the night on one screen
-scripts/ledger.sh night1 "note"      # its row in docs/runs.md, the ledger of runs
+scripts/report.sh clean1             # the night on one screen
+scripts/ledger.sh clean1 "note"      # its row in docs/runs.md, the ledger of runs
 ```
 
-`prepare_data.sh` fetches GSM8K, TinyStories, FineWeb-Edu,
-OpenMathInstruct-2 and MetaMathQA (`scripts/get_data.py`, which needs only
-`pyarrow`), trains a 16k-token BPE on a sample, and encodes everything.
-[docs/LAPTOP.md](docs/LAPTOP.md) has the whole setup, from a fresh Windows
-laptop to a night of training.
+`prepare_data.sh` fetches GSM8K (`scripts/get_data.py`, standard library
+only) and encodes it with our tokenizer, `data/tok.bpe`; `prepare_clean.sh`
+runs it when GSM8K is missing. [docs/LAPTOP.md](docs/LAPTOP.md) has the
+whole setup, from a fresh Windows laptop to a night of training.
 
 Settings are chosen on a dev set, not on the GSM8K test set: `get_data.py`
 holds out 500 GSM8K train problems (`data/gsm8k/dev.jsonl`, the 500 with the
-smallest sha256 of their question) and removes them, and the MetaMath and
-OpenMath2 rows made from them, from training; it prints how many rows each
-filter removed. `DEV=1 scripts/night.sh` validates on them. Data prepared
-before the dev set existed needs one more `scripts/prepare_data.sh`, then
-one exact-text check that no dev question is left in training:
-```sh
-./cxxgpt leak-check --questions data/gsm8k/dev.txt \
-  --train data/gsm8k/train.txt,data/old/metamath/train.txt,data/old/openmath2/train.txt
-```
-[docs/LAPTOP.md](docs/LAPTOP.md) ("The dev set") gives the counts to
-expect.
+smallest sha256 of their question) and removes them from training.
+`DEV=1 scripts/night.sh` validates on them.
 
-**The audited data (since 2026-10-15, issue #46).** A random sample of
-OpenMath2 found clear mistakes in 26 of its 40 `augmented_math` solutions,
-and night 2's answers carry the same habits (36% write `\boxed{}`; issue
-#16). From night 3 on, a new model trains from random weights on openly
-licensed text and exact math, and MetaMath, OpenMath2, FineWeb-Edu and
-TinyStories are left out. `scripts/prepare_clean.sh` builds it, from the
-Common Pile downloads in `data/public-20261015/` (never changed) with
-`scripts/prep_public.py`:
+**The training data (since 2026-10-15, issue #46).** A model trains from
+random weights on openly licensed text and exact math.
+`scripts/prepare_clean.sh` builds the mix, from the Common Pile downloads
+in `data/public-20261015/` (never changed) with `scripts/prep_public.py`;
+when there is no `data/tok.bpe` yet, it learns the tokenizer from the mix's
+training text first:
 
 | File | What | Tokens | In the mix |
 |---|---|---|---|
@@ -343,10 +331,7 @@ academic books and papers are a little over half of the mix instead of
 nearly three quarters. No GSM8K test, GSM8K
 dev or SVAMP dev question shares a 13-word run with any of it. The 500
 held-out GSM8K problems are the dev set (`DEV=1`): the new model has never
-seen them. `night.sh` trains on this mix unless `MIX=` names others. The
-old sets are kept in `data/old/` (moved there, not deleted): for comparing
-old and new data, and for questions about nights 1 and 2. `prepare_data.sh`
-writes them to `data/` again if run.
+seen them. `night.sh` trains on this mix unless `MIX=` names others.
 
 **Data provenance (2026-10-16).** What the models learn from, and why: a
 model meant to be published should depend only on openly licensed text,
@@ -368,7 +353,7 @@ Which checkpoints are clean to publish:
   tokenizer learned from the licensed corpus.
 - **`clean1` and runs started from it:** the weights trained only on the
   data above, from random weights. Its tokenizer, `data/tok.bpe`, was
-  learned before this mix existed (`prepare_data.sh`). A model for
+  learned before this mix existed. A model for
   publishing should use a tokenizer learned from this mix, as the RunPod
   model does (a new tokenizer changes the token ids, so it means training
   again).
@@ -392,7 +377,7 @@ settings.
 **Answers with their questions.** Training windows start at random
 offsets, so a window often begins in the middle of a math problem: the
 answer is trained while its question is out of view. `./cxxgpt qa-context
---data data/gsm8k/train.tok,data/old/metamath/train.tok,data/old/openmath2/train.tok`
+--data data/clean-20261015/gsm8k-train.tok,data/clean-20261015/word-train.tok`
 counts it exactly. `train --sampler qa` (`scripts/night.sh --sampler qa`)
 moves such a window back to the start of its problem, when the whole
 problem fits in a window. At `--seq 512`, the share of answer tokens that
@@ -401,14 +386,11 @@ see their whole question:
 | Source | `--sampler random` (default) | `--sampler qa` |
 |---|---|---|
 | GSM8K | 74% | 100% |
-| MetaMath | 63% | 92% |
-| OpenMath2 | 40% | 54% |
 
-OpenMath2 stays low because 37% of its problems are longer than a window;
-those keep random starts, or the end of their answers would never be
-trained. Windows that start with a question train 3-7% fewer answer tokens
-each (GSM8K: 277 instead of 297 per window). Web text and stories are not
-affected, and validation keeps random windows. Whether it helps accuracy
+Problems longer than a window keep random starts, or the end of their
+answers would never be trained. Windows that start with a question train
+fewer answer tokens each (GSM8K: 277 instead of 297 per window). Plain text
+is not affected, and validation keeps random windows. Whether it helps accuracy
 is not measured yet (docs/research-plan.md, "Answers with their
 questions").
 
@@ -429,13 +411,13 @@ fires. It runs on the CPU engine and on the GPU (`train --gpu`), which
 How often it fires (share of trained tokens with a token to push down,
 windows of 512):
 
-| N | GSM8K | MetaMath | OpenMath2 | TinyStories | FineWeb-Edu |
-|---|---|---|---|---|---|
-| 6 | 2.2% | 4.0% | 5.6% | 0.44% | 0.84% |
-| 8 | 0.60% | 1.7% | 2.8% | 0.08% | 0.27% |
-| 12 | 0.08% | 0.49% | 0.98% | 0.01% | 0.07% |
+| N | GSM8K |
+|---|---|
+| 6 | 2.2% |
+| 8 | 0.60% |
+| 12 | 0.08% |
 
-A first CPU run (4 layers of 128, MetaMath, 1,500 steps, N = 6, same seed
+A first CPU run (4 layers of 128, worked math problems, 1,500 steps, N = 6, same seed
 and data): with the term at a negligible weight (ALPHA = 1e-9, so it is
 still measured), the probability the model gives to repeating grows as it
 learns (`ul` 0.0044 at step 250, 0.0074 at 1,500). With ALPHA = 1

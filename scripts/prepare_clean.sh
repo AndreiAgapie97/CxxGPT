@@ -22,7 +22,11 @@
 #   manifest.json: what prep_public.py read, kept and dropped, and hashes.
 # Then it checks that no GSM8K test, GSM8K dev or SVAMP dev question shares
 # a 13-word run with any training file (cxxgpt leak-check). Steps whose
-# output exists are skipped. The tokenizer is data/tok.bpe, unchanged.
+# output exists are skipped. The tokenizer is data/tok.bpe: an existing one
+# is never changed (models are tied to its token ids); when there is none,
+# it is learned from the mix's training text (TOK_VOCAB=16384 tokens, from
+# a BPE_SAMPLE_MB=200 sample). GSM8K comes from scripts/prepare_data.sh,
+# run from here when data/gsm8k/test.txt is missing.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 OUT=${OUT:-data/clean-20261015}
@@ -93,6 +97,20 @@ done
 [ -f "$OUT/doab-val.txt" ] || after_cut "$OUT/doab.txt" "$OUT/doab-part.txt" "$OUT/doab-val.txt" 8000000
 [ -f "$OUT/arxiv-val.txt" ] || after_cut "$OUT/arxiv.txt" "$OUT/arxiv-part.txt" "$OUT/arxiv-val.txt" 8000000
 
+echo "== tokenizer"
+if [ ! -f "$tok" ]; then
+  # A sample of the training text in the shares the mix trains on it (never
+  # the held-out text), without the document separators.
+  mb=${BPE_SAMPLE_MB:-200}
+  "$PY" scripts/bpe_sample.py --out data/bpe-sample.txt --mb "$mb" "$OUT/textbooks-train.txt:0.22" \
+    "$OUT/wiki-train.txt:0.16" "$OUT/doab-part.txt:0.43" "$OUT/arxiv-part.txt:0.19"
+  # --max-bytes: all of the sample (bpe-train would otherwise keep only its first 200 MB).
+  "$CX" bpe-train --in data/bpe-sample.txt --vocab "${TOK_VOCAB:-16384}" --max-bytes "$((mb * 1024 * 1024))" \
+    --out "$tok.part"
+  mv "$tok.part" "$tok"
+  rm data/bpe-sample.txt
+fi
+
 echo "== tokens"
 for name in doab-part arxiv-part textbooks-train wiki-train textbooks-val wiki-val doab-val arxiv-val; do
   [ -f "$OUT/$name.tok" ] || "$CX" text2tok --in "$OUT/$name.txt" --out "$OUT/$name.tok" --bpe "$tok" --doc-sep '<|endoftext|>'
@@ -137,6 +155,7 @@ word train train 101 1000000
 word dev test 102 1000
 
 echo "== GSM8K dev"
+[ -f data/gsm8k/test.txt ] || CX="$CX" PY="$PY" scripts/prepare_data.sh
 if [ ! -f "$OUT/gsm8k-dev.tok" ]; then
   "$CX" prep-qa --in "$PILOT/gsm-known-seen-dev.jsonl" --out "$OUT/gsm8k-dev" --bpe "$tok" --task gsm8k
 fi

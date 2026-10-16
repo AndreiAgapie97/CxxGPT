@@ -1,61 +1,30 @@
 #!/usr/bin/env bash
-# From nothing to training-ready token files: downloads the public datasets,
-# trains our tokenizer on a sample of them, and encodes everything.
+# GSM8K, ready to train and test on: downloads it (train, the 500 dev
+# problems held out of it, test) and encodes it with our tokenizer,
+# data/tok.bpe. The rest of the training mix, and the tokenizer when there
+# is none yet, come from scripts/prepare_clean.sh, which runs this script
+# itself when GSM8K is missing.
 #   scripts/prepare_data.sh
-# Settings (environment): VOCAB=16384 (tokenizer size), FINEWEB_FILES=1
-# (about 2 GB of web text each), BPE_SAMPLE_MB=200 (text the tokenizer
-# learns from: 60% web text, 20% stories, 20% worked math), DATA=data
-# (where everything goes).
-# Each step is skipped when its output exists, so it is safe to rerun after
-# an interruption. Takes an hour or more, mostly downloading.
+# Settings (environment): DATA=data (where everything goes).
+# Each step is skipped when its output exists, so it is safe to rerun.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 DATA=${DATA:-data}
-VOCAB=${VOCAB:-16384}
-FINEWEB_FILES=${FINEWEB_FILES:-1}
-BPE_SAMPLE_MB=${BPE_SAMPLE_MB:-200}
-# On native Windows (Git Bash): the CMake build's program, and a venv's
-# Python in Scripts\ (python -m venv .venv; .venv/Scripts/pip install pyarrow).
 case "$(uname -s)" in
-  MINGW* | MSYS*) PY=${PY:-.venv/Scripts/python.exe} CX=${CX:-build/cxxgpt.exe} build="cmake (README)" ;;
-  *) PY=${PY:-.venv/bin/python} CX=${CX:-./cxxgpt} build="make" ;;
+  MINGW* | MSYS*) PY=${PY:-python} CX=${CX:-build/cxxgpt.exe} build="cmake (README)" ;;
+  *) PY=${PY:-python3} CX=${CX:-./cxxgpt} build="make" ;;
 esac
 [ -x "$CX" ] || { echo "build it first: $build"; exit 1; }
 
 echo "== download (resumes where it stopped)"
-"$PY" scripts/get_data.py --out "$DATA" gsm8k tinystories metamath openmath2
-"$PY" scripts/get_data.py --out "$DATA" fineweb-edu --files "$FINEWEB_FILES"
+"$PY" scripts/get_data.py --out "$DATA" gsm8k
 
 tok="$DATA/tok.bpe"
-echo "== tokenizer: $VOCAB tokens"
-if [ ! -f "$tok" ]; then
-  # Mostly web text, some stories and worked math, without the document
-  # separators (they are not text the model reads).
-  mb=$BPE_SAMPLE_MB
-  {
-    head -c "$((mb * 1024 * 6 / 10))K" "$DATA/fineweb-edu/000.txt"
-    head -c "$((mb * 1024 * 2 / 10))K" "$DATA/tinystories/train.txt"
-    { "$PY" -c 'import json, sys
-for line in sys.stdin:
-    j = json.loads(line)
-    print(j["question"]); print(j["answer"])' < "$DATA/openmath2/train_1M.jsonl" 2> /dev/null || true; } |
-      head -c "$((mb * 1024 * 2 / 10))K"
-  } | grep -v -x '<|endoftext|>' > "$DATA/bpe-sample.txt"
-  # --max-bytes: all of the sample (bpe-train would otherwise keep only its
-  # first 200 MB, cutting the math at the end of a larger one).
-  "$CX" bpe-train --in "$DATA/bpe-sample.txt" --vocab "$VOCAB" --max-bytes "$((mb * 1024 * 1024))" --out "$tok.part"
-  mv "$tok.part" "$tok"
-  rm "$DATA/bpe-sample.txt"
-else
-  echo "have $tok"
-fi
+# Models are tied to their tokenizer's token ids: this script never makes or
+# changes one. prepare_clean.sh learns it from the clean mix's text.
+[ -f "$tok" ] || { echo "no $tok yet: scripts/prepare_clean.sh learns it (and runs this script)"; exit 1; }
 
 echo "== token files"
-text() {  # text with <|endoftext|> between documents -> tokens
-  if [ -f "$2" ]; then echo "have $2"; return; fi
-  "$CX" text2tok --in "$1" --out "$2.part" --bpe "$tok" --doc-sep '<|endoftext|>'
-  mv "$2.part" "$2"
-}
 qa() {  # question/answer JSON Lines -> tokens trained only on the answers
   if [ -f "$2.tok" ] && [ -f "$2.txt" ] && [ "$2.tok" -nt "$1" ] && [ "$2.txt" -nt "$1" ]; then
     echo "have $2.tok"; return
@@ -64,16 +33,12 @@ qa() {  # question/answer JSON Lines -> tokens trained only on the answers
   mv "$2.part.txt" "$2.txt"
   mv "$2.part.tok" "$2.tok"
 }
-for f in "$DATA"/fineweb-edu/[0-9][0-9][0-9].txt; do text "$f" "${f%.txt}.tok"; done
-text "$DATA/tinystories/train.txt" "$DATA/tinystories/train.tok"
 qa "$DATA/gsm8k/train.jsonl" "$DATA/gsm8k/train" gsm8k
 qa "$DATA/gsm8k/dev.jsonl" "$DATA/gsm8k/dev" gsm8k
 qa "$DATA/gsm8k/test.jsonl" "$DATA/gsm8k/test" gsm8k
-qa "$DATA/openmath2/train_1M.jsonl" "$DATA/openmath2/train" openmath
-qa "$DATA/metamath/train.jsonl" "$DATA/metamath/train" metamath
 
 echo "== ready"
-for f in "$DATA"/*/*.tok; do
+for f in "$DATA"/gsm8k/*.tok; do
   # The header is 24 bytes; then 2 bytes per token, plus 1 per token if masked.
   printf "  %-36s %8.1f MB\n" "$f" "$(awk -v b="$(stat -c %s "$f")" 'BEGIN { print b / 1e6 }')"
 done

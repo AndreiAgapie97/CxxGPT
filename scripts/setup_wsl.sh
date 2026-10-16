@@ -39,10 +39,6 @@ if [ ! -x "$CUDA_HOME/bin/nvcc" ]; then
 fi
 "$CUDA_HOME/bin/nvcc" --version | tail -2
 
-echo "== Python for the data scripts (only pyarrow, for Parquet files)"
-[ -x .venv/bin/python ] || python3 -m venv .venv
-.venv/bin/pip install -q pyarrow
-
 echo "== build and test (CPU)"
 make -j"$(nproc)" all
 make test
@@ -56,5 +52,5 @@ else
 fi
 
 echo
-echo "All set. Data:     .venv/bin/python scripts/get_data.py gsm8k tinystories"
+echo "All set. Data:     scripts/prepare_clean.sh (README, \"The training data\")"
 echo "         Training: ./cxxgpt-gpu train --gpu --help"

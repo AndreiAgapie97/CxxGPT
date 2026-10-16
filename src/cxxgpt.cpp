@@ -269,8 +269,8 @@ Tokenizer load_tokenizer(const std::string& path) {
 
 // Text to a token file. The file streams through in blocks that are
 // encoded in parallel, so it can be far bigger than memory. With --doc-sep S
-// the text is a series of documents separated by S (TinyStories uses
-// "<|endoftext|>"); each document is trimmed and starts with BOS.
+// the text is a series of documents separated by S (the mix's text files
+// use "<|endoftext|>"); each document is trimmed and starts with BOS.
 // With --loss-markers, text between [[no-loss]] and [[/no-loss]] (planted
 // mistakes, loss_mask.h) is kept as context but not trained on, and the
 // markers are removed. Without it, the markers are ordinary text: web text

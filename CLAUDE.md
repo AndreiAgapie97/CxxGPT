@@ -141,9 +141,8 @@ Math problem-solving accuracy is the first evaluation focus.
   optimizer in CPU RAM, streaming layers), where a GPU step's time goes and
   the speed work in order (a fast fused attention kernel first), and the
   seed-repeat funnel an idea passes before it gets a laptop night.
-  Decisions are made on a dev set held out of GSM8K train (and out of
-  MetaMath and OpenMath2), never on the GSM8K test set, which gives
-  headline numbers only.
+  Decisions are made on a dev set held out of GSM8K train, never on the
+  GSM8K test set, which gives headline numbers only.
 - `src/wordgen.h` (`cxxgpt gen-word`): GSM8K-style word problems with exact
   answers and worked solutions (with or without calculator notes). Six
   story shapes (a running quantity, comparisons, totals over people,
@@ -153,22 +152,18 @@ Math problem-solving accuracy is the first evaluation focus.
   exact check, a second solver works the five newer shapes out from the
   story's quantities alone.
 - GSM8K dev set: `scripts/get_data.py` holds out 500 GSM8K train problems
-  (fixed seed) and removes their MetaMath and OpenMath2 rewrites;
-  `DEV=1 scripts/night.sh` validates on it instead of the test set.
-  `cxxgpt leak-check` finds questions sharing a 13-word run with training
-  files. Night 1's weights have already seen the dev questions.
+  (the 500 questions with the smallest sha256); `DEV=1 scripts/night.sh`
+  validates on it instead of the test set. `cxxgpt leak-check` finds
+  questions sharing a 13-word run with training files.
 - `cxxgpt qa-context` (`src/qa_context.h`, #15): for every trained answer
   token, the exact share of `sample_batch`'s random windows that show its
   whole question, part of it, or none. At `--seq 512` (2026-10-15): GSM8K
-  74/15/11%, MetaMath 63/14/23%, OpenMath2 40/12/48% (37% of its
-  documents are longer than a window). OpenMath2 gives 399M of the mix's
-  ~474M trained math tokens, so about 44% of them train with no question
-  in view. `train --sampler qa` (`QaStarts`, `src/train.h`; default
+  74/15/11%. `train --sampler qa` (`QaStarts`, `src/train.h`; default
   `random`) moves a window that starts inside a problem back to the
-  problem's BOS when the problem fits in a window: whole question 74 -> 100%
-  (GSM8K), 63 -> 92% (MetaMath), 40 -> 54% (OpenMath2, whose long problems
-  keep random starts), at 3-7% fewer answer tokens per window. Same random
-  draws as `random`; validation keeps random windows. Accuracy effect not
+  problem's BOS when the problem fits in a window (longer problems keep
+  random starts): whole question 74 -> 100% (GSM8K), at fewer answer tokens
+  per window. Same random draws as `random`; validation keeps random
+  windows. Accuracy effect not
   measured: the A/B is in docs/research-plan.md ("Answers with their
   questions").
 - `train --load-log FILE`: each layer's share per expert over every log
@@ -182,24 +177,23 @@ Math problem-solving accuracy is the first evaluation focus.
   `cxxgpt.exe`, `ternary_moe.exe`, `test_engine.exe`), run in CI. The
   vector kernels are picked at run time from what the CPU and Windows
   support. The GPU build on Windows is the next step (the port).
-- The audited data (2026-10-15, #46): OpenMath2's `augmented_math` had
-  clear mistakes in 26 of 40 sampled solutions, so from night 3 a new model
-  trains from random weights on `scripts/prepare_clean.sh`'s mix (README,
-  "The audited data"): open textbooks, Wikimedia articles, DOAB books and
+- The training data (2026-10-15, #46): a model trains from random weights
+  on `scripts/prepare_clean.sh`'s mix (README, "The training data", and
+  "Data provenance"): open textbooks, Wikimedia articles, DOAB books and
   arXiv papers from the Common Pile (`scripts/prep_public.py`, which reads
   `data/public-20261015/` and never changes it), 1M `gen-word` problems,
   and GSM8K train without the 500 dev problems and 7 near-copies of test or
   dev questions. 2.33B tokens; no test, dev or SVAMP dev question shares a
-  13-word run with it; `night.sh`'s default mix. MetaMath, OpenMath2,
-  FineWeb-Edu and TinyStories are out, kept in `data/old/` for comparisons.
-  The tokenizer stays `data/tok.bpe`.
+  13-word run with it; `night.sh`'s default mix. The tokenizer is
+  `data/tok.bpe`: an existing one is never changed (models are tied to its
+  token ids); without one, `prepare_clean.sh` learns it from the mix's
+  training text. Only openly licensed text, human-written problems and our
+  own generators' output train the models, never text an AI model wrote.
 - `src/cxxgpt.cpp`: the CLI (train, sample, eval, data prep, benchmarks).
-- `scripts/get_data.py`: downloads public datasets (GSM8K, TinyStories,
-  FineWeb-Edu, OpenMathInstruct-2, MetaMathQA) into `data/`, as text with
-  `<|endoftext|>` between documents (for `text2tok --doc-sep`) or as
-  GSM8K-style JSON Lines (for `prep-qa`). Tested against a local fake of
-  the Hugging Face endpoints, since huggingface.co is blocked here; CI's
-  `data-sources` job checks the real files and columns (`--check`).
+- `scripts/get_data.py`: downloads GSM8K into `data/gsm8k/` as JSON Lines
+  (for `prep-qa`), with the 500 dev problems held out of train;
+  `scripts/prepare_data.sh` encodes them. Tested against a local fake
+  server; CI's `data-sources` job checks the real files (`--check`).
 - `scripts/compare.sh`: the architecture comparison on the curriculum.
 - For the laptop (native Windows since 2026-10-15; the scripts run in Git
   Bash): `scripts/build_windows.cmd` (build, kernel, engine and GPU tests;

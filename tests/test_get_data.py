@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
-"""Offline dataset tests: a local HTTP fake, never public dataset downloads.
+"""Offline GSM8K download tests: a local HTTP fake, never the real files.
 
-The fake Parquet adapter reads JSON fixture rows; the download/listing and
-filtering paths are real. Checking actual Parquet columns remains CI's
-existing data-sources job, which has pyarrow and network access.
+The download, dev-split and rerun paths are real. Checking the real files
+and their fields remains CI's data-sources job, which has network access.
 """
 import contextlib
 import hashlib
@@ -13,6 +12,7 @@ import io
 import json
 import os
 import subprocess
+import sys
 from pathlib import Path
 import tempfile
 import threading
@@ -53,9 +53,7 @@ class DatasetTest(unittest.TestCase):
         self.url = f"http://127.0.0.1:{self.server.server_port}"
         self.env = patch.dict(os.environ, {"GSM8K_ENDPOINT": self.url + "/gsm8k"})
         self.env.start()
-        self.hf = patch.object(data, "HF", self.url)
-        self.hf.start()
-        self.args = types.SimpleNamespace(out=str(self.root), check=False, split="train_1M", sources="")
+        self.args = types.SimpleNamespace(out=str(self.root), check=False)
         # Program-created fixture records, never real training data.
         self.rows = [{"question": f"Fixture {i}: compute {i} plus 1?", "answer": f"Add one.\n#### {i + 1}"}
                      for i in range(620)]
@@ -63,7 +61,6 @@ class DatasetTest(unittest.TestCase):
         self.files["/gsm8k/test.jsonl"] = self.jsonl([{"question": "Test fixture", "answer": "#### 1"}])
 
     def tearDown(self):
-        self.hf.stop()
         self.env.stop()
         self.server.shutdown()
         self.server.server_close()
@@ -109,68 +106,19 @@ class DatasetTest(unittest.TestCase):
         digests = sorted(hashlib.sha256(q.encode()).hexdigest() for q in tq | dq)
         self.assertEqual({hashlib.sha256(q.encode()).hexdigest() for q in dq}, set(digests[:500]))
 
-    def test_filters_exactly_planted_rows(self):
-        self.split()
-        dev = self.read("gsm8k/dev.jsonl")[0]["question"]
-        train = self.read("gsm8k/train.jsonl")[0]["question"]
-        spaced = " \t" + dev.replace(" ", "\n  ") + "  "
-        meta = [{"query": f"Reworded fixture {i}", "response": "A step. The answer is: 2", "original_question": q}
-                for i, q in enumerate([dev, spaced, train, "Unrelated fixture"])]
-        self.files["/datasets/meta-math/MetaMathQA/resolve/main/MetaMathQA-395K.json"] = json.dumps(meta).encode()
-        output = io.StringIO()
-        with contextlib.redirect_stdout(output):
-            data.get_metamath(str(self.root / "metamath"), self.args)
-        self.assertIn("MetaMathQA dev filter: removed 2 rows", output.getvalue())
-        self.assertEqual([r["question"] for r in self.read("metamath/train.jsonl")],
-                         ["Reworded fixture 2", "Reworded fixture 3"])
-        rows = [{"problem": q, "generated_solution": "A step.", "expected_answer": "2", "problem_source": source}
-                for q, source in [(dev, "gsm8k"), (spaced, "gsm8k"), (train, "gsm8k"),
-                                  (dev, "augmented_gsm8k"), (dev + " Changed", "gsm8k"), (dev, "math")]]
-        self.files["/api/datasets/nvidia/OpenMathInstruct-2/tree/main/data"] = json.dumps([
-            {"type": "file", "path": "data/train_1M-00000.parquet"}]).encode()
-        self.files["/datasets/nvidia/OpenMathInstruct-2/resolve/main/data/train_1M-00000.parquet"] = json.dumps(rows).encode()
-
-        def fake_parquet_rows(path, columns):
-            self.assertIn("problem_source", columns)
-            for row in json.loads(Path(path).read_text()):
-                yield {column: row[column] for column in columns}
-
-        output = io.StringIO()
-        with patch.object(data, "parquet_rows", fake_parquet_rows), contextlib.redirect_stdout(output):
-            data.get_openmath2(str(self.root / "openmath2"), self.args)
-        self.assertIn("OpenMath2 dev filter: removed 2 rows", output.getvalue())
-        self.assertEqual([r["question"] for r in self.read("openmath2/train_1M.jsonl")],
-                         [train, dev, dev + " Changed", dev])
-        # Rows that --sources drops anyway do not count as removed by the dev filter.
-        output = io.StringIO()
-        only = types.SimpleNamespace(**dict(vars(self.args), sources="augmented_gsm8k,math"))
-        with patch.object(data, "parquet_rows", fake_parquet_rows), contextlib.redirect_stdout(output):
-            data.get_openmath2(str(self.root / "openmath2"), only)
-        self.assertIn("OpenMath2 dev filter: removed 0 rows", output.getvalue())
-        self.assertEqual([r["question"] for r in self.read("openmath2/train_1M.jsonl")], [dev, dev])
-        # Repeated conversion also applies the filter to cached raw downloads.
-        with contextlib.redirect_stdout(io.StringIO()):
-            data.get_metamath(str(self.root / "metamath"), self.args)
-        self.assertEqual(len(self.read("metamath/train.jsonl")), 2)
-
-
     def test_identical_rerun_keeps_timestamps(self):
         # Run the real script, as prepare_data.sh does, twice. The second run
         # writes the same bytes, so it must leave the files (and their
-        # timestamps) alone; otherwise prepare_data.sh re-encodes ~1.4M
-        # MetaMath/OpenMath2 problems on every rerun.
-        meta = [{"query": f"Reworded fixture {i}", "response": "A step. The answer is: 2",
-                 "original_question": f"Unrelated fixture {i}"} for i in range(50)]
-        meta_url = "/datasets/meta-math/MetaMathQA/resolve/main/MetaMathQA-395K.json"
-        self.files[meta_url] = json.dumps(meta).encode()
+        # timestamps) alone; otherwise prepare_data.sh re-encodes GSM8K on
+        # every rerun.
         script = Path(__file__).resolve().parents[1] / "scripts/get_data.py"
-        env = dict(os.environ, HF_ENDPOINT=self.url, GSM8K_ENDPOINT=self.url + "/gsm8k")
+        env = dict(os.environ, GSM8K_ENDPOINT=self.url + "/gsm8k")
 
         def run():
-            subprocess.run(["python3", str(script), "metamath", "--out", str(self.root)], env=env,
+            subprocess.run([sys.executable, str(script), "gsm8k", "--out", str(self.root)], env=env,
                            check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
 
-        outputs = ["metamath/train.jsonl", "gsm8k/train.jsonl", "gsm8k/dev.jsonl"]
+        outputs = ["gsm8k/train.jsonl", "gsm8k/dev.jsonl"]
         run()
         first = {name: (self.root / name).read_bytes() for name in outputs}
         # An old timestamp: a rewrite would replace it, even on a coarse clock.
@@ -182,18 +130,16 @@ class DatasetTest(unittest.TestCase):
             self.assertEqual((self.root / name).read_bytes(), first[name], name)
         self.assertFalse(list(self.root.rglob("*.part")))
         # A changed source still replaces the output.
-        self.files[meta_url] = json.dumps(meta[:10]).encode()
-        os.remove(self.root / "metamath/MetaMathQA-395K.json")
+        self.files["/gsm8k/train.jsonl"] = self.jsonl(self.rows[:-1])
+        os.remove(self.root / "gsm8k/raw/train.jsonl")
         run()
-        self.assertNotEqual((self.root / "metamath/train.jsonl").stat().st_mtime_ns, 1_000_000_000)
-        self.assertNotEqual((self.root / "metamath/train.jsonl").read_bytes(), first["metamath/train.jsonl"])
+        self.assertNotEqual((self.root / "gsm8k/train.jsonl").stat().st_mtime_ns, 1_000_000_000)
+        self.assertNotEqual((self.root / "gsm8k/train.jsonl").read_bytes(), first["gsm8k/train.jsonl"])
 
     def test_preparation_produces_dev_and_refreshes_filtered_tokens(self):
         repo = Path(__file__).resolve().parents[1]
         data_root = self.root / "prepared"
-        for name in ["fineweb-edu/000.txt", "tinystories/train.txt", "gsm8k/train.jsonl",
-                     "gsm8k/dev.jsonl", "gsm8k/test.jsonl", "metamath/train.jsonl",
-                     "openmath2/train_1M.jsonl", "tok.bpe"]:
+        for name in ["gsm8k/train.jsonl", "gsm8k/dev.jsonl", "gsm8k/test.jsonl"]:
             path = data_root / name
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text("fixture\n")
@@ -201,50 +147,43 @@ class DatasetTest(unittest.TestCase):
         mock_python.write_text("#!/bin/sh\nexit 0\n")
         mock_python.chmod(0o755)
         mock_cxxgpt = self.root / "mock-cxxgpt"
-        mock_cxxgpt.write_text("""#!/usr/bin/env python3
+        mock_cxxgpt.write_text(f"""#!{sys.executable}
 import json, os, pathlib, sys
 args = sys.argv[1:]
 with open(os.environ["MOCK_ARGS"], "a") as log:
     log.write(json.dumps(args) + "\\n")
 out = args[args.index("--out") + 1]
-if args[0] == "prep-qa":
-    pathlib.Path(out + ".txt").write_text("questions")
-    pathlib.Path(out + ".tok").write_text("tokens")
-else:
-    pathlib.Path(out).write_text("tokens")
+pathlib.Path(out + ".txt").write_text("questions")
+pathlib.Path(out + ".tok").write_text("tokens")
 """)
         mock_cxxgpt.chmod(0o755)
         log = self.root / "commands.jsonl"
         env = dict(os.environ, DATA=str(data_root), CX=str(mock_cxxgpt), PY=str(mock_python), MOCK_ARGS=str(log))
-        def prepare():
-            subprocess.run(["bash", "scripts/prepare_data.sh"], cwd=repo, env=env,
-                           check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+
+        def prepare(check=True):
+            return subprocess.run(["bash", "scripts/prepare_data.sh"], cwd=repo, env=env,
+                                  check=check, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+
+        # No tokenizer yet: the script never makes one (prepare_clean.sh does),
+        # so it stops before encoding anything.
+        result = prepare(check=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("prepare_clean.sh", result.stdout)
+        self.assertFalse(log.exists())
+        (data_root / "tok.bpe").write_text("fixture\n")
         prepare()
         self.assertTrue((data_root / "gsm8k/dev.txt").exists())
         self.assertTrue((data_root / "gsm8k/dev.tok").exists())
         calls = [json.loads(line) for line in log.read_text().splitlines()]
-        self.assertEqual(sum(call[0] == "prep-qa" for call in calls), 5)
+        self.assertEqual([call[0] for call in calls], ["prep-qa"] * 3)
+        self.assertEqual((data_root / "tok.bpe").read_text(), "fixture\n")
         prepare()
         self.assertEqual(calls, [json.loads(line) for line in log.read_text().splitlines()])
-        # Old token files from an unfiltered preparation must be regenerated.
-        for name in ["gsm8k/train.tok", "metamath/train.tok", "openmath2/train.tok"]:
-            os.utime(data_root / name, (1, 1))
+        # A token file older than its source is made again.
+        os.utime(data_root / "gsm8k/train.tok", (1, 1))
         prepare()
         calls = [json.loads(line) for line in log.read_text().splitlines()]
-        self.assertEqual(sum(call[0] == "prep-qa" for call in calls), 8)
-
-    def test_standalone_filter_creates_dev_and_missing_provenance_fails(self):
-        self.files["/datasets/meta-math/MetaMathQA/resolve/main/MetaMathQA-395K.json"] = json.dumps([
-            {"query": "Fixture", "response": "The answer is: 2"}]).encode()
-        with contextlib.redirect_stdout(io.StringIO()), self.assertRaisesRegex(SystemExit, "original_question"):
-            data.get_metamath(str(self.root / "metamath"), self.args)
-        self.assertEqual(len(self.read("gsm8k/dev.jsonl")), 500)
-        self.assertFalse((self.root / "metamath/train.jsonl").exists())
-        # A present-but-null original is also unusable provenance.
-        (self.root / "metamath/MetaMathQA-395K.json").write_text(json.dumps([
-            {"query": "Fixture", "response": "The answer is: 2", "original_question": None}]))
-        with contextlib.redirect_stdout(io.StringIO()), self.assertRaisesRegex(SystemExit, "must be text"):
-            data.get_metamath(str(self.root / "metamath"), self.args)
+        self.assertEqual(len(calls), 4)
 
 
 if __name__ == "__main__":
