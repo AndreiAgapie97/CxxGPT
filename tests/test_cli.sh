@@ -478,6 +478,50 @@ for pair in 'min-steps 1' 'max-steps 9' 'min-steps 9' 'max-steps 2147483649' 'co
     grep -q 'check failed' "$TEST_DIR/invalid-word.log"
 done
 printf 'CLI: word generation, repeatability, text2tok, eval-reasoning and invalid options passed\n'
+# gen-math writes the same two files as gen-word, for each topic.
+for topic in equations fractions; do
+    for split in train test; do
+        prefix="$TEST_DIR/math-$topic-$split"
+        "$CXXGPT" gen-math --topic "$topic" --out "$prefix" --seed 73 --count 28 --split "$split" > "$prefix.log"
+        "$CXXGPT" gen-math --topic "$topic" --out "$prefix-repeat" --seed 73 --count 28 --split "$split" > /dev/null
+        cmp "$prefix.txt" "$prefix-repeat.txt"
+        cmp "$prefix.text" "$prefix-repeat.text"
+        "$CXXGPT" text2tok --in "$prefix.text" --out "$prefix.tok" --doc-sep '<|endoftext|>' --threads 2 > /dev/null
+        "$CXXGPT_TRAINING_CLI" math "$prefix"
+        "$CXXGPT" eval-reasoning --ckpt "$TEST_DIR/audit.ckpt" --test "$prefix.txt" --max-new 1 --threads 2 > "$prefix-eval.log"
+        grep -q '^overall .* / 28)' "$prefix-eval.log"
+    done
+    if cmp -s "$TEST_DIR/math-$topic-train.txt" "$TEST_DIR/math-$topic-test.txt"; then
+        printf 'gen-math wrote the same %s problems for train and test\n' "$topic" >&2
+        exit 1
+    fi
+done
+# --exclude: a question written in the exclusion file is not written again.
+cut -f3 "$TEST_DIR/math-fractions-train.txt" | head -n 5 > "$TEST_DIR/math-exclude.txt"
+"$CXXGPT" gen-math --topic fractions --out "$TEST_DIR/math-excluded" --seed 73 --count 28 \
+    --exclude "$TEST_DIR/math-exclude.txt" > "$TEST_DIR/math-excluded.log"
+grep -q '^drawn again: [1-9]' "$TEST_DIR/math-excluded.log"
+if cut -f3 "$TEST_DIR/math-excluded.txt" | grep -qxF -f "$TEST_DIR/math-exclude.txt"; then
+    printf 'gen-math wrote an excluded question\n' >&2
+    exit 1
+fi
+status=0
+"$CXXGPT" gen-math --out "$TEST_DIR/invalid-math" --exclude "$TEST_DIR/no-such-file.txt" > "$TEST_DIR/invalid-math.log" 2>&1 || status=$?
+[[ "$status" == 1 && ! -e "$TEST_DIR/invalid-math.txt" ]]
+grep -q 'check failed' "$TEST_DIR/invalid-math.log"
+"$CXXGPT" gen-math --out "$TEST_DIR/plain-math" --count 4 --notes off --distractors off > /dev/null
+require_absent -q '<<' "$TEST_DIR/plain-math.text"
+awk -F '\t' 'NF != 5 || $1 != "equations" {exit 1} END {if (NR != 4) exit 1}' "$TEST_DIR/plain-math.txt"
+"$CXXGPT" gen-math --out "$TEST_DIR/empty-math" --count 0 > /dev/null
+[[ ! -s "$TEST_DIR/empty-math.txt" && ! -s "$TEST_DIR/empty-math.text" ]]
+for pair in 'topic algebra' 'count -1' 'seed -1' 'split dev' 'notes maybe' 'distractors maybe'; do
+    read -r option value <<< "$pair"
+    status=0
+    "$CXXGPT" gen-math --out "$TEST_DIR/invalid-math" "--$option" "$value" > "$TEST_DIR/invalid-math.log" 2>&1 || status=$?
+    [[ "$status" == 1 && ! -e "$TEST_DIR/invalid-math.txt" ]]
+    grep -q 'check failed' "$TEST_DIR/invalid-math.log"
+done
+printf 'CLI: math generation, repeatability, text2tok, eval-reasoning and invalid options passed\n'
 
 printf 'qa\t1\tq\twork\t14\r\nqa\t2\ttail\twork\t1080' > "$TEST_DIR/line-endings.txt"
 "$CXXGPT_TRAINING_CLI" problems "$TEST_DIR/line-endings.txt"
