@@ -105,7 +105,9 @@ Math problem-solving accuracy is the first evaluation focus.
   2665 -> 2489 ms a step on the night model (-6.6%, 24.6k -> 26.3k
   tokens/s, the same 7.0 GB); then all the experts' bf16 products on one
   mma.sync kernel that fits two blocks an SM (item 8, #49): 2460 -> 2341
-  ms (-4.8%, 28.0k tokens/s). Training is not bitwise
+  ms (-4.8%, 28.0k tokens/s); in TF32 (ternary models) the same kernel
+  layout: 4186 -> 3810 ms a step, though `--moe-cublas` is faster still
+  there (~3610). Training is not bitwise
   reproducible (atomic adds in the gradients), so "same numbers" means
   within the spread of repeated runs.
   `tests/test_gpu.cpp` checks it against `src/gpu_ref.cu`, the model in

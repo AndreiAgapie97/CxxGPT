@@ -25,10 +25,11 @@
 // epilogue (Problem::swiglu): the experts' eproj input gradient is SwiGLU's
 // output gradient, which is then never stored.
 //
-// Three kernels: on the tensor cores in bf16 (inputs bf16; mma.sync,
-// grouped_mma) and in TF32 (inputs fp32, rounded to TF32 as cuBLAS's TF32
-// mode does; WMMA, grouped_tc, which also takes decoding's few rows in
-// bf16), in tiles whose operands are staged in shared memory with cp.async;
+// Three kinds of kernel: on the tensor cores through mma.sync in bf16
+// (inputs bf16, grouped_mma) and in TF32 (inputs fp32, rounded to TF32 to
+// nearest as cuBLAS's TF32 mode does, grouped_mma_tf32), with WMMA
+// (grouped_tc) for decoding's few rows per expert, in tiles whose operands
+// are staged in shared memory with cp.async;
 // and a plain fp32 kernel for exact products, which also takes the cases the
 // tensor-core kernels cannot (rows not 16-byte aligned), rounding to TF32 or
 // reading bf16 itself. Sums are fp32 throughout.
@@ -223,15 +224,8 @@ struct Tiling {
     static constexpr int threads = WarpsM * WarpsN * 32, BM = WarpsM * FM * 16, BN = WarpsN * FN * 16;
     static constexpr int bk_bytes = BKBytes;
 };
-// Measured on the RTX 4070 laptop GPU on the night model's expert products
-// (8 x 512 x top-2 rows per micro-batch, C 768, Fe 1024; scratchpad bench,
-// 2026-10-16): 128 x 256 tiles, three stages for the row products; 128 x 128,
-// two stages for the weight gradients. They now take only TF32 (bf16 runs on
-// grouped_mma, MmaBf16Tiling): all six products of a layer, 9.4-10.0 ms
-// against 6.9 ms for cuBLAS one product per expert (measured again later
-// that day; the first measurement, 9.0 against 10.0, did not hold up).
-using RowsTiling = Tiling<2, 4, 4, 4, 64, 3>;
-using ReduceTiling = Tiling<2, 4, 4, 2, 64, 2>;
+// The WMMA kernel now takes only decoding's few rows per expert (bf16 and
+// TF32); larger products run on grouped_mma and grouped_mma_tf32.
 using SmallRowsTiling = Tiling<1, 4, 1, 2, 64, 2>;  // 16 x 128: decoding's few rows per expert
 constexpr int kThreads = 256;  // the plain kernel's
 
@@ -403,8 +397,9 @@ struct MmaTiling {
 // waits; 64 x 64 warp tiles took 212 registers, one block and 8 warps an SM).
 // All six products of a layer: 3.9 ms against 4.4 ms for the kernels
 // before (WMMA for the forward and weight gradients, 128 x 256 mma.sync for
-// the input gradients).
-using MmaBf16Tiling = MmaTiling<2, 4, 64, 32, 2, 64, 2>;
+// the input gradients). The same tiling in TF32 (grouped_mma_tf32): 7.4 ms
+// against 9.0-9.9 for WMMA and 6.7-6.9 for cuBLAS one product per expert.
+using MmaGroupedTiling = MmaTiling<2, 4, 64, 32, 2, 64, 2>;
 
 __device__ __forceinline__ unsigned smem_u32(const void* p) {
     return static_cast<unsigned>(__cvta_generic_to_shared(p));
@@ -523,6 +518,158 @@ void launch_mma(const Problem& p, int total_rows) {
                               true);
     (void)once;
     grouped_mma<L, TA, TB, Reduce, Fused><<<grid, L::threads, bytes>>>(p);
+}
+
+// ---------------------------------------------------------------------------
+// TF32 on the tensor cores through mma.sync
+// ---------------------------------------------------------------------------
+//
+// grouped_mma's layout with fp32 operands, rounded to TF32 as they are used
+// (cvt.rna, as WMMA's __float_to_tf32), multiplied 16 x 8 x 8 at a time
+// (mma.sync m16n8k8). ldmatrix moves 16-bit halves, so it loads a TF32
+// operand only where K runs along the stored rows (A stored [M][K], B stored
+// [N][K]): each lane then gets whole 32-bit values. Its .trans form would
+// split them, so A stored [K][M] and B stored [K][N] are read one value per
+// lane; their shared-memory rows are padded by 8 floats (a row stride of 8
+// mod 32 banks), so the lanes of a load (4 rows of k by 8 columns) fall in 32
+// different banks.
+template <class L, bool TA, bool TB>
+struct SmemTf32 {
+    static constexpr int BK = L::bk_bytes / 4;
+    static constexpr int lda = TA ? L::BM + 8 : BK + 4, a_size = TA ? BK * lda : L::BM * lda;
+    static constexpr int ldb = TB ? BK + 4 : L::BN + 8, b_size = TB ? L::BN * ldb : BK * ldb;
+    static constexpr int stage = a_size + b_size;
+    static constexpr size_t bytes = size_t(L::Stages) * stage * sizeof(float);
+    static_assert(lda % 4 == 0 && ldb % 4 == 0 && a_size % 4 == 0 && stage % 4 == 0, "16-byte aligned rows");
+};
+
+__device__ __forceinline__ unsigned tf32_bits(unsigned f) {
+    return __float_as_uint(wmma::__float_to_tf32(__uint_as_float(f)));
+}
+__device__ __forceinline__ void mma_tf32(float (&c)[4], const unsigned (&a)[4], unsigned b0, unsigned b1) {
+    asm volatile(
+        "mma.sync.aligned.m16n8k8.row.col.f32.tf32.tf32.f32 {%0, %1, %2, %3}, {%4, %5, %6, %7}, {%8, %9}, "
+        "{%0, %1, %2, %3};\n"
+        : "+f"(c[0]), "+f"(c[1]), "+f"(c[2]), "+f"(c[3])
+        : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b0), "r"(b1));
+}
+
+template <class L, bool TA, bool TB, bool Reduce, bool Fused>
+__global__ void __launch_bounds__(L::threads, L::min_blocks) grouped_mma_tf32(Problem p) {
+    using S = SmemTf32<L, TA, TB>;
+    constexpr int BK = S::BK, MT = L::MT, NT = L::NT;
+    const Tile t = find_tile<Reduce, L::BM, L::BN>(p, sizeof(float));
+    if (!t.live) return;
+    extern __shared__ __align__(16) unsigned char smem_raw[];
+    float* smem = reinterpret_cast<float*>(smem_raw);
+    const float* A = reinterpret_cast<const float*>(t.A);
+    const float* B = reinterpret_cast<const float*>(t.B);
+    const int lane = threadIdx.x % 32, warp = threadIdx.x / 32, wm = warp / L::WarpsN, wn = warp % L::WarpsN;
+    const int g = lane / 4, q = lane % 4;  // the mma's group (row of A and C, column of B) and its k
+
+    auto load_stage = [&](int stage, int k0) {
+        float* As = smem + stage * S::stage;
+        float* Bs = As + S::a_size;
+        if (TA) load_tile<float, BK, L::BM, L::threads>(As, S::lda, A, p.lda, k0, t.m0, t.K, t.M);
+        else load_tile<float, L::BM, BK, L::threads>(As, S::lda, A, p.lda, t.m0, k0, t.M, t.K);
+        if (TB) load_tile<float, L::BN, BK, L::threads>(Bs, S::ldb, B, p.ldb, t.n0, k0, p.N, t.K);
+        else load_tile<float, BK, L::BN, L::threads>(Bs, S::ldb, B, p.ldb, k0, t.n0, t.K, p.N);
+    };
+
+    float acc[MT][NT][4];
+#pragma unroll
+    for (int i = 0; i < MT; ++i)
+#pragma unroll
+        for (int j = 0; j < NT; ++j)
+#pragma unroll
+            for (int r = 0; r < 4; ++r) acc[i][j][r] = 0.0f;
+
+    // ldmatrix x4 rows: A [M][K] gives a0..a3 = (m 0-7, k 0-3), (m 8-15,
+    // k 0-3), (m 0-7, k 4-7), (m 8-15, k 4-7); B [N][K] gives b0, b1 of two
+    // n tiles of 8 = (n 0-7, k 0-3), (n 0-7, k 4-7), (n 8-15, k 0-3), (n
+    // 8-15, k 4-7).
+    const int a_row = (lane % 8) + ((lane / 8) % 2) * 8, a_col = (lane / 16) * 4;
+    const int b_row = (lane % 8) + (lane / 16) * 8, b_col = ((lane / 8) % 2) * 4;
+
+    const int steps = (t.K + BK - 1) / BK;
+#pragma unroll
+    for (int s = 0; s < L::Stages - 1; ++s) {
+        if (s < steps) load_stage(s, s * BK);
+        cp_async_commit();
+    }
+    for (int s = 0; s < steps; ++s) {
+        cp_async_wait<L::Stages - 2>();
+        __syncthreads();
+        const int next = s + L::Stages - 1;
+        if (next < steps) load_stage(next % L::Stages, next * BK);
+        cp_async_commit();
+        const float* As = smem + (s % L::Stages) * S::stage;
+        const float* Bs = As + S::a_size;
+#pragma unroll
+        for (int kk = 0; kk < BK; kk += 8) {
+            unsigned b[NT][2];
+#pragma unroll
+            for (int j = 0; j < NT; j += 2) {
+                const int n = wn * L::WN + j * 8;
+                if (TB) {
+                    unsigned r[4];
+                    ldsm_x4(r, Bs + (n + b_row) * S::ldb + kk + b_col);
+                    b[j][0] = r[0], b[j][1] = r[1], b[j + 1][0] = r[2], b[j + 1][1] = r[3];
+                } else {
+#pragma unroll
+                    for (int h = 0; h < 2; ++h) {
+                        const float* c = Bs + (kk + q) * S::ldb + n + h * 8 + g;
+                        b[j + h][0] = __float_as_uint(c[0]);
+                        b[j + h][1] = __float_as_uint(c[4 * S::ldb]);
+                    }
+                }
+            }
+#pragma unroll
+            for (int j = 0; j < NT; ++j) b[j][0] = tf32_bits(b[j][0]), b[j][1] = tf32_bits(b[j][1]);
+#pragma unroll
+            for (int i = 0; i < MT; ++i) {
+                const int m = wm * L::WM + i * 16;
+                unsigned a[4];
+                if (TA) {
+                    const float* c = As + (kk + q) * S::lda + m + g;
+                    a[0] = __float_as_uint(c[0]);
+                    a[1] = __float_as_uint(c[8]);
+                    a[2] = __float_as_uint(c[4 * S::lda]);
+                    a[3] = __float_as_uint(c[4 * S::lda + 8]);
+                } else {
+                    ldsm_x4(a, As + (m + a_row) * S::lda + kk + a_col);
+                }
+#pragma unroll
+                for (int r = 0; r < 4; ++r) a[r] = tf32_bits(a[r]);
+#pragma unroll
+                for (int j = 0; j < NT; ++j) mma_tf32(acc[i][j], a, b[j][0], b[j][1]);
+            }
+        }
+    }
+    cp_async_wait<0>();
+    // c0, c1 at (row, col), (row, col + 1); c2, c3 eight rows below.
+    const int row = t.m0 + wm * L::WM + g, col = t.n0 + wn * L::WN + q * 2;
+#pragma unroll
+    for (int i = 0; i < MT; ++i)
+#pragma unroll
+        for (int j = 0; j < NT; ++j) {
+            const int r0 = row + i * 16, c0 = col + j * 8;
+            put2<Fused>(p, t, r0, c0, acc[i][j][0], acc[i][j][1]);
+            put2<Fused>(p, t, r0 + 8, c0, acc[i][j][2], acc[i][j][3]);
+        }
+}
+
+template <class L, bool TA, bool TB, bool Reduce, bool Fused>
+void launch_mma_tf32(const Problem& p, int total_rows) {
+    const dim3 grid = Reduce ? dim3((p.M + L::BM - 1) / L::BM, (p.N + L::BN - 1) / L::BN, p.groups)
+                             : dim3((p.N + L::BN - 1) / L::BN, (total_rows + L::BM - 1) / L::BM + p.groups);
+    if (grid.x == 0 || grid.y == 0 || grid.z == 0) return;
+    constexpr size_t bytes = SmemTf32<L, TA, TB>::bytes;
+    static const bool once = (cudaFuncSetAttribute(grouped_mma_tf32<L, TA, TB, Reduce, Fused>,
+                                                   cudaFuncAttributeMaxDynamicSharedMemorySize, int(bytes)),
+                              true);
+    (void)once;
+    grouped_mma_tf32<L, TA, TB, Reduce, Fused><<<grid, L::threads, bytes>>>(p);
 }
 
 // ---------------------------------------------------------------------------
@@ -646,11 +793,9 @@ void launch(Kind kind, const Problem& p, int total_rows) {
             if (bf16) launch_tc<__nv_bfloat16, SmallRowsTiling, TA, TB, Reduce, Fused>(p, total_rows);
             else launch_tc<float, SmallRowsTiling, TA, TB, Reduce, Fused>(p, total_rows);
         } else if (bf16) {
-            launch_mma<MmaBf16Tiling, TA, TB, Reduce, Fused>(p, total_rows);
-        } else if (Reduce) {
-            launch_tc<float, ReduceTiling, TA, TB, Reduce, Fused>(p, total_rows);
+            launch_mma<MmaGroupedTiling, TA, TB, Reduce, Fused>(p, total_rows);
         } else {
-            launch_tc<float, RowsTiling, TA, TB, Reduce, Fused>(p, total_rows);
+            launch_mma_tf32<MmaGroupedTiling, TA, TB, Reduce, Fused>(p, total_rows);
         }
         return;
     }

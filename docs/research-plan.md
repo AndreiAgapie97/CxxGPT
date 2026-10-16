@@ -1007,9 +1007,22 @@ What this says:
    -0.03 to -0.07 with one expert holding half the rows). cuBLAS itself
    reaches only 23-36 TFLOP/s on these shapes, so ~40 is not a realistic
    target here; the products now run at 30-34 (the fused one at 23, as it
-   also moves 100 MB for SwiGLU). The TF32 grouped products (ternary
-   models' default) are 9.4-10.0 ms a layer against 6.9 for cuBLAS per
-   expert: an mma.sync TF32 kernel is the next step there.
+   also moves 100 MB for SwiGLU).
+
+   TF32 (ternary models' default): the WMMA grouped products took 9.0-9.9
+   ms a layer and micro-batch against 6.7-6.9 for cuBLAS one product per
+   expert, and a ternary night model trained at 4186 ms a step against
+   ~3610 with `--moe-cublas` (the earlier note that grouped won in TF32 did
+   not hold up). The same mma.sync tiling in TF32 (`grouped_mma_tf32`,
+   m16n8k8; ldmatrix only where K runs along the stored rows, single loads
+   from 8-float-padded rows otherwise) gives 7.4 ms and 3810 ms a step
+   (-9%), the same losses. cuBLAS rounds its TF32 inputs to nearest, as we
+   do (a check against double sums: 3e-6 from rounded inputs, 8e-4 from
+   truncated ones), so the two paths compute the same products. Measured
+   and left out: rounding in shared memory once per value instead of in
+   each warp's fragments (slower: every thread rounds before the barrier),
+   rounding by integer arithmetic (the same bits for every finite float,
+   no faster), 8-float K steps with 3-6 stages.
 
    Next, by measured size: the bf16 copies of products' inputs (138 ms,
    1249 calls a step), RoPE (64 ms, into attention's loads), the fused
