@@ -363,7 +363,7 @@ RunPod run's licensed corpus, docs/PREPARED_DATA.md):
   templates and seeds, with exact answers. No AI model writes them.
 - **GSM8K:** human-written problems and solutions, MIT licence.
 
-Left out of training, kept only to compare with nights 1 and 2:
+Left out of training:
 - **MetaMathQA:** GSM8K and MATH problems rewritten by OpenAI's GPT-3.5.
   OpenAI's terms of use forbid using its outputs to develop models that
   compete with OpenAI.
@@ -385,9 +385,6 @@ Which checkpoints are clean to publish:
   not text, but a model with nothing at all from those sets needs a
   tokenizer learned from the clean mix, and training again with it (the
   token ids change).
-- **Not for publishing: night 1, night 2** and anything started from them
-  (`INIT=`): trained on FineWeb-Edu, TinyStories, OpenMathInstruct-2 and
-  MetaMathQA. Their results stay in docs/runs.md.
 
 This is a record of where the data came from, not legal advice. Before a
 public or commercial release of weights, check the attribution each
