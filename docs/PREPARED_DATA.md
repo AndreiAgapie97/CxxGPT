@@ -28,6 +28,20 @@ original-training-manifest.json preserves the original provenance; manifest.json
 records reconstruction. Human GSM8K train/dev/test files and MIT licensing are
 also retained. Never mix held-out development/test files into training.
 
+2026-10-16 audit: on the laptop, data/targeted-math was replaced by a
+rebuild with the audited generator (operations/build_targeted_math.py, same
+seeds; 973,193 training problems, 199,591,820 tokens; it also drops problems
+with a GSM8K dev/test question's numbers and answer). Its manifest.json
+records the generator commit and keeps the old manifest under "replaces".
+The downloaded set above is kept beside it as data/targeted-math-runpod
+(the RunPod model's training data). After unpacking the download on a new
+machine, rebuild the same way:
+
+    python -I operations/build_targeted_math.py --cxxgpt build/cxxgpt.exe \
+        --old data/targeted-math-runpod --out data/targeted-math --tok data/licensed-10b/tok.bpe
+
+(rename the unpacked data/targeted-math to data/targeted-math-runpod first).
+
 balanced-recipe.json preserves the approximately 53% worked-math /47% general
 input sampling mixture, with corpus paths adapted to this download layout.
 Sampling weights repeat data; they do not increase unique token counts. The

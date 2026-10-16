@@ -225,11 +225,14 @@ bool fused_attention_on_tensor_cores(Matmul matmul, int head_size);
 // - weight_grad: C_g[M, N] = beta C_g + A[rows, M]ᵀ · B[rows, N], C_g = C + g stride.
 // With bf16 products the inputs are rounded to bf16 first. offset > 0
 // places A and B that many elements into their buffers, so that rows are
-// not 16-byte aligned and the plain kernel takes them.
+// not 16-byte aligned and the plain kernel takes them. row_scale (one per
+// row) and group_scale (one per group), where given, scale forward and
+// input_grad results (Problem::row_scale, group_scale).
 enum class GroupedOp { forward, input_grad, weight_grad };
 void gpu_grouped_product(Matmul matmul, GroupedOp op, const std::vector<float>& A, const std::vector<float>& B,
                          std::vector<float>& C, const std::vector<int>& starts, int M, int N, int K, int lda, int ldb,
-                         int ldc, long long stride, float beta, int offset);
+                         int ldc, long long stride, float beta, int offset,
+                         const std::vector<float>& row_scale = {}, const std::vector<float>& group_scale = {});
 
 // The experts' bf16 input-gradient product (input_grad's shapes, B [K][N]
 // per group) with SwiGLU's backward in its epilogue, as moe_backward runs

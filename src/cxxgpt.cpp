@@ -50,6 +50,8 @@
 #include "train.h"
 #include "train_control.h"
 #include "wordgen.h"
+#include "mathgen.h"
+#include "mathgen_fractions.h"
 
 namespace {
 
@@ -510,6 +512,19 @@ int cmd_gen_reasoning(Args& a) {
 
 // Two views of the same generated problems: the existing five-field file
 // for evaluation, and Q/A documents for text2tok --doc-sep '<|endoftext|>'.
+void write_problem_files(const std::string& out, const std::vector<Problem>& problems) {
+    save_problems(out + ".txt", problems);
+    const std::string text_path = out + ".text";
+    // Binary: text2tok reads the file as bytes, so a Windows "\r\n" would
+    // become extra tokens and change the stream for the same seed.
+    FILE* text = create_file(text_path, "wb");
+    CHECK(text, "cannot write %s", text_path.c_str());
+    for (const auto& p : problems)
+        CHECK(std::fprintf(text, "%s%s<|endoftext|>\n", p.prompt().c_str(), p.completion().c_str()) >= 0,
+              "error writing %s", text_path.c_str());
+    CHECK(std::fclose(text) == 0, "error writing %s", text_path.c_str());
+}
+
 int cmd_gen_word(Args& a) {
     const std::string out = a.str("out", "data/word");
     const int64_t count = a.integer("count", 1000), seed = a.integer("seed", 1);
@@ -526,18 +541,43 @@ int cmd_gen_word(Args& a) {
     CHECK(notes == "on" || notes == "off", "--notes must be on or off");
     const WordOptions options{int(min_steps), int(max_steps), distractors == "on", notes == "on", split == "test"};
     const auto problems = make_word_problems(uint64_t(seed), count, options);
-    save_problems(out + ".txt", problems);
-    const std::string text_path = out + ".text";
-    // Binary: text2tok reads the file as bytes, so a Windows "\r\n" would
-    // become extra tokens and change the stream for the same seed.
-    FILE* text = create_file(text_path, "wb");
-    CHECK(text, "cannot write %s", text_path.c_str());
-    for (const auto& p : problems)
-        CHECK(std::fprintf(text, "%s%s<|endoftext|>\n", p.prompt().c_str(), p.completion().c_str()) >= 0,
-              "error writing %s", text_path.c_str());
-    CHECK(std::fclose(text) == 0, "error writing %s", text_path.c_str());
+    write_problem_files(out, problems);
     std::printf("%s.txt and %s.text: %zu %s word problems, %lld..%lld steps\n", out.c_str(), out.c_str(),
                 problems.size(), split.c_str(), (long long)min_steps, (long long)max_steps);
+    return 0;
+}
+
+// Math problems built from a chosen answer, each solved again by a second
+// solver before it is written (src/mathgen.h, src/mathgen_fractions.h). The
+// same two files as gen-word.
+int cmd_gen_math(Args& a) {
+    const std::string topic = a.str("topic", "equations");
+    const std::string out = a.str("out", "data/math/" + topic);
+    const int64_t count = a.integer("count", 1000), seed = a.integer("seed", 1);
+    const std::string split = a.str("split", "train");
+    const std::string distractors = a.str("distractors", "on"), notes = a.str("notes", "on");
+    // Questions not to repeat, such as GSM8K test and dev (README, gen-math).
+    const std::string exclude = a.str("exclude", "");
+    a.done();
+    CHECK(topic == "equations" || topic == "fractions", "--topic must be equations or fractions");
+    CHECK(!out.empty(), "--out must be a nonempty prefix");
+    CHECK(count >= 0 && seed >= 0, "--count and --seed must be nonnegative");
+    CHECK(split == "train" || split == "test", "--split must be train or test");
+    CHECK(distractors == "on" || distractors == "off", "--distractors must be on or off");
+    CHECK(notes == "on" || notes == "off", "--notes must be on or off");
+    std::unique_ptr<Exclusions> exclusions;
+    if (!exclude.empty()) exclusions = std::make_unique<Exclusions>(exclude);
+    const MathOptions options{distractors == "on", notes == "on", split == "test", exclusions.get()};
+    const auto problems = topic == "equations" ? make_equation_problems(uint64_t(seed), count, options)
+                                               : make_fraction_problems(uint64_t(seed), count, options);
+    write_problem_files(out, problems);
+    std::printf("%s.txt and %s.text: %zu %s %s problems, each solved again by the checker\n", out.c_str(),
+                out.c_str(), problems.size(), split.c_str(), topic.c_str());
+    if (exclusions)
+        std::printf("drawn again: %zu sharing a 13-word run, %zu with the same numbers and answer as one of %zu "
+                    "excluded questions\n", exclusions->by_run, exclusions->by_numbers, exclusions->size());
+    else
+        std::printf("no --exclude: these problems may repeat GSM8K test or dev questions (README, gen-math)\n");
     return 0;
 }
 
@@ -1095,8 +1135,8 @@ int cmd_train(Args& a) {
             "        after a restart), save, eval, reason, stop (each once a change of the file; never\n"
             "        from a file already there at the start). stop works like Ctrl-C\n"
             "gpu:    --gpu (train on the GPU; needs cxxgpt-gpu, from make gpu)\n"
-            "        --matmul bf16 (inputs stored in bf16, the default; ternary models default to tf32,\n"
-            "        which bf16 does not take; tf32: finer, about 1.45x slower; fp32: exact, slowest)\n"
+            "        --matmul bf16 (inputs stored in bf16, the default; ternary models multiply their\n"
+            "        codes, exactly; tf32: finer, about 1.45x slower; fp32: exact, slowest)\n"
             "        --no-tf32 is an alias for fp32\n"
             "        attention is fused by default (no stored weight matrix; on the tensor cores\n"
             "        with tf32/bf16); --no-fused-attn uses cuBLAS products instead\n"
@@ -1174,9 +1214,10 @@ int cmd_train(Args& a) {
     CHECK(!request_fused || !disable_fused, "choose only one of --fused-attn and --no-fused-attn");
     const bool no_tf32 = a.flag("no-tf32");
     // bf16 products by default: 1.45x the tokens/s of tf32 on the night-1
-    // model, with the same loss curve. Ternary models default to tf32 (their
-    // quantized values are not exact in bf16).
-    const std::string asked = a.str("matmul", no_tf32 ? "fp32" : cfg.ternary ? "tf32" : "bf16");
+    // model, with the same loss curve. Ternary models too (2026-10-16): they
+    // multiply their codes (gpu.cu's proj_forward), 1.45x tf32's tokens/s,
+    // the same losses over 100-200 steps.
+    const std::string asked = a.str("matmul", no_tf32 ? "fp32" : "bf16");
     CHECK(!no_tf32 || asked == "fp32", "--no-tf32 conflicts with --matmul %s", asked.c_str());
     CHECK(asked == "fp32" || asked == "tf32" || asked == "bf16", "--matmul takes fp32, tf32 or bf16");
     // The CPU engine multiplies in exact fp32 with its own attention: it
@@ -1844,6 +1885,7 @@ int main(int argc, char** argv) {
         {"sample", cmd_sample, "generates text from a prompt"},
         {"gen-reasoning", cmd_gen_reasoning, "writes the synthetic reasoning curriculum"},
         {"gen-word", cmd_gen_word, "writes exact word problems with held-out sentence patterns"},
+        {"gen-math", cmd_gen_math, "writes math problems (equations, fractions) that a second solver checks"},
         {"prep-qa", cmd_prep_qa, "turns question/answer JSON Lines into problems and token files"},
         {"eval-reasoning", cmd_eval_reasoning, "exact-answer accuracy on a problems file"},
         {"eval-loss", cmd_eval_loss, "a checkpoint's loss on held-out token files"},

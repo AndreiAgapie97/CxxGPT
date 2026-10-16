@@ -25,6 +25,11 @@
 // epilogue (Problem::swiglu): the experts' eproj input gradient is SwiGLU's
 // output gradient, which is then never stored.
 //
+// A rows-mode product can scale its results too (Problem::row_scale and
+// group_scale), for ternary models' bf16 products: they multiply the
+// codes (-1/0/+1 weights, -127..127 activations: exact in bf16, and their
+// sums exact in fp32), and the scales come after.
+//
 // Three kinds of kernel: on the tensor cores through mma.sync in bf16
 // (inputs bf16, grouped_mma) and in TF32 (inputs fp32, rounded to TF32 to
 // nearest as cuBLAS's TF32 mode does, grouped_mma_tf32), with WMMA
@@ -67,6 +72,11 @@ struct Problem {
     // (m, n) and (m, N + n), and C is not written.
     const float* swiglu = nullptr;
     __nv_bfloat16* swiglu_out = nullptr;
+    // Rows mode: when set, C(m, n) of group g is the product times
+    // row_scale[starts[g] + m] and group_scale[g] (each where set), before
+    // SwiGLU's backward when Fused.
+    const float* row_scale = nullptr;
+    const float* group_scale = nullptr;
 };
 
 // swiglu_backward for one element (gpu.cu's swiglu_bwd and the epilogue
@@ -85,6 +95,7 @@ struct Tile {
     float* C;
     int M, K, m0, n0;  // M, K: this group's
     int row0;          // rows mode: the group's first row
+    float scale;       // rows mode: the group's scale (Problem::group_scale), or 1
     bool live;
 };
 
@@ -98,6 +109,7 @@ __device__ Tile find_tile(const Problem& p, size_t esz) {
         t.C = p.C + size_t(g) * p.strideC;
         t.M = p.M;
         t.K = p.starts[g + 1] - s;
+        t.scale = 1.0f;  // reduce mode is never scaled
         t.m0 = blockIdx.x * BM;
         t.n0 = blockIdx.y * BN;
         t.live = t.m0 < t.M;
@@ -115,6 +127,7 @@ __device__ Tile find_tile(const Problem& p, size_t esz) {
             t.M = n;
             t.K = p.K;
             t.row0 = s;
+            t.scale = p.group_scale ? p.group_scale[g] : 1.0f;
             t.m0 = x * BM;
             t.n0 = blockIdx.x * BN;
             t.live = true;
@@ -131,9 +144,16 @@ __device__ Tile find_tile(const Problem& p, size_t esz) {
 // backward of v instead (Problem::swiglu). A compile-time choice: the extra
 // code in every kernel's epilogue costs registers, and so speed, even where
 // it is not taken.
+// The scale of row m's results (Problem::row_scale, group_scale): 1 when
+// neither is set, so unscaled products keep their exact values.
+__device__ __forceinline__ float scale_of(const Problem& p, const Tile& t, int m) {
+    return p.row_scale ? t.scale * p.row_scale[t.row0 + m] : t.scale;
+}
+
 template <bool Fused>
 __device__ __forceinline__ void put(const Problem& p, const Tile& t, int m, int n, float v) {
     if (m >= t.M || n >= p.N) return;
+    v *= scale_of(p, t, m);
     if constexpr (Fused) {
         const size_t at = size_t(t.row0 + m) * 2 * p.N + n;
         float dg, du;
@@ -155,6 +175,8 @@ template <bool Fused>
 __device__ __forceinline__ void put2(const Problem& p, const Tile& t, int m, int n, float v0, float v1) {
     if constexpr (Fused) {
         if (m < t.M && n + 1 < p.N && p.N % 2 == 0) {
+            const float sc = scale_of(p, t, m);
+            v0 *= sc, v1 *= sc;
             const size_t at = size_t(t.row0 + m) * 2 * p.N + n;
             const float2 g = *reinterpret_cast<const float2*>(p.swiglu + at);
             const float2 u = *reinterpret_cast<const float2*>(p.swiglu + at + p.N);
@@ -168,6 +190,8 @@ __device__ __forceinline__ void put2(const Problem& p, const Tile& t, int m, int
     } else if (m < t.M && n + 1 < p.N) {
         float* c = t.C + size_t(m) * p.ldc + n;
         if (reinterpret_cast<uintptr_t>(c) % 8 == 0) {  // a float2 at once
+            const float sc = scale_of(p, t, m);
+            v0 *= sc, v1 *= sc;
             float2& c2 = *reinterpret_cast<float2*>(c);
             if (p.beta == 0.0f) {
                 c2 = make_float2(v0, v1);

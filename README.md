@@ -152,6 +152,7 @@ patterns for inspection and do not establish the cause of a wrong answer.
 |---|---|
 | `gen-reasoning` | writes the synthetic curriculum: problems with step-by-step solutions, train/val token files and a test set one difficulty level beyond training |
 | `gen-word` | writes exact word problems, worked solutions, and separate train/test sentence patterns |
+| `gen-math` | writes math problems built from a chosen answer (equations so far), each solved again by a second solver |
 | `bpe-train` | trains a BPE tokenizer on a text file |
 | `text2tok` | encodes text into a token file (parallel, streaming; `--doc-sep` splits documents) |
 | `prep-qa` | turns question/answer JSONL (GSM8K and the like) into token files with a loss mask and a test set |
@@ -246,8 +247,8 @@ Options (see `gen-word --help`):
   distractor wording; a distractor number never appears in the calculation.
 - `--notes on|off`: include or omit GSM8K calculator notes such as
   `<<48/2=24>>24` (default on). This changes only the worked solution.
-- `--split train|test`: 84 training sentence patterns or 42 held-out test
-  patterns, grouped into 21 arithmetic situations. The opening patterns
+- `--split train|test`: 108 training sentence patterns or 54 held-out test
+  patterns, grouped into 27 arithmetic situations. The opening patterns
   differ too, so the splits cannot share a complete question, even with
   different seeds. Each file also omits duplicate questions.
 
@@ -274,14 +275,150 @@ An attempt is discarded if any intermediate value is negative, exceeds
 1,000,000, needs more than two decimal places, or gives fractional objects.
 The step count and story shape stay fixed while invalid attempts are retried.
 
-These generated stories are still less varied than human-written math.
-Long stories outside the running-quantity shape are repetitive: at 6-8
-steps, each of the five other shapes is one multiplication (or fraction, or
-percentage) followed by a string of additions, and on the test split, with
-only two patterns per sentence family, the same addition pattern often
-appears two or three times in one story. Success on its held-out wording alone is not evidence of improvement on
+An audit (2026-10-16) read the stories as a person would and added rules,
+each checked by the tests on every generated problem:
+- no "1 cards" or "1 dollars": no step leaves exactly 0 or 1, and added
+  amounts start at 2;
+- a payment is what a shopper would hand over: the next multiple of $5,
+  $10, $20, $50 or $100 above the bill, at most about twice the bill (not
+  $180 for two stickers at $0.75);
+- extra kept items say where they come from ("A friend gives Maya 4 more
+  cards, and Maya keeps them", not "Maya keeps 6 green cards");
+- a running quantity is cut down (an equal share, a fraction or a
+  percentage kept) at most twice and never twice in a row, and is sold or
+  bought at most once;
+- no wording is used twice in one story: extra items, purchases and kept
+  items each take turns among three sentence families (twelve wordings for
+  train, six for test), and a running quantity gets at most six gifts and
+  gives some away at most twice.
+
+These generated stories are still less varied than human-written math:
+at 7-8 steps, each of the five shapes other than the running quantity is
+one multiplication (or fraction, or percentage) followed by five or six
+additions, each worded differently. Success on its held-out wording alone is not evidence of improvement on
 GSM8K or SVAMP. No generated datasets are checked into the repository, and
 this command does not change the night data mix.
+
+### Generated math problems: equations
+
+```sh
+./cxxgpt gen-math --topic equations --out data/math/eq-train --split train --seed 1 --count 100000 \
+    --exclude data/licensed-10b/gsm8k-test.txt,data/licensed-10b/gsm8k-dev.txt
+./cxxgpt gen-math --topic equations --out data/math/eq-test --split test --seed 2 --count 1000 \
+    --exclude data/licensed-10b/gsm8k-test.txt,data/licensed-10b/gsm8k-dev.txt
+```
+
+`gen-math` (`src/mathgen.h`) writes the same two files as `gen-word`
+(`PREFIX.txt` for `eval-reasoning`, `PREFIX.text` for `text2tok`), with the
+task `equations` and, as the difficulty, the number of calculator steps in
+the solution (2-7). Its stories are the ones GSM8K solves with one unknown:
+
+- a number puzzle ("thinks of a number, multiplies it by 3, adds 7 and gets
+  31"), solved by undoing the steps from the end;
+- two ages that add up to a total, or that keep a ratio in some years;
+- two kinds of one thing: adult and child tickets, cows and chickens (their
+  legs), large and small packs;
+- consecutive whole, even or odd numbers with a given sum;
+- a rectangle whose length depends on its width, from its perimeter (asking
+  for the width, the length or the area);
+- three people sharing money ("Leo gets $5 more than Maya, Zoe gets 3 times
+  as much as Leo").
+
+The solution writes the equation (`Let x be Leo's age. Then Maya is 3x + 5
+years old.`) and solves it one step at a time, each number step a calculator
+note: `Taking 5 from both sides: 41-5 = <<41-5=36>>36, so 4x = 36.` The
+equation itself stays outside the notes, so the calculator never reads
+`3x` as a multiplication.
+
+How every problem is checked before it is written:
+
+1. The unknown is drawn first, then the story is built around it, in whole
+   numbers; a story that does not come out whole is drawn again, never
+   rounded.
+2. A second solver that shares no code with the generator solves the story
+   again from its numbers alone, by trying every whole number the story
+   allows (each possible age, ticket count, width), and must find exactly
+   one that fits: the answer written. The number puzzle is checked another
+   way: its steps are combined into one formula and solved backward.
+3. Every calculator note is worked out again with the exact calculator
+   (`src/calc.h`).
+
+If any check fails, the program stops instead of writing the problem. The
+tests also show the checker rejects broken problems (a wrong answer, a
+changed number, a wrong note).
+
+`--exclude FILES` (comma-separated problems files or one question per line)
+keeps the output clear of evaluation questions. These stories are classic,
+and without it a large file repeats a few GSM8K test questions almost word
+for word, numbers included ("Ruby is 6 times older than Sam. In 9 years,
+Ruby will be 3 times as old as Sam.", or a farm of only sheep and geese
+with 20 heads and 70 legs). A problem is drawn again when its question shares a 13-word run
+with an excluded question (`leak-check`'s rule), or has the same numbers and
+the same answer, which also catches the same problem in other words. Of
+300,000 problems, about 700 are drawn again this way; afterwards none of
+GSM8K test or dev shares a 13-word run, or its numbers and answer, with the
+output. Without `--exclude` the command says so. The two files above come
+with the RunPod data (docs/PREPARED_DATA.md); from a fresh clone, make the
+same questions from GSM8K's JSON Lines (`scripts/get_data.py`): `./cxxgpt
+prep-qa --in data/gsm8k/test.jsonl --out data/gsm8k/test --task gsm8k`
+writes `data/gsm8k/test.txt`, and the same for `dev.jsonl`.
+
+Other options are `gen-word`'s: `--seed`, `--count`, `--out`, `--split
+train|test` (four of six wordings per sentence for train, the other two for
+test), `--distractors on|off` and `--notes on|off`; none of the last two
+changes a random draw. Kinds with few different problems are drawn less
+often. In 1M problems: puzzles 176k different, mixtures 131k, shares 107k,
+rectangles 46k (at real sizes: a rug of a few meters, a field of up to 150),
+consecutive numbers 7.2k, ages adding up 6.0k, ages in some years only 564
+(realistic ages leave few), so those repeat with other names
+and wordings. The output is not part of the training mix; whether to train
+on it is a separate decision.
+
+### Generated math problems: fractions, percentages, ratios and units
+
+```sh
+./cxxgpt gen-math --topic fractions --out data/math/frac-train --split train --seed 1 --count 100000 \
+    --exclude data/licensed-10b/gsm8k-test.txt,data/licensed-10b/gsm8k-dev.txt
+```
+
+`--topic fractions` (`src/mathgen_fractions.h`) has the same files,
+options, splits and checks as the equations, with the task `fractions`.
+Its stories:
+
+- parts of an amount, one to three steps, as fractions or percentages:
+  "has 240 apples, sells 25% of the apples, then gives 1/3 of the remaining
+  apples to Leo";
+- a price cut or raised by a percentage, once or twice, in exact cents;
+- what percent: "18 of the 24 questions right", or a price that went from
+  $40 to $50;
+- an amount shared in a ratio (3:5, or 2:3:4 among three people), or a
+  class of boys and girls, asking for a share or a difference;
+- a ratio and one count ("cats to dogs is 2:3, and there are 18 dogs"),
+  asking for the other count or the total;
+- the same rate for another amount: prices for more or fewer items, a
+  recipe for more or fewer cookies;
+- units: minutes to hours, grams to kilograms, kilometers to meters, cents
+  to dollars.
+
+The numbers are drawn so that every step comes out exact (a part of an
+amount is always whole, a price change always whole cents); every answer is
+a whole number or a decimal with at most two places, as in GSM8K, and
+nothing is rounded. Money and measurements are kept in hundredths inside
+the program. The checker (`fraction_check`) shares no code with the
+generator: it works each story out again from its numbers (the parts as one
+product, prices in cents, every whole percent or ratio part size tried in
+turn), and calc.h checks every note.
+
+No generated question shares a 13-word run with GSM8K test or dev, but
+simple stories land on the same numbers as some of GSM8K's easiest
+questions (a $100 ticket down 20%; 20 cookies, 2/5 given away), so use
+`--exclude` here too: of 300,000 problems it draws about 260 again, after
+which none has a GSM8K test or dev question's numbers and answer. In 1M
+problems: price changes 98k different, proportions 73k, parts 62k, ratio
+splits 61k, units 16k, ratio-and-count 13k, what-percent 6.6k (drawn
+least often). Prices, weights, distances and counts stay in ranges a real
+thing has (a sofa $300-1,500, a lamp $20-150; a jar of honey 100-400 g; a
+walk or a drive of up to 8 km a day).
 
 ### Real data and GPU training
 
@@ -317,11 +454,17 @@ folders:
   is kept. Also the tokenizer, `tok.bpe` (16,384 tokens, learned from a
   sample of the training split; sha256 `6e811ced...`), and GSM8K's dev and
   test sets encoded with it (`gsm8k-dev`, `gsm8k-test`).
-- `data/targeted-math/`: 963,089 exact `gen-word` problems (1M generated,
-  minus those sharing a 13-word run with a GSM8K dev or test question or a
-  generated dev question; `operations/prepare_targeted_math.py`), and
-  GSM8K train without the 500 dev problems and 7 near-copies (6,966
-  problems).
+- `data/targeted-math/`: 973,193 exact `gen-word` problems (1M generated
+  after the 2026-10-16 audit, same seeds, minus 25,646 sharing a 13-word
+  run with a GSM8K dev or test question or a generated dev question, and
+  1,161 with a GSM8K dev or test question's numbers and answer;
+  `operations/build_targeted_math.py`, 199.6M tokens; every one of its
+  4,849,161 written calculations re-checked exactly), and GSM8K train
+  without the 500 dev problems and 7 near-copies (6,966 problems). The
+  RunPod model trained on the set made before the audit (963,089 problems,
+  `src/wordgen.h` at commit 3b6d880, with its flaws: "1 cards", payments
+  of $180 for $1.50, kept items from nowhere, a sentence repeated in 44%
+  of problems); it is kept as `data/targeted-math-runpod/`.
 
 `night.sh` trains on the run's last mix unless `MIX=` names others:
 
