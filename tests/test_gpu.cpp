@@ -353,9 +353,9 @@ void masked_accumulation() {
   }
 }
 
-// The GPU alone learns a repeating sequence, with a ternary MoE model
-// (full precision with bf16 products, which do not take ternary models).
-void learns_pattern(bool muon, Matmul matmul = Matmul::tf32, bool fused = false) {
+// The GPU alone learns a repeating sequence, with a ternary MoE model, or
+// a full-precision one (!ternary).
+void learns_pattern(bool muon, Matmul matmul = Matmul::tf32, bool fused = false, bool ternary = true) {
     Config cfg;
     cfg.vocab = 64;
     cfg.seq_len = 32;
@@ -364,7 +364,7 @@ void learns_pattern(bool muon, Matmul matmul = Matmul::tf32, bool fused = false)
     cfg.n_heads = 2;
     cfg.n_experts = 4;
     cfg.top_k = 2;
-    cfg.ternary = matmul != Matmul::bf16;
+    cfg.ternary = ternary;
     Model<float> host(cfg);  // the layout
     GpuTrainer gpu(cfg, host.infos, matmul, fused);
     gpu.init_params(7);
@@ -386,8 +386,8 @@ void learns_pattern(bool muon, Matmul matmul = Matmul::tf32, bool fused = false)
     }
     const char* opt = muon ? "Muon" : "AdamW";
     const char* mm = matmul == Matmul::bf16 ? "bf16" : matmul == Matmul::fp32 ? "fp32" : "tf32";
-    std::printf("  learns pattern (%s, %s%s): loss %.3f -> %.3f\n", opt, mm, fused ? ", fused attention" : "", first,
-                last);
+    std::printf("  learns pattern (%s, %s%s%s): loss %.3f -> %.3f\n", opt, ternary ? "ternary, " : "", mm,
+                fused ? ", fused attention" : "", first, last);
     EXPECT(last < 0.1 * first, "GPU training with %s did not learn the pattern: %.3f -> %.3f", opt, first, last);
 }
 
@@ -479,7 +479,7 @@ void extreme_cross_entropy() {
 // every weight the reference's code (reference_ternary, the CPU engine's
 // float rule), at the thresholds too, and its scale to within an ulp; then
 // again on weights the GPU itself trained.
-void ternary_codes_on_gpu(const Config& cfg) {
+void ternary_codes_on_gpu(const Config& cfg, Matmul matmul = Matmul::fp32) {
     Model<float> cpu(cfg);  // the layout and the weights
     std::vector<float> rq;  // the reference's ternary weights
     Rng rng(4);
@@ -502,7 +502,7 @@ void ternary_codes_on_gpu(const Config& cfg) {
             break;
         }
     CHECK(!planted.empty(), "no ternary tensor");
-    GpuTrainer gpu(cfg, cpu.infos, Matmul::fp32, true);
+    GpuTrainer gpu(cfg, cpu.infos, matmul, true);
     std::vector<float> q(cpu.num_params());
     // Codes that differ, and values more than an ulp apart.
     auto mismatches = [&](size_t* values) {
@@ -549,7 +549,8 @@ void ternary_codes_on_gpu(const Config& cfg) {
     const size_t trained = mismatches(&values);
     EXPECT(trained == 0 && values == 0, "ternary codes after training: %zu codes and %zu values differ",
            trained, values);
-    std::printf("  ternary codes: GPU = reference for every weight, before and after 3 GPU steps\n");
+    std::printf("  ternary codes%s: GPU = reference for every weight, before and after 3 GPU steps\n",
+                matmul == Matmul::bf16 ? " (bf16 products)" : "");
 }
 
 // Unlikelihood with a saturated softmax: the fixture's logits are about
@@ -1134,6 +1135,61 @@ void grouped_products() {
     std::printf("  grouped expert products: fp32 %.1e, tf32 %.1e, bf16 %.1e apart\n", worst[0], worst[1], worst[2]);
 }
 
+// A ternary model's bf16 products (gpu.cu's proj_forward): int8 codes
+// times -1/0/+1 codes are exact in bf16 and their sums exact in fp32, so
+// with the scales after the product every result must be the float
+// product sum * (gamma * row scale), bit for bit, on all three kernels
+// (mma.sync: 64 rows or more per group; WMMA: fewer; plain: unaligned
+// rows), forward (row and group scales) and input gradient (group scale).
+void grouped_codes() {
+    struct Case {
+        const char* name;
+        std::vector<int> rows;
+        int N, K;
+    };
+    const Case cases[] = {
+        {"mma tiles", {0, 300, 0, 129}, 136, 1024},
+        {"few rows", {37, 0, 13, 5, 1, 64}, 48, 200},
+        {"wide", {200, 0, 70}, 300, 40},
+    };
+    Rng rng(12);
+    size_t checked = 0;
+    for (const Case& c : cases)
+        for (int op = 0; op < 2; ++op)
+            for (int offset : {0, 1}) {
+                std::vector<int> starts{0};
+                for (int r : c.rows) starts.push_back(starts.back() + r);
+                const int R = starts.back(), G = int(c.rows.size());
+                const bool fwd = op == 0;
+                std::vector<float> A(size_t(R) * c.K), B(size_t(G) * c.N * c.K), C(size_t(R) * c.N);
+                std::vector<float> rs(R), gs(G);
+                for (float& x : A) x = float(std::lround(rng.uniform() * 254.0) - 127);
+                for (float& x : B) x = float(std::lround(rng.uniform() * 2.0) - 1);
+                for (float& x : rs) x = float(0.01 * rng.uniform() + 1e-4);
+                for (float& x : gs) x = float(0.1 * rng.uniform() + 1e-3);
+                if (R > 0) rs[0] = 0.0f;  // a row of zeros has scale 0
+                const long long stride = (long long)c.N * c.K;
+                gpu_grouped_product(Matmul::bf16, fwd ? GroupedOp::forward : GroupedOp::input_grad, A, B, C, starts,
+                                    0, c.N, c.K, c.K, fwd ? c.K : c.N, c.N, stride, 0.0f, offset,
+                                    fwd ? rs : std::vector<float>{}, gs);
+                size_t wrong = 0;
+                for (int g = 0; g < G; ++g)
+                    for (int r = starts[g]; r < starts[g + 1]; ++r)
+                        for (int n = 0; n < c.N; ++n) {
+                            double s = 0;
+                            for (int k = 0; k < c.K; ++k)
+                                s += double(A[size_t(r) * c.K + k]) *
+                                     B[size_t(g) * stride + (fwd ? size_t(n) * c.K + k : size_t(k) * c.N + n)];
+                            const float scale = fwd ? gs[g] * rs[r] : gs[g];
+                            wrong += C[size_t(r) * c.N + n] != float(s) * scale;
+                            ++checked;
+                        }
+                EXPECT(wrong == 0, "grouped codes %s, %s, offset %d: %zu results not exact", c.name,
+                       fwd ? "forward" : "input grad", offset, wrong);
+            }
+    std::printf("  grouped code products with scales: %zu results exact\n", checked);
+}
+
 // The experts' bf16 input-gradient product with SwiGLU's backward in its
 // epilogue (moe_backward with bf16 products) against the same product
 // stored in fp32 and then swiglu_bwd: the same bits, on the mma.sync
@@ -1333,6 +1389,7 @@ int main() {
     fused_kernels();
     grouped_products();
     grouped_swiglu_grad();
+    grouped_codes();
     init_on_gpu();
 
     Config dense;
@@ -1414,6 +1471,18 @@ int main() {
     fpa.fp_attention = true;
     compare("ternary moe, fp attention", fpa, 1e-5, 1e-2, 2e-6);
     ternary_codes_on_gpu(ours);
+    ternary_codes_on_gpu(ours, Matmul::bf16);
+    // Ternary models with bf16 products (proj_forward: the codes multiplied,
+    // the scales after), dense with ternary attention, MoE per expert and
+    // grouped. The ternary products' forward is exact, so what differs is
+    // what full-precision bf16 rounds: the gradients, the output layer and
+    // full-precision attention. Measured: loss 1.9e-5 to 6.1e-5, gradients
+    // 1.4e-2 to 2.2e-2, as close as "dense bf16" and "moe bf16".
+    compare("ternary bf16", tern, 3e-4, 1e-1, 2e-6, {.matmul = Matmul::bf16});
+    compare("ternary moe bf16", ours, 3e-4, 1e-1, 2e-6, {.matmul = Matmul::bf16});
+    compare("ternary moe bf16, grouped", ours, 3e-4, 1e-1, 2e-6, {.matmul = Matmul::bf16, .grouped = true});
+    compare("ternary moe bf16, fp attention, grouped", fpa, 3e-4, 1e-1, 2e-6,
+            {.matmul = Matmul::bf16, .grouped = true});
     Config nope = dense;
     nope.nope_every = 2;
     compare("dense, half NoPE", nope, 1e-7, 1e-5, 2e-6);
@@ -1481,10 +1550,13 @@ int main() {
     decode("ternary moe", ours, 1e-3);
     decode("moe bf16", moe, 3e-2, Matmul::bf16);
     decode("moe top-1 bf16", moe1, 1e-2, Matmul::bf16);  // measured 2.9e-3
+    decode("ternary moe bf16", ours, 1e-2, Matmul::bf16);  // measured 1.9e-3
     eval_on_gpu();
 
     learns_pattern(false);
     learns_pattern(true);
+    learns_pattern(false, Matmul::bf16, false, false);
+    learns_pattern(true, Matmul::bf16, false, false);
     learns_pattern(false, Matmul::bf16);
     learns_pattern(true, Matmul::bf16);
     learns_pattern(false, Matmul::tf32, true);

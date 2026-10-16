@@ -84,7 +84,14 @@ Math problem-solving accuracy is the first evaluation focus.
   same model op for op, fp32 with cuBLAS. `train --gpu` stores the
   products' inputs in bf16 by default (`--matmul bf16`, fp32 master
   weights: 1.45x the tokens/s of `--matmul tf32`, the same loss curve);
-  ternary models default to TF32, which bf16 does not take yet. Fused
+  ternary models too, since 2026-10-16 (owner's decision): they multiply
+  their codes (-1/0/+1 weights, int8 activations: exact in bf16, with
+  exact fp32 sums) and apply the scales after the sum, so the forward
+  products are exact and only the gradients are rounded, as in bf16
+  models (`proj_forward`): 2486 against 3600 ms a step on the ternary
+  night model, the same losses over 200 steps from scratch and 100 from
+  the RunPod model turned ternary (`review/baselines/curve-tern-*`); not
+  yet compared over a whole night. Fused
   attention kernels are the default (`--no-fused-attn` for cuBLAS
   products): on the tensor cores with TF32/bf16
   (`src/attention_tc.cuh`, tested on the GPU only; 1.18x the cuBLAS
@@ -157,6 +164,28 @@ Math problem-solving accuracy is the first evaluation focus.
   at most two cuts per chain, no wording used twice in a story; the tests
   check each rule. `data/targeted-math` was rebuilt with it (README, "The
   training data").
+- `src/mathgen.h` (`cxxgpt gen-math --topic equations`, 2026-10-16): word
+  problems with one unknown (number puzzles, ages, two kinds of tickets,
+  animals or packs, consecutive numbers, rectangles, three-way shares),
+  built from a chosen whole-number answer, solved in the text as an
+  equation with calculator notes. Every problem is solved again before it
+  is written by `equation_check`, which shares no code with the generator
+  (trying every whole number the story allows; exactly one must fit), and
+  every note by calc.h; tests show the checker rejects broken problems.
+  84 sentence patterns, 28 held out for test. `--exclude
+  data/licensed-10b/gsm8k-test.txt,data/licensed-10b/gsm8k-dev.txt` is
+  needed for any training use: without it a large file repeats a few GSM8K
+  test questions almost word for word. With it, 0 of GSM8K test and dev
+  share a 13-word run, or their numbers and answer, with 300k problems.
+  `src/mathgen_fractions.h` (`--topic fractions`): parts of an amount
+  (fractions and percentages, 1-3 steps), price changes in exact cents,
+  what percent, ratio splits, a ratio and one count, proportions, unit
+  conversions; answers whole or with at most two decimals;
+  `fraction_check` works each story out again its own way. 120 patterns,
+  40 held out. Both topics share `math_detail` (the story, distractor and
+  text) and `math_check` (notes and the stated answer). Not in the
+  training mix (the owner decides). Next topics, in order: number theory,
+  counting (the answer format of probability needs a decision first).
 - GSM8K dev set: `scripts/get_data.py` holds out 500 GSM8K train problems
   (the 500 questions with the smallest sha256); `DEV=1 scripts/night.sh`
   validates on it instead of the test set. `cxxgpt leak-check` finds

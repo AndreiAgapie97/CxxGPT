@@ -456,6 +456,8 @@ mostly the training distribution.
 - A kernel doing that product with int32 accumulate gives the same numbers
   much faster. Our efficiency lever would then mean more tokens per night, not
   only cheaper inference.
+- A first step is done (2026-10-16): the same exact product on the bf16
+  tensor cores, 31% faster ternary steps ("Speed", item 8).
 
 **Where.** `src/gpu.cu`; review item E8. It needs an exactness test against
 the current fp32 path.
@@ -911,8 +913,8 @@ What this says:
    In training (night-1 model, 8 x 16): 24,200 tokens/s against 17,600
    (1.37x), the step 2.7 s against 3.7 s, GPU memory 7.0 GB against 6.7.
    Converting at each product instead of writing bf16 at the source gave
-   only 20,800 and 7.4 GB. Not for ternary models yet (their quantized
-   values are not exact in bf16; int8 tensor cores are the way there).
+   only 20,800 and 7.4 GB. Ternary models since 2026-10-16, multiplying
+   their codes (item 8).
 3. **Muon in bf16** (16% of the step after item 2). **Done** with
    `--matmul bf16` (2026-10-14): Newton�Schulz's products take bf16 copies
    of X and A, with fp32 sums, X kept in fp32, and cuBLAS adding the b A and
@@ -1013,15 +1015,23 @@ What this says:
    layer, so a busy CPU slows it more (one run had two slow log intervals,
    3928 and 4145 ms, while the CPU was in use).
 
-   The next big step for ternary nights: bf16 products for ternary models
-   (now refused, as code x scale is not exact in bf16). Multiplying the
-   codes themselves (int8 activations, -1/0/+1 weights: exact in bf16,
-   sums exact in fp32) and applying the scales after the sum would make
-   the forward products exact and as fast as bf16 ones (ternary 3627 ms a
-   step against bf16's 2341); the backward products would round their
-   gradients to bf16 as bf16 models do. A numerics change: it needs the
-   owner's yes and a curve check. int8 tensor cores (twice bf16's rate)
-   are the step after.
+   bf16 products for ternary models: **done** (2026-10-16, the default
+   since, owner's decision). Code x scale is not exact in bf16, but the
+   codes are (int8 activations, -1/0/+1 weights), and so are their sums
+   in fp32: the products multiply the codes and apply the scales after
+   the sum (the grouped kernel's epilogue: Problem::row_scale and
+   group_scale; after cuBLAS, a row-scaling pass or alpha = gamma on the
+   GPU). The forward products are exact (test_gpu: 580,416 results bit
+   for bit on the three kernels); the backward ones round their
+   gradients to bf16 as bf16 models do. The fp32 ternary copy of the
+   weights is not kept (1 GB at 267 M parameters), which is what fits
+   the model in 8 GB. Ternary night model: 3600 -> 2486 ms a step (-31%,
+   18,200 -> 26,400 tokens/s), 7.7 -> 7.4 GB. Curves against TF32 (same
+   data and seed, review/baselines/curve-tern-*): from scratch, step 200
+   val 3.4576 against 3.4680; from the RunPod model turned ternary,
+   step 100 val 1.8478 against 1.8470, losses within 0.001 of each other
+   at every logged step. Not yet compared over a whole night. int8 tensor
+   cores (twice bf16's rate) are the step after.
 
    Next, by measured size: the bf16 copies of products' inputs (138 ms,
    1249 calls a step), RoPE (64 ms, into attention's loads), the fused
