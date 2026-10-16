@@ -111,7 +111,9 @@ inline Problem chain(Rng& rng, int d, bool plan) {
             if (op == '+') r = a + b;
             else if (op == '-') r = a - b;
             else r = a * b;
-            if (r < 0 || r > 99 || (op == '*' && b < 2)) continue;
+            // No variable is 0: "u=n-n" or "f=t-2" with t=2 would make every
+            // later step "0+0" or "0*8", and the answer 0 whatever the numbers.
+            if (r < 1 || r > 99 || (op == '*' && b < 2)) continue;
             const std::string bs = b_is_var ? name(k) : std::to_string(b);
             val.push_back(r);
             defs.push_back(name(i) + "=" + name(j) + op + bs);
@@ -145,7 +147,10 @@ inline Problem chain(Rng& rng, int d, bool plan) {
 
 inline Problem add(Rng& rng, int d) {
     const int digits = d + 1;
-    const int64_t a = rand_digits(rng, digits), b = rand_digits(rng, rand_in(rng, std::max(1, digits - 1), digits));
+    // b has digits - 1 or digits digits; a one-digit b is 1..9, never "88+0".
+    const int64_t a = rand_digits(rng, digits);
+    const int b_digits = rand_in(rng, std::max(1, digits - 1), digits);
+    const int64_t b = b_digits == 1 ? rand_in(rng, 1, 9) : rand_digits(rng, b_digits);
     std::vector<std::string> cols;
     int64_t x = a, y = b;
     int carry = 0;
@@ -221,7 +226,7 @@ inline Problem expr(Rng& rng, int d, bool rewrite) {
         char op = "+-*"[rng.below(3)];
         const int64_t a = nodes[l].value, b = nodes[r].value;
         if (op == '*' && a * b > 999) op = '+';
-        if (op == '-' && a < b) op = '+';
+        if (op == '-' && a <= b) op = '+';  // never negative, and never a-a = 0
         const int64_t v = op == '+' ? a + b : op == '-' ? a - b : a * b;
         nodes.push_back({op, v, l, r});
         return int(nodes.size()) - 1;
@@ -259,7 +264,7 @@ inline Problem expr(Rng& rng, int d, bool rewrite) {
 inline Problem eq(Rng& rng, int d) {
     int max_b = 9;
     for (int i = 1; i < d; ++i) max_b = max_b * 10 + 9;
-    const int a = rand_in(rng, 2, 9), x = rand_in(rng, 0, std::min(99, 9 * d + 3));
+    const int a = rand_in(rng, 2, 9), x = rand_in(rng, 1, std::min(99, 9 * d + 3));  // x = 0 is trivial
     const int b = rand_in(rng, 1, std::min(max_b, 999));
     const bool minus = rng.below(2) && a * x >= b;
     const int c = minus ? a * x - b : a * x + b;

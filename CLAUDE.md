@@ -35,13 +35,21 @@ Math problem-solving accuracy is the first evaluation focus.
   best MoE run on the curriculum (71.9%, against 64.2% all full precision
   and 62.4% all ternary), but chain accuracy "clicks" at a different step
   in each run, so one run per model does not settle it: repeat with
-  several seeds (fast on the laptop GPU) before the ternary nights. Until
+  several seeds (fast on the laptop GPU) before the ternary nights. Those
+  seed repeats need new baselines too: since 2026-10-16 the curriculum has
+  no degenerate zeros (below), so runs before and after are not
+  comparable. Until
   then `night.sh` `TERNARY=1` keeps attention full precision (README,
   "Ternary FFN, full-precision attention").
 - `src/tokenizer.h`: byte-level BPE; digits are never merged.
 - `src/reasoning.h`: a synthetic reasoning curriculum with held-out harder
   test levels (`gen-reasoning --chain-plan`: chain solutions look the
-  variables up first, which more than doubles chain accuracy). `cxxgpt
+  variables up first, which more than doubles chain accuracy). Since
+  2026-10-16 (an audit) no chain variable is 0 (about 10% of chain answers
+  were 0, through "u=n-n" or "f=t-2" with t=2, and then "0*8"), no add
+  operand is 0, eq's x is at least 1, and expr never computes a-a: every
+  curriculum result before that date (the tables in README and
+  docs/research.md) is not comparable with runs after it. `cxxgpt
   prep-qa` turns GSM8K-style JSON Lines into the same format.
   `gen-reasoning --mistakes P` plants one wrong statement and its
   correction in a share P of the training solutions; the wrong statement

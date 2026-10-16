@@ -643,6 +643,12 @@ These runs do the same after 1700 of 2500 steps: MoE with Muon, the last
 
 ### Ternary FFN, full-precision attention
 
+(Measured on the curriculum before 2026-10-16. Since then `gen-reasoning`
+writes no degenerate zeros: no chain variable is 0, no add operand is 0,
+eq's x is at least 1, and expr never computes a-a. About 10% of chain
+answers used to be 0. Runs made after that date are not comparable with
+these numbers; repeat the baselines first.)
+
 `train --ternary --fp-attn` makes only the FFN ternary (the experts, most
 of the weights); the attention projections stay in full precision. Same
 curriculum as the chain section (lookups first), Muon, 2500 steps, one
