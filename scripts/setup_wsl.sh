@@ -52,5 +52,5 @@ else
 fi
 
 echo
-echo "All set. Data:     scripts/prepare_clean.sh (README, \"The training data\")"
+echo "All set. Data:     the RunPod data (README, \"The training data\"; docs/PREPARED_DATA.md)"
 echo "         Training: ./cxxgpt-gpu train --gpu --help"

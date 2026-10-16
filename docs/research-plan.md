@@ -261,8 +261,8 @@ Next for #34, in order:
      GSM8K dev 9 and 8. The seeds disagree (word-dev unfinished 19/0/22
      without, 67/3/0 with), and a model this small rarely finishes a
      GSM8K answer at all, loop or not.
-   So it stays off for clean1. The next test needs a model that answers:
-   step 3's continuation from a clean1 checkpoint, with and without the
+   So it stays off for now. The next test needs a model that answers:
+   step 3's continuation from the RunPod model, with and without the
    term, rather than more small models.
 3. If it helps: a short continuation from a night checkpoint, with and
    without the term.

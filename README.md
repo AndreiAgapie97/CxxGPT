@@ -286,77 +286,83 @@ this command does not change the night data mix.
 ### Real data and GPU training
 
 ```sh
-scripts/prepare_clean.sh             # the training mix (below), night.sh's default
-scripts/prepare_data.sh              # GSM8K: download, the dev split, token files
 scripts/probe.sh                     # GPU speed and memory per model size, and the
                                      #   night.sh command for each
 TOKS=... MODEL=... scripts/night.sh  # one night of training, checked on GSM8K
-scripts/report.sh clean1             # the night on one screen
-scripts/ledger.sh clean1 "note"      # its row in docs/runs.md, the ledger of runs
+scripts/report.sh rp1                # the night on one screen
+scripts/ledger.sh rp1 "note"         # its row in docs/runs.md, the ledger of runs
 ```
 
-`prepare_data.sh` fetches GSM8K (`scripts/get_data.py`, standard library
-only) and encodes it with our tokenizer, `data/tok.bpe`; `prepare_clean.sh`
-runs it when GSM8K is missing. [docs/LAPTOP.md](docs/LAPTOP.md) has the
-whole setup, from a fresh Windows laptop to a night of training.
+The data comes from the RunPod run (below and
+[docs/PREPARED_DATA.md](docs/PREPARED_DATA.md)), with its tokenizer.
+[docs/LAPTOP.md](docs/LAPTOP.md) has the whole setup, from a fresh Windows
+laptop to a night of training, and how a night continues the RunPod model.
 
 Settings are chosen on a dev set, not on the GSM8K test set: `get_data.py`
 holds out 500 GSM8K train problems (`data/gsm8k/dev.jsonl`, the 500 with the
 smallest sha256 of their question) and removes them from training.
 `DEV=1 scripts/night.sh` validates on them.
 
-**The training data (since 2026-10-15, issue #46).** A model trains from
-random weights on openly licensed text and exact math.
-`scripts/prepare_clean.sh` builds the mix, from the Common Pile downloads
-in `data/public-20261015/` (never changed) with `scripts/prep_public.py`;
-when there is no `data/tok.bpe` yet, it learns the tokenizer from the mix's
-training text first:
+**The training data (since 2026-10-16): the RunPod model's.** The RunPod
+run (docs/RUNPOD_HANDOFF_2026-10-16.md) trained a 267M-parameter MoE (97.6M
+active per token) from random weights, and the laptop continues it on the
+same data, with the same tokenizer. A copy of the data is on the owner's
+Google Drive (docs/PREPARED_DATA.md); on the laptop it lives in two
+folders:
+- `data/licensed-10b/`: 10.0B tokens of openly licensed text from the
+  Common Pile (`scripts/build_licensed_corpus.py`, pinned revisions in
+  `configs/licensed-10b-sources.json`): arXiv papers 5.87B, PubMed papers
+  3.68B, DOAB books 435M, LibreTexts/OpenStax textbooks 15M. Each shard has
+  train, val and test files, and every document's licence and attribution
+  is kept. Also the tokenizer, `tok.bpe` (16,384 tokens, learned from a
+  sample of the training split; sha256 `6e811ced...`), and GSM8K's dev and
+  test sets encoded with it (`gsm8k-dev`, `gsm8k-test`).
+- `data/targeted-math/`: 963,089 exact `gen-word` problems (1M generated,
+  minus those sharing a 13-word run with a GSM8K dev or test question or a
+  generated dev question; `operations/prepare_targeted_math.py`), and
+  GSM8K train without the 500 dev problems and 7 near-copies (6,966
+  problems).
 
-| File | What | Tokens | In the mix |
+`night.sh` trains on the run's last mix unless `MIX=` names others:
+
+| Files | What | Tokens | In the mix |
 |---|---|---|---|
-| `textbooks-train` | LibreTexts and Pressbooks open textbooks | 238M | x2 |
-| `wiki-train` | Wikipedia, Wikibooks, Wikisource, Wikinews articles (one shard of 35) | 338M | x1 |
-| `doab-part` | academic books (DOAB), cut from 2 of 5 shards | 901M | x1 |
-| `arxiv-part` | openly licensed arXiv papers, cut from 1 of 8 shards | 405M | x1 |
-| `word-train` | 1M exact word problems (`gen-word`, no calculator notes) | 189M | x1 |
-| `gsm8k-train` | 6,966 human-written GSM8K train problems (7 near-copies of a test or dev question dropped) | 1.2M | x8 |
+| `targeted-math/word-train` | exact word problems | 193M | x4 |
+| `targeted-math/gsm8k-train` | human-written GSM8K train problems | 1.2M | x64 |
+| 12 `licensed-10b/blocks/*/train-*` shards | textbooks, DOAB books (all of them), arXiv papers (3 of 64 files) | 750M | x1 |
 
-That is 2.32B tokens in the mix, about 3.7 nights. Held out of it, for a
-general-language check: every 100th textbook and wiki document
-(`textbooks-val`, `wiki-val`, 2.4M and 3.4M tokens) and about 8 MB of the
-DOAB and arXiv documents after the cut (`doab-val`, `arxiv-val`). Empty, short and
-wrongly decoded records, non-article wiki pages, Wikiquote and repeated
-texts are dropped; DOAB and arXiv are cut at a document boundary, so that
-academic books and papers are a little over half of the mix instead of
-nearly three quarters. No GSM8K test, GSM8K
-dev or SVAMP dev question shares a 13-word run with any of it. The 500
-held-out GSM8K problems are the dev set (`DEV=1`): the new model has never
-seen them. `night.sh` trains on this mix unless `MIX=` names others.
+That is 1.6B tokens a pass, about 53% worked math. The math share is
+by sampling weight; answers are the only trained tokens of a problem. The
+500 dev problems (`DEV=1`) and the 1,319 test problems are the same ones
+`scripts/get_data.py` holds out (the same files, byte for byte), and the
+model has seen neither. The run chose its checkpoints on the dev set only,
+and scored the test set once at the end.
+
+The RunPod model's checkpoints, in `runs/runpod-2026-10-16/`:
+`fresh-eu.ckpt` (step 46,946, with the optimizer, for continuing it; 17/500
+dev, 51/1319 = 3.9% test, greedy) and `best-math-inference.ckpt` (the best
+on dev, from about step 45,000, weights only: 20/500 dev, 47/1319 test).
+
+`scripts/prepare_clean.sh` still builds the laptop's first mix
+(`data/clean-20261015/`, from the Common Pile downloads, with
+`data/tok.bpe`), which the RunPod model cannot read: other token ids.
 
 **Data provenance (2026-10-16).** What the models learn from, and why: a
 model meant to be published should depend only on openly licensed text,
 human-written problems and our own programs, never on text another
 company's AI model wrote.
 
-What trains the models now (`night.sh`'s default mix, above, and the
-RunPod run's licensed corpus, docs/PREPARED_DATA.md):
-- **Common Pile:** openly licensed text (open textbooks, Wikimedia
-  articles, DOAB books, arXiv papers; the RunPod corpus also has PubMed),
-  from pinned revisions. The RunPod corpus keeps each document's licence
-  and attribution.
+What trains the models now (`night.sh`'s default mix, above):
+- **Common Pile:** openly licensed text (open textbooks, DOAB books, arXiv
+  and PubMed papers), from pinned revisions, CC BY 4.0 or CC0 only, with
+  each document's licence and attribution kept.
 - **`gen-word` word problems:** written by our own C++ program from
   templates and seeds, with exact answers. No AI model writes them.
 - **GSM8K:** human-written problems and solutions, MIT licence.
 
-Which checkpoints are clean to publish:
-- **The RunPod model** (2026-10-16): only the data above, with its own
-  tokenizer learned from the licensed corpus.
-- **`clean1` and runs started from it:** the weights trained only on the
-  data above, from random weights. Its tokenizer, `data/tok.bpe`, was
-  learned before this mix existed. A model for
-  publishing should use a tokenizer learned from this mix, as the RunPod
-  model does (a new tokenizer changes the token ids, so it means training
-  again).
+Which checkpoints are clean to publish: **the RunPod model** (2026-10-16)
+and the nights that continue it. They trained on the data above only, from
+random weights, with a tokenizer learned from the licensed corpus.
 
 This is a record of where the data came from, not legal advice. Before a
 public or commercial release of weights, check the attribution each
@@ -364,11 +370,14 @@ licence asks for (Common Pile's per-document licences, GSM8K's MIT
 notice).
 
 To see whether math training costs the model its general text, score a
-checkpoint on the four held-out files (the model must use `data/tok.bpe`,
-the tokenizer they were made with):
+checkpoint on held-out text it never trained on, the corpus's validation
+files (encoded with `data/licensed-10b/tok.bpe`, so only for models with
+that tokenizer). The RunPod run measured eight batches of the DOAB ones;
+for the textbooks, DOAB and the first arXiv and PubMed shards:
 
 ```
-build/cxxgpt-gpu eval-loss --gpu --all --ckpt runs/clean1.ckpt     --data data/clean-20261015/textbooks-val.tok,data/clean-20261015/wiki-val.tok,data/clean-20261015/doab-val.tok,data/clean-20261015/arxiv-val.tok
+V=data/licensed-10b/blocks
+build/cxxgpt-gpu eval-loss --gpu --all --ckpt runs/rp1.ckpt --data $V/textbooks-libretexts-0000/val-0000.tok,$V/doab-doab-0000/val-0000.tok,$V/arxiv-arxiv-papers-0000/val-0000.tok,$V/pubmed-licensed_pubmed-0000/val-0000.tok
 ```
 
 Lower is better; compare checkpoints of the same model, with the same
@@ -377,7 +386,7 @@ settings.
 **Answers with their questions.** Training windows start at random
 offsets, so a window often begins in the middle of a math problem: the
 answer is trained while its question is out of view. `./cxxgpt qa-context
---data data/clean-20261015/gsm8k-train.tok,data/clean-20261015/word-train.tok`
+--data data/targeted-math/gsm8k-train.tok,data/targeted-math/word-train.tok`
 counts it exactly. `train --sampler qa` (`scripts/night.sh --sampler qa`)
 moves such a window back to the start of its problem, when the whole
 problem fits in a window. At `--seq 512`, the share of answer tokens that

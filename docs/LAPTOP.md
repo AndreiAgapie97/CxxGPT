@@ -88,7 +88,7 @@ stayed the same for half a second (a file read while it is being written
 could be half empty), so on the night model at the next step or the one
 after. From a second Git Bash window:
 ```sh
-echo "lr-scale 0.5" > runs/clean1.ckpt.control
+echo "lr-scale 0.5" > runs/rp1.ckpt.control
 ```
 One command a line:
 - `lr-scale X`: the learning rate is the schedule's times X from the next
@@ -123,18 +123,18 @@ stays flat after the warmup and comes down only over the last
 does not depend on `--steps`, so the run can be made longer at any
 resume. To get a model to score, cool down a copy of its checkpoint:
 ```sh
-cp runs/clean1.ckpt runs/clean1-cool.ckpt
-build/cxxgpt-gpu.exe train --gpu ... --resume --out runs/clean1-cool.ckpt \
+cp runs/rp1.ckpt runs/rp1-cool.ckpt
+build/cxxgpt-gpu.exe train --gpu ... --resume --out runs/rp1-cool.ckpt \
     --schedule wsd --steps $((STEP + 2000)) --decay-steps 2000
 ```
-where `STEP` is the step `clean1.ckpt` holds and `...` stands for the
+where `STEP` is the step `rp1.ckpt` holds and `...` stands for the
 run's own options, with logs of the copy's own (`--log`, `--load-log`,
 `--reason-report`). The copy starts its cooldown from the run's exact
-state; `clean1.ckpt` is not touched, so the run itself resumes afterwards
+state; `rp1.ckpt` is not touched, so the run itself resumes afterwards
 at the full rate. The laptop's GPU trains one model at a time: run the
 cooldown while the main run is stopped (or on another GPU). This is a
 smooth continuation when the run itself trains with `--schedule wsd`.
-For a run trained with cosine (such as `clean1` so far), give the copy
+For a run trained with cosine (such as the RunPod run), give the copy
 `--lr` equal to the last rate in the run's log (`lr` column), or its
 rate jumps back up to `--lr` at the first step. With 20% of
 the steps as cooldown, WSD matched cosine in a published comparison
@@ -159,16 +159,17 @@ quarter of its steps, half the drop is done.
    The first nights train in full precision (the sizes without
    `-ternary`); the `d768-moe-ternary` row is the speed of the last
    nights, once the model is switched to ternary (below).
-3. **Data:** the training mix, its tokenizer when there is none yet, and
-   GSM8K (README, "The training data"; it needs the Common Pile downloads
-   in `data/public-20261015/` and the GSM8K split in
-   `data/math-pilot-20261015/`). Safe to rerun if interrupted:
-   ```sh
-   scripts/prepare_clean.sh
-   ```
-   It runs `scripts/prepare_data.sh` for GSM8K (4 MB from GitHub). CI
-   checks on every push that GSM8K's files are still where the script
-   expects them (`get_data.py --check`).
+3. **Data and the model:** the RunPod run's data, tokenizer and
+   checkpoints (README, "The training data"), from the owner's Google
+   Drive (docs/PREPARED_DATA.md: about 23 GB unpacked). After unpacking,
+   the clone has `data/licensed-10b/` (the corpus, `tok.bpe`, GSM8K dev
+   and test), `data/targeted-math/` (word problems, GSM8K train) and
+   `runs/runpod-2026-10-16/` (the checkpoints and the run's logs).
+   `night.sh` names any file it cannot find. `scripts/prepare_data.sh`
+   still downloads GSM8K into `data/gsm8k/` (4 MB from GitHub; the same
+   dev and test questions), which `night.sh` no longer needs; CI checks on
+   every push that GSM8K's files are still where `get_data.py` expects
+   them (`get_data.py --check`).
 
 ### The dev set (`DEV=1`)
 
@@ -178,12 +179,13 @@ out as `data/gsm8k/dev.jsonl` (the 500 whose question text has the smallest
 sha256 digest, so every preparation picks the same ones), and drops them
 from the training files.
 
-- `prepare_clean.sh` checks by exact text that no dev question is left in
-  the training files: for each file, how many of the 500 dev questions
-  share a run of 13 words with it (`cxxgpt leak-check`). All zero.
+- The RunPod data uses the same 500 (its `gsm8k-dev.txt` is the same
+  file, byte for byte). Its math files leave out every training problem
+  that shares a run of 13 words with a dev or test question (7 GSM8K
+  problems, 36,911 word problems).
 - `DEV=1 ... scripts/night.sh` then validates and takes its exams on
-  `data/gsm8k/dev.tok` and `dev.txt` instead of the test files. The default
-  stays `DEV=0` (the test set).
+  `data/licensed-10b/gsm8k-dev.tok` and `gsm8k-dev.txt` instead of the
+  test files. The default stays `DEV=0` (the test set).
 
 ### Night 1
 
@@ -192,8 +194,8 @@ TOKS=... BATCH=... ACCUM=... MODEL="..." scripts/night.sh   # the line the probe
 ```
 
 `night.sh` sizes the run so its learning-rate schedule ends when the
-night does (7.5 hours by default), trains on web text, stories and worked
-math, and checks itself on the GSM8K test set, which training never sees
+night does (7.5 hours by default), trains on the data mix (README, "The
+training data"), and checks itself on the GSM8K test set, which training never sees
 (or on the dev set with `DEV=1`, above): validation loss and exact answers
 every 500 steps. The exact-answer exams run on the GPU (16 s for
 250 problems on the night-1 model, against 5 minutes on the CPU, which
@@ -245,15 +247,16 @@ To ask the model a question
 yourself (`--temp 0`: its most likely answer; `--answer`: stop after the
 `#### answer` line):
 ```sh
-./cxxgpt sample --ckpt runs/night1.ckpt --bpe data/tok.bpe --temp 0 --answer \
+./cxxgpt sample --ckpt runs/rp1.ckpt --bpe data/licensed-10b/tok.bpe --temp 0 --answer \
   --prompt $'Q: A pen costs $3. How much do 7 pens cost?\nA: '
 ```
 
 To score a checkpoint on the whole GSM8K test (1319 problems) in a
 minute or two, on the GPU (`--gpu`, with `cxxgpt-gpu`):
 ```sh
-build/cxxgpt-gpu.exe eval-reasoning --gpu --ckpt runs/night1.ckpt --test data/gsm8k/test.txt --bpe data/tok.bpe
-build/cxxgpt-gpu.exe eval-reasoning --gpu --ckpt runs/night1.ckpt --test data/gsm8k/test.txt --bpe data/tok.bpe \
+T=data/licensed-10b
+build/cxxgpt-gpu.exe eval-reasoning --gpu --ckpt runs/rp1.ckpt --test $T/gsm8k-test.txt --bpe $T/tok.bpe
+build/cxxgpt-gpu.exe eval-reasoning --gpu --ckpt runs/rp1.ckpt --test $T/gsm8k-test.txt --bpe $T/tok.bpe \
   --tries 8 --temp 0.7
 ```
 The products are exact fp32 by default, so the scores are the CPU's
@@ -268,36 +271,44 @@ can differ by a problem or two. Another program on the GPU (a training
 run, a second eval) slows it down several times: a greedy run alongside a
 training run took 447 s.
 
-### A model on the training data
+### Continuing the RunPod model
 
-A model starts from random weights on the training data (README, "The
-training data"). Build it once (about 10 minutes; it needs the Common Pile
-downloads in `data/public-20261015/` and the GSM8K split in
-`data/math-pilot-20261015/`):
+The laptop continues the RunPod model (README, "The training data") with
+its optimizer state, on its last data mix (`night.sh`'s default). Its
+checkpoint holds step 46,946, and its learning rate had come down to
+1.2e-4 at the end of its cosine schedule. Copy the checkpoint under the
+new run's name (the original stays as it is), then:
 ```sh
-scripts/prepare_clean.sh
+cp runs/runpod-2026-10-16/fresh-eu.ckpt runs/rp1.ckpt
+RUN=rp1 STEP0=46946 LR=1.2e-4 DEV=1 HOURS=30 TOKS=28000 scripts/night.sh --sampler qa --time-limit 450
 ```
-It prints the leak check (all zero); `night.sh` trains on this mix by
-default. The new model
-trains as one run over several nights: `HOURS=30` plans the learning-rate
-schedule for four nights, `--time-limit 450` stops each night after 7.5
-hours with a checkpoint, and the same command the next evening resumes it
-(`night.sh` resumes `runs/$RUN.ckpt` when it exists), schedule, optimizer
-and data order included. A new run name, no `INIT`, the dev set:
-```sh
-RUN=clean1 DEV=1 HOURS=30 TOKS=25900 scripts/night.sh --sampler qa --time-limit 450
-```
-Its exams mid-run come before the learning rate has come down, so they
-read lower than a one-night run's last exam would at the same step.
+- `STEP0` says where the checkpoint is: the run's steps come after it, at
+  a flat `LR`, with a cooldown over the last fifth (`--schedule wsd`).
+  Without `LR`, the rate would jump to the default 1.5e-3, twelve times
+  where the run left it.
+- `HOURS=30` plans four nights; `--time-limit 450` stops each one after
+  7.5 hours with a checkpoint, and the same command the next evening
+  resumes it, optimizer and data order included.
+- `TOKS` is the speed `scripts/probe.sh` measures for this model (28,000
+  tokens/s for `d768-moe` at the last measurement); `BATCH=8 ACCUM=16`
+  gives the same 65,536 tokens a step as the RunPod run's 16 x 8.
+- `--sampler qa` is the RunPod run's: a window that starts inside a
+  problem starts at its question.
+
+Not yet run on the laptop: the first night's log must start with
+`resumed runs/rp1.ckpt at step 46946`, and its first logged rate must be
+1.2e-4.
 
 ### Following nights
 
 What each night trains on depends on what the last one shows; we decide
-it together each morning. Starting from an earlier run's checkpoint looks
-like this (the model comes from the checkpoint; the learning-rate schedule
-starts over):
+it together each morning. A run that keeps going reruns its own command
+(with a larger `HOURS` to make it longer; with `--schedule wsd`, the rate
+does not depend on it before the cooldown). Starting a new run from an
+earlier one's weights looks like this (the model comes from the
+checkpoint; the optimizer and the learning-rate schedule start over):
 ```sh
-RUN=clean2 INIT=runs/clean1.ckpt MIX="..." TOKS=... BATCH=... ACCUM=... scripts/night.sh
+RUN=rp2 INIT=runs/rp1.ckpt MIX="..." TOKS=... BATCH=... ACCUM=... scripts/night.sh
 ```
 The model trains in full precision first, and the last night or two
 switch it to ternary, which is what our kernels run: `TERNARY=1` with

@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# One night of training on the GPU, on the files scripts/prepare_data.sh made.
+# One night of training on the GPU, on the RunPod model's data (README, "The
+# training data").
 #   TOKS=<tokens per second> scripts/night.sh [extra train args]
 # TOKS is what scripts/probe.sh measured for the chosen MODEL, at the same
 # BATCH, ACCUM and SEQ; the probe prints the whole command for each size
@@ -14,6 +15,12 @@
 #   OPT=--muon (or "" for AdamW everywhere)   LR=1.5e-3
 #   SEQ=512 BATCH=8 ACCUM=16 (tokens per step: SEQ x BATCH x ACCUM)
 #   HOURS=7.5   RUN=night1 (outputs runs/$RUN.*)   DATA=data
+#   STEP0: continue a checkpoint from elsewhere with its optimizer, such as
+#         the RunPod model: copy it to runs/$RUN.ckpt first, and set STEP0 to
+#         the step it holds (46946 for the RunPod model). The night's steps
+#         come after that one, at a flat LR with a cooldown over the night's
+#         last fifth (--schedule wsd). Give LR the rate the run ended at
+#         (1.2e-4 for the RunPod model): the default is twelve times that.
 #   INIT: a checkpoint to start from (for example runs/night1.ckpt), with a
 #         fresh optimizer and schedule; its model replaces MODEL.
 #   TERNARY=1 (with INIT): turn the checkpoint's FFN weights ternary from
@@ -22,9 +29,12 @@
 #         TERNARY=all turns attention ternary too. Full-precision nights
 #         first, ternary ones at the end.
 #   MIX: the training files, comma-separated, "*N" repeats one N times;
-#        by default the training mix scripts/prepare_clean.sh writes into
-#        $CLEAN (data/clean-20261015): textbooks x2, wiki, DOAB and arXiv
-#        books and papers, word problems, GSM8K train x8.
+#        by default the RunPod model's last mix, about 53% worked math:
+#        word problems x4 and GSM8K train x64 from $MATH
+#        (data/targeted-math), and 12 shards of textbooks, DOAB books and
+#        arXiv papers from $CORPUS (data/licensed-10b).
+#   The tokenizer is $CORPUS/tok.bpe, the RunPod model's; the GSM8K files
+#   for validation and exams are the ones encoded with it, in $CORPUS.
 #   DEV=1: use the held-out GSM8K dev files for both validation and exams.
 # Validation defaults to the GSM8K test set, which training never sees: the loss
 # on its worked solutions every 500 steps, and exact answers every 500 too
@@ -32,6 +42,8 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 DATA=${DATA:-data}
+CORPUS=${CORPUS:-$DATA/licensed-10b}
+MATH=${MATH:-$DATA/targeted-math}
 RUN=${RUN:-night1}
 case "${DEV:-0}" in
   0) validation="test" ;;
@@ -57,17 +69,33 @@ case "$(uname -s)" in
 esac
 GPU=${GPU---gpu}
 if [ -z "${MIX:-}" ]; then
-  CLEAN=${CLEAN:-$DATA/clean-20261015}
-  MIX="$CLEAN/textbooks-train.tok*2,$CLEAN/wiki-train.tok,$CLEAN/doab-part.tok,$CLEAN/arxiv-part.tok,$CLEAN/word-train.tok,$CLEAN/gsm8k-train.tok*8"
+  MIX="$MATH/word-train.tok*4,$MATH/gsm8k-train.tok*64"
+  for shard in textbooks-libretexts-0000/train-0000 doab-doab-0000/train-0000 doab-doab-0000/train-0001 \
+    doab-doab-0001/train-0000 doab-doab-0001/train-0001 doab-doab-0002/train-0000 doab-doab-0002/train-0001 \
+    doab-doab-0003/train-0000 doab-doab-0004/train-0000 arxiv-arxiv-papers-0000/train-0000 \
+    arxiv-arxiv-papers-0000/train-0001 arxiv-arxiv-papers-0000/train-0002; do
+    MIX+=",$CORPUS/blocks/$shard.tok"
+  done
   IFS=, read -ra files <<< "$MIX"
   for f in "${files[@]}"; do
-    [ -f "${f%%\**}" ] || { echo "no ${f%%\**}: run scripts/prepare_clean.sh first"; exit 1; }
+    [ -f "${f%%\**}" ] || { echo "no ${f%%\**}: get the RunPod data first (docs/LAPTOP.md)"; exit 1; }
   done
 fi
+for f in "$CORPUS/tok.bpe" "$CORPUS/gsm8k-$validation.tok" "$CORPUS/gsm8k-$validation.txt"; do
+  [ -f "$f" ] || { echo "no $f: get the RunPod data first (docs/LAPTOP.md)"; exit 1; }
+done
 
 per_step=$((SEQ * BATCH * ACCUM))
 # 90% of the night: evaluations and checkpoints take the rest.
 steps=$(awk -v t="$TOKS" -v h="$HOURS" -v s="$per_step" 'BEGIN { printf "%d", 0.9 * t * h * 3600 / s }')
+schedule=()
+if [ -n "${STEP0:-}" ]; then
+  [[ "$STEP0" =~ ^[0-9]+$ ]] || { echo "STEP0 must be the step the checkpoint holds"; exit 1; }
+  [ -f "runs/$RUN.ckpt" ] || { echo "STEP0: copy the checkpoint to runs/$RUN.ckpt first"; exit 1; }
+  [ -z "${INIT:-}" ] || { echo "STEP0 continues runs/$RUN.ckpt, INIT starts afresh: choose one"; exit 1; }
+  schedule=(--schedule wsd --decay-steps $((steps / 5)))
+  steps=$((STEP0 + steps))
+fi
 minutes=$(awk -v h="$HOURS" 'BEGIN { printf "%d", h * 60 + 0.5 }')
 # Validation reads --eval-batches batches of BATCH sequences, drawn in a fixed
 # order: 160 sequences whatever BATCH is, so every night checks the same ones.
@@ -113,8 +141,9 @@ if [ -x "$smi" ]; then
 fi
 # tee -i: Ctrl-C reaches only the trainer, which saves before it stops.
 # shellcheck disable=SC2086
-"$CX" train $GPU --data "$MIX" --val "$DATA/gsm8k/$validation.tok" --bpe "$DATA/tok.bpe" \
-  --reason-test "$DATA/gsm8k/$validation.txt" --reason-every 500 --reason-limit 250 \
+"$CX" train $GPU --data "$MIX" --val "$CORPUS/gsm8k-$validation.tok" --bpe "$CORPUS/tok.bpe" \
+  --reason-test "$CORPUS/gsm8k-$validation.txt" --reason-every 500 --reason-limit 250 \
   "${model[@]}" $OPT --seq "$SEQ" --batch "$BATCH" --accum "$ACCUM" --steps "$steps" --warmup 500 --lr "$LR" \
+  "${schedule[@]}" \
   --eval-every 500 --eval-batches "$eval_batches" --save-every 1000 --log-every 50 --time-limit "$minutes" \
   --seed "$seed" --out "runs/$RUN.ckpt" --log "runs/$RUN.csv" --load-log "runs/$RUN.load.csv" "${resume[@]}" "$@" 2>&1 | tee -ia "runs/$RUN.log"

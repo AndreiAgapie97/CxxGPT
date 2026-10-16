@@ -823,9 +823,13 @@ printf 'CLI: benchmark emits alternating raw trials and rejects zero repeats\n'
 # Capture night.sh arguments without reading real data or touching night1 files.
 printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$@" > "$MOCK_ARGS"\n' > "$TEST_DIR/night-mock"
 chmod +x "$TEST_DIR/night-mock"
+# night.sh stops early without the tokenizer and the GSM8K files for its exams.
+corpus="$TEST_DIR/night-data/licensed-10b"
+mkdir -p "$corpus"
+for f in tok.bpe gsm8k-dev.tok gsm8k-dev.txt gsm8k-test.tok gsm8k-test.txt; do : > "$corpus/$f"; done
 for night in 1 2; do
     run="review${night}-${BASHPID}"
-    MOCK_ARGS="$TEST_DIR/night.args" RUN="$run" TOKS=100 MIX=unused INIT="$TEST_DIR/model.ckpt" \
+    MOCK_ARGS="$TEST_DIR/night.args" RUN="$run" TOKS=100 MIX=unused INIT="$TEST_DIR/model.ckpt" CORPUS="$corpus" \
         CX="$TEST_DIR/night-mock" bash scripts/night.sh > "$TEST_DIR/night-script.log"
     [[ $(awk '$0=="--seed" {getline; print}' "$TEST_DIR/night.args") == "$night" ]]
     rm "runs/$run.log"
@@ -948,31 +952,75 @@ if "$CXXGPT" leak-check --questions "$TEST_DIR/leak-utf8.txt" > /dev/null 2>&1; 
 fi
 for dev in 0 1; do
     run="dev-check-${BASHPID}"
-    MOCK_ARGS="$TEST_DIR/night.args" DEV="$dev" RUN="$run" TOKS=100 MIX=unused \
+    MOCK_ARGS="$TEST_DIR/night.args" DEV="$dev" RUN="$run" TOKS=100 MIX=unused CORPUS="$corpus" \
         CX="$TEST_DIR/night-mock" bash scripts/night.sh > "$TEST_DIR/night-script.log"
     split=test
     [[ "$dev" == 0 ]] || split=dev
-    [[ $(awk '$0=="--val" {getline; print}' "$TEST_DIR/night.args") == "data/gsm8k/$split.tok" ]]
-    [[ $(awk '$0=="--reason-test" {getline; print}' "$TEST_DIR/night.args") == "data/gsm8k/$split.txt" ]]
+    [[ $(awk '$0=="--val" {getline; print}' "$TEST_DIR/night.args") == "$corpus/gsm8k-$split.tok" ]]
+    [[ $(awk '$0=="--reason-test" {getline; print}' "$TEST_DIR/night.args") == "$corpus/gsm8k-$split.txt" ]]
+    [[ $(awk '$0=="--bpe" {getline; print}' "$TEST_DIR/night.args") == "$corpus/tok.bpe" ]]
     rm "runs/$run.log"
 done
 printf 'CLI: leak-check scans questions across lines; DEV selects both validation files\n'
 
-# Without MIX, night.sh trains on the audited mix, and stops before training
-# when one of its files is missing.
-clean="$TEST_DIR/night-data/clean-20261015"
-mkdir -p "$clean"
-for f in textbooks-train wiki-train doab-part arxiv-part word-train; do : > "$clean/$f.tok"; done
+# Without MIX, night.sh trains on the RunPod model's last mix, and stops
+# before training when one of its files is missing.
+math="$TEST_DIR/night-data/targeted-math"
+mkdir -p "$math"
+: > "$math/word-train.tok"
+shards=(textbooks-libretexts-0000/train-0000 doab-doab-0000/train-0000 doab-doab-0000/train-0001
+    doab-doab-0001/train-0000 doab-doab-0001/train-0001 doab-doab-0002/train-0000 doab-doab-0002/train-0001
+    doab-doab-0003/train-0000 doab-doab-0004/train-0000 arxiv-arxiv-papers-0000/train-0000
+    arxiv-arxiv-papers-0000/train-0001 arxiv-arxiv-papers-0000/train-0002)
+expected="$math/word-train.tok*4,$math/gsm8k-train.tok*64"
+for s in "${shards[@]}"; do
+    mkdir -p "$corpus/blocks/${s%/*}"
+    : > "$corpus/blocks/$s.tok"
+    expected+=",$corpus/blocks/$s.tok"
+done
 run="mix-check-${BASHPID}"
 status=0
 MOCK_ARGS="$TEST_DIR/night.args" DATA="$TEST_DIR/night-data" RUN="$run" TOKS=100 \
     CX="$TEST_DIR/night-mock" bash scripts/night.sh > "$TEST_DIR/night-mix.log" 2>&1 || status=$?
 [[ "$status" == 1 ]]
-grep -q "no $clean/gsm8k-train.tok: run scripts/prepare_clean.sh first" "$TEST_DIR/night-mix.log"
-: > "$clean/gsm8k-train.tok"
+grep -q "no $math/gsm8k-train.tok: get the RunPod data first" "$TEST_DIR/night-mix.log"
+: > "$math/gsm8k-train.tok"
 MOCK_ARGS="$TEST_DIR/night.args" DATA="$TEST_DIR/night-data" RUN="$run" TOKS=100 \
     CX="$TEST_DIR/night-mock" bash scripts/night.sh > "$TEST_DIR/night-mix.log"
-[[ $(awk '$0=="--data" {getline; print}' "$TEST_DIR/night.args") == \
-    "$clean/textbooks-train.tok*2,$clean/wiki-train.tok,$clean/doab-part.tok,$clean/arxiv-part.tok,$clean/word-train.tok,$clean/gsm8k-train.tok*8" ]]
+[[ $(awk '$0=="--data" {getline; print}' "$TEST_DIR/night.args") == "$expected" ]]
 rm "runs/$run.log"
-printf 'CLI: night.sh defaults to the audited mix and names a missing file\n'
+# Without the tokenizer it stops too.
+mv "$corpus/tok.bpe" "$corpus/tok.bpe.away"
+status=0
+MOCK_ARGS="$TEST_DIR/night.args" DATA="$TEST_DIR/night-data" RUN="$run" TOKS=100 \
+    CX="$TEST_DIR/night-mock" bash scripts/night.sh > "$TEST_DIR/night-mix.log" 2>&1 || status=$?
+[[ "$status" == 1 ]]
+grep -q "no $corpus/tok.bpe: get the RunPod data first" "$TEST_DIR/night-mix.log"
+mv "$corpus/tok.bpe.away" "$corpus/tok.bpe"
+printf 'CLI: night.sh defaults to the RunPod mix and names a missing file\n'
+
+# STEP0 continues a copied checkpoint: the night's steps come after its step,
+# on the wsd schedule with a cooldown over the night's last fifth. 100 tokens/s
+# for 7.5 hours at 65536 tokens a step is 37 steps (90% of the night).
+run="step0-check-${BASHPID}"
+status=0
+MOCK_ARGS="$TEST_DIR/night.args" DATA="$TEST_DIR/night-data" RUN="$run" TOKS=100 STEP0=46946 \
+    CX="$TEST_DIR/night-mock" bash scripts/night.sh > "$TEST_DIR/night-step0.log" 2>&1 || status=$?
+[[ "$status" == 1 ]]
+grep -q "STEP0: copy the checkpoint to runs/$run.ckpt first" "$TEST_DIR/night-step0.log"
+: > "runs/$run.ckpt"
+MOCK_ARGS="$TEST_DIR/night.args" DATA="$TEST_DIR/night-data" RUN="$run" TOKS=100 STEP0=46946 \
+    CX="$TEST_DIR/night-mock" bash scripts/night.sh > "$TEST_DIR/night-step0.log"
+[[ $(awk '$0=="--steps" {getline; print}' "$TEST_DIR/night.args") == 46983 ]]
+[[ $(awk '$0=="--schedule" {getline; print}' "$TEST_DIR/night.args") == wsd ]]
+[[ $(awk '$0=="--decay-steps" {getline; print}' "$TEST_DIR/night.args") == 7 ]]
+grep -qx -- --resume "$TEST_DIR/night.args"
+for bad in "STEP0=12x" "STEP0=5 INIT=$TEST_DIR/model.ckpt"; do
+    status=0
+    # shellcheck disable=SC2086
+    env MOCK_ARGS="$TEST_DIR/night.args" DATA="$TEST_DIR/night-data" RUN="$run" TOKS=100 $bad \
+        CX="$TEST_DIR/night-mock" bash scripts/night.sh > "$TEST_DIR/night-step0.log" 2>&1 || status=$?
+    [[ "$status" == 1 ]]
+done
+rm "runs/$run.ckpt" "runs/$run.log"
+printf 'CLI: night.sh STEP0 continues a copied checkpoint after its step\n'

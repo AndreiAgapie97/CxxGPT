@@ -179,18 +179,24 @@ Math problem-solving accuracy is the first evaluation focus.
   `cxxgpt.exe`, `ternary_moe.exe`, `test_engine.exe`), run in CI. The
   vector kernels are picked at run time from what the CPU and Windows
   support. The GPU build on Windows is the next step (the port).
-- The training data (2026-10-15, #46): a model trains from random weights
-  on `scripts/prepare_clean.sh`'s mix (README, "The training data", and
-  "Data provenance"): open textbooks, Wikimedia articles, DOAB books and
-  arXiv papers from the Common Pile (`scripts/prep_public.py`, which reads
-  `data/public-20261015/` and never changes it), 1M `gen-word` problems,
-  and GSM8K train without the 500 dev problems and 7 near-copies of test or
-  dev questions. 2.33B tokens; no test, dev or SVAMP dev question shares a
-  13-word run with it; `night.sh`'s default mix. The tokenizer is
-  `data/tok.bpe`: an existing one is never changed (models are tied to its
-  token ids); without one, `prepare_clean.sh` learns it from the mix's
-  training text. Only openly licensed text, human-written problems and our
-  own generators' output train the models, never text an AI model wrote.
+- The model and its data (2026-10-16; README, "The training data" and
+  "Data provenance"): the laptop continues the RunPod model (267M MoE,
+  97.6M active, from random weights; `runs/runpod-2026-10-16/fresh-eu.ckpt`,
+  step 46,946, 3.9% on GSM8K test) on its last mix, `night.sh`'s default:
+  `data/targeted-math/` (963,089 exact `gen-word` problems x4, GSM8K
+  train without the dev problems and 7 near-copies x64) and 12 shards of
+  textbooks, DOAB books and arXiv papers from `data/licensed-10b/` (10B
+  Common Pile tokens, CC BY/CC0, with each document's attribution), about
+  53% worked math. The tokenizer is `data/licensed-10b/tok.bpe` (16,384,
+  sha256 `6e811ced...`), and the GSM8K dev/test files for it are in the
+  same folder: never pair a checkpoint with another tokenizer (equal
+  vocabulary sizes, so nothing would catch it). `night.sh STEP0=46946
+  LR=1.2e-4` continues the checkpoint (docs/LAPTOP.md, "Continuing the
+  RunPod model"; not yet run on the laptop). `scripts/prepare_clean.sh`
+  still builds the laptop's first mix (`data/clean-20261015/`, with
+  `data/tok.bpe`), which the RunPod model cannot read. Only openly licensed
+  text, human-written problems and our own generators' output train the
+  models, never text an AI model wrote.
 - `src/cxxgpt.cpp`: the CLI (train, sample, eval, data prep, benchmarks).
 - `scripts/get_data.py`: downloads GSM8K into `data/gsm8k/` as JSON Lines
   (for `prep-qa`), with the 500 dev problems held out of train;
@@ -201,9 +207,9 @@ Math problem-solving accuracy is the first evaluation focus.
   Bash): `scripts/build_windows.cmd` (build, kernel, engine and GPU tests;
   `scripts/setup_wsl.sh` is the Linux equivalent, kept and run by CI),
   `scripts/probe.sh` (GPU speed and memory per model size; prints the
-  night.sh command for each), `scripts/prepare_data.sh` (downloads, our
-  tokenizer, token files) and `scripts/night.sh` (one night of training,
-  validated on the GSM8K test set; `INIT=` starts from an earlier night's
+  night.sh command for each) and `scripts/night.sh` (one night of
+  training, validated on the GSM8K test set, or dev with `DEV=1`; `STEP0=`
+  continues a copied checkpoint, `INIT=` starts from an earlier night's
   weights); `scripts/report.sh` sums up a night's log, and
   `scripts/ledger.sh RUN "note"` writes its row in `docs/runs.md`, the
   committed ledger of runs (tokens, hours, energy, scores; `runs/` is
