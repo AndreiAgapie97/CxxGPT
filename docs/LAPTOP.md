@@ -83,8 +83,10 @@ A run never has to start again from random weights to change course.
 
 **Without stopping it: the control file.** Next to the checkpoint,
 `runs/$RUN.ckpt.control` (another name with `--control FILE`). The trainer
-looks at it before every step and acts as soon as it changes. From a
-second Git Bash window:
+looks at it before every step and acts on a change once the file has
+stayed the same for half a second (a file read while it is being written
+could be half empty), so on the night model at the next step or the one
+after. From a second Git Bash window:
 ```sh
 echo "lr-scale 0.5" > runs/clean1.ckpt.control
 ```

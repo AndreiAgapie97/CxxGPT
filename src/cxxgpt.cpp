@@ -1319,7 +1319,7 @@ int cmd_train(Args& a) {
     // are from before (a stop left from the last run would stop this one).
     ControlFile control(control_path);
     double lr_scale = 1;
-    if (const auto c = control.poll()) {
+    if (const auto c = control.read_now()) {
         lr_scale = c->lr_scale;
         std::printf("control file %s is already there: lr-scale %g holds; the other commands in it wait "
                     "for a change of the file\n", control_path.c_str(), lr_scale);
@@ -1379,8 +1379,9 @@ int cmd_train(Args& a) {
     long last_validation_step = -1;
     long saved_step = resume ? first_step : -1;  // what --out holds
     for (; step < steps && !g_stop;) {
-        // The control file, when it has changed: acted on before the step.
-        if (const auto c = control.poll()) {
+        // The control file, when it has changed (and settled): acted on
+        // before the step.
+        if (const auto c = control.poll(now_seconds())) {
             auto note = [&](const std::string& what) {
                 std::printf("control: %s at step %ld\n", what.c_str(), step);
                 if (log) std::fprintf(log, "# control step %ld: %s\n", step, what.c_str());

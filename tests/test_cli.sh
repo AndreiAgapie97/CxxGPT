@@ -722,11 +722,13 @@ done
 printf 'CLI: WSD schedule, branched cooldown and schedule options passed\n'
 
 # The control file: a stop already there at the start is old, so ignored;
-# commands written while training act at the next step.
+# commands written while training act once the file has settled (0.5 s).
+# A flat rate (wsd, no cooldown) makes the halving exact however many
+# steps run meanwhile.
 CONTROL="$TEST_DIR/control.ckpt.control"
 printf 'stop\n' > "$CONTROL"
-"$CXXGPT" train "${COMMON[@]}" --steps 1000000 --log-every 1 --eval-every 0 --save-every 0 \
-    --out "$TEST_DIR/control.ckpt" --log "$TEST_DIR/control.csv" > "$TEST_DIR/control.log" 2>&1 &
+"$CXXGPT" train "${COMMON[@]}" --steps 1000000 --schedule wsd --decay-steps 0 --log-every 1 \
+    --eval-every 0 --save-every 0 --out "$TEST_DIR/control.ckpt" --log "$TEST_DIR/control.csv" > "$TEST_DIR/control.log" 2>&1 &
 trainer=$!
 wait_for_line() {
     for ((poll=0; poll<3000; ++poll)); do
@@ -752,7 +754,7 @@ grep -q '^# control step [0-9]*: lr-scale 0.5' "$TEST_DIR/control.csv"
 grep -q '^# control step [0-9]*: validation ' "$TEST_DIR/control.csv"
 # The rate halves from the lr-scale on: the first row has the full rate, the last half of it.
 awk -F, 'NR > 1 && !/^#/ { if (!first) first = $4 + 0; last = $4 + 0 }
-    END { if (!(first > 0.00099 && last < 0.00051 && last > 0.00049)) exit 1 }' "$TEST_DIR/control.csv"
+    END { if (!(first == 0.001 && last == 0.0005)) exit 1 }' "$TEST_DIR/control.csv"
 # The lr-scale holds after a restart; the stop in the file does not stop it.
 "$CXXGPT" train "${COMMON[@]}" --steps 1 --resume --eval-every 0 --out "$TEST_DIR/control.ckpt" \
     > "$TEST_DIR/control-resume.log"
