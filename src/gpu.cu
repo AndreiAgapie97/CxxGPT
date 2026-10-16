@@ -872,34 +872,43 @@ __global__ void adamw(float* p, const float* g, float* m, float* v, size_t n, fl
     }
 }
 
-// Muon (AdamW::muon_update), for `batch` blocks of r x c at stride r * c:
-// Nesterov momentum into mom, and the update copied to X in the
-// orientation Newton–Schulz works on (transposed when r > c).
-__global__ void muon_momentum(float* X, float* mom, const float* g, int batch, int r, int c, float mu,
+// Muon (AdamW::muon_update), for block-matrix blockIdx.y of r x c (at
+// stride r * c): Nesterov momentum into mom, and the update copied to X in
+// the orientation Newton–Schulz works on (transposed when r > c). Each
+// thread block also sums the squares of the values it wrote, in double,
+// into partial[blockIdx.y * gridDim.x + blockIdx.x], for muon_normalize.
+__global__ void muon_momentum(float* X, double* partial, float* mom, const float* g, int r, int c, float mu,
                               const float* gscale_p) {
+    __shared__ double sh[kWarp + 1];
     const float gscale = *gscale_p;
-    const size_t rc = size_t(r) * c, n = rc * batch;
-    for (size_t i = size_t(blockIdx.x) * blockDim.x + threadIdx.x; i < n; i += size_t(gridDim.x) * blockDim.x) {
+    const size_t rc = size_t(r) * c, base = size_t(blockIdx.y) * rc;
+    double s = 0.0;
+    for (size_t k = size_t(blockIdx.x) * blockDim.x + threadIdx.x; k < rc; k += size_t(gridDim.x) * blockDim.x) {
+        const size_t i = base + k;
         const float gi = g[i] * gscale;
         mom[i] = mu * mom[i] + (1.0f - mu) * gi;
-        const size_t k = i % rc, row = k / c, col = k % c;
-        X[i - k + (r > c ? col * r + row : k)] = (1.0f - mu) * gi + mu * mom[i];
+        const size_t row = k / c, col = k % c;
+        const float x = (1.0f - mu) * gi + mu * mom[i];
+        X[base + (r > c ? col * r + row : k)] = x;
+        s += double(x) * double(x);
     }
+    s = block_reduce(s, sh, false);
+    if (threadIdx.x == 0) partial[size_t(blockIdx.y) * gridDim.x + blockIdx.x] = s;
 }
 
-// newton_schulz's first step: each len-long matrix of X divided by its
-// Frobenius norm (+ 1e-7), also into Xh (bf16) unless null. One thread
-// block per matrix.
-__global__ void frobenius_normalize(float* X, __nv_bfloat16* Xh, size_t len) {
-    __shared__ double sh[kWarp + 1];
-    float* x = X + blockIdx.x * len;
+// newton_schulz's first step: block-matrix blockIdx.y of X (len values)
+// divided by its Frobenius norm (+ 1e-7), the norm from muon_momentum's
+// partial sums (`parts` per matrix, added in order), also into Xh (bf16)
+// unless null.
+__global__ void muon_normalize(float* X, __nv_bfloat16* Xh, const double* partial, int parts, size_t len) {
     double s = 0.0;
-    for (size_t i = threadIdx.x; i < len; i += blockDim.x) s += double(x[i]) * double(x[i]);
-    s = block_reduce(s, sh, false);
+    for (int q = 0; q < parts; ++q) s += partial[size_t(blockIdx.y) * parts + q];
     const float inv = float(1.0 / (sqrt(s) + 1e-7));
-    for (size_t i = threadIdx.x; i < len; i += blockDim.x) {
-        x[i] *= inv;
-        if (Xh) Xh[blockIdx.x * len + i] = __float2bfloat16(x[i]);
+    const size_t base = size_t(blockIdx.y) * len;
+    for (size_t k = size_t(blockIdx.x) * blockDim.x + threadIdx.x; k < len; k += size_t(gridDim.x) * blockDim.x) {
+        const float x = X[base + k] * inv;
+        X[base + k] = x;
+        if (Xh) Xh[base + k] = __float2bfloat16(x);
     }
 }
 
@@ -1162,6 +1171,7 @@ struct GpuTrainer::Impl {
     int muon_ns = 5;
     DevBuf<float> ns_x, ns_y, ns_a, ns_b;
     DevBuf<__nv_bfloat16> ns_xh, ns_ah;  // with bf16 products: X and A as their inputs
+    DevBuf<double> ns_partial;            // the blocks' sums of squares, kPartials per block-matrix
     bool weights_dirty = true;
 
     // Ternary tensors, one segment per (tensor, expert copy).
@@ -2453,6 +2463,7 @@ struct GpuTrainer::Impl {
             const size_t mm = size_t(sh.mrows()) * sh.mrows();
             ns_x.resize(info.size);
             ns_a.resize(mm * sh.batch);
+            ns_partial.resize(size_t(kPartials) * sh.batch);
             if (bf16_ops) {
                 ns_xh.resize(info.size);
                 ns_ah.resize(mm * sh.batch);
@@ -2476,9 +2487,12 @@ struct GpuTrainer::Impl {
         const int grid_a = std::min(blocks_for(size_t(mm) * batch), 4096);
         float *X = ns_x.p, *Y = ns_y.p, *A = ns_a.p, *B = ns_b.p;
         __nv_bfloat16 *Xh = ns_xh.p, *Ah = ns_ah.p;
-        muon_momentum<<<grid, kBlock>>>(X, m.p + info.offset, grads.p + info.offset, batch, sh.r, sh.c, muon_mu,
-                                        grad_scale());
-        frobenius_normalize<<<batch, kBlock>>>(X, bf16_ops ? Xh : nullptr, size_t(mn));
+        // The momentum and the norms' partial sums in one pass, then the
+        // normalization: kPartials thread blocks per block-matrix.
+        muon_momentum<<<dim3(kPartials, batch), kBlock>>>(X, ns_partial.p, m.p + info.offset, grads.p + info.offset,
+                                                          sh.r, sh.c, muon_mu, grad_scale());
+        muon_normalize<<<dim3(kPartials, batch), kBlock>>>(X, bf16_ops ? Xh : nullptr, ns_partial.p, kPartials,
+                                                           size_t(mn));
         LAUNCH_CHECK();
         const float a = 3.4445f, b = -4.7750f, c = 2.0315f;
         for (int s = 0; bf16_ops && s < muon_ns; ++s) {
