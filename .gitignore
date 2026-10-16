@@ -18,4 +18,5 @@ reasoning_traces
 reasoning_curriculum
 memory_probe
 __pycache__/
+runs-licensed-build.log
 build/

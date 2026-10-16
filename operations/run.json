@@ -1,0 +1,12 @@
+{
+  "pod_id": "sg78jrp2eapkyj",
+  "volume_id": "llweco3tg6",
+  "data_center": "EU-RO-1",
+  "region": "Europe (Romania)",
+  "gpu_rate_usd_per_hour": 0.89,
+  "budget_usd": 10,
+  "hard_stop_utc": "2026-10-16T07:45:00+00:00",
+  "training_stop_utc": "2026-10-16T07:10:00+00:00",
+  "backup_start_utc": "2026-10-16T07:10:00+00:00",
+  "created_utc": "2026-10-15T21:28:23.106011+00:00"
+}
