@@ -342,7 +342,11 @@ with an excluded question (`leak-check`'s rule), or has the same numbers and
 the same answer, which also catches the same problem in other words. Of
 300,000 problems, about 520 are drawn again this way; afterwards none of
 GSM8K test or dev shares a 13-word run, or its numbers and answer, with the
-output. Without `--exclude` the command says so.
+output. Without `--exclude` the command says so. The two files above come
+with the RunPod data (docs/PREPARED_DATA.md); from a fresh clone, make the
+same questions from GSM8K's JSON Lines (`scripts/get_data.py`): `./cxxgpt
+prep-qa --in data/gsm8k/test.jsonl --out data/gsm8k/test --task gsm8k`
+writes `data/gsm8k/test.txt`, and the same for `dev.jsonl`.
 
 Other options are `gen-word`'s: `--seed`, `--count`, `--out`, `--split
 train|test` (four of six wordings per sentence for train, the other two for
