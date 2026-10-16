@@ -156,7 +156,7 @@ patterns for inspection and do not establish the cause of a wrong answer.
 | `bpe-train` | trains a BPE tokenizer on a text file |
 | `text2tok` | encodes text into a token file (parallel, streaming; `--doc-sep` splits documents) |
 | `prep-qa` | turns question/answer JSONL (GSM8K and the like) into token files with a loss mask and a test set |
-| `train` | trains or resumes a model (CPU, or GPU with `cxxgpt-gpu --gpu`) |
+| `train` | trains or resumes a model (CPU, or GPU with `cxxgpt-gpu --gpu`); `--val-sources NAME=FILE,...` scores each held-out file on its own at every validation, Q&A files also on their final answers (`--val-log FILE.csv`) |
 | `eval-reasoning` | exact-answer accuracy per task and difficulty; greedy by default, or a vote over several sampled tries (below); `--tools calc-notes` or `calc-plain` also scores the same problems with an exact calculator filling in the model's arithmetic ([docs/calculator.md](docs/calculator.md)); `--gpu` (with `cxxgpt-gpu`) decodes on the GPU, with exact fp32 products by default, so the scores are the CPU's (`--matmul tf32` or `bf16` scores the model as training computes it) |
 | `eval-loss` | a checkpoint's loss on held-out token files, one line per file: by default on the same random windows as `train --val` (`--batch 8 --batches 20`, `night.sh`'s 160 windows; with training's `--batch` and `--eval-batches` it repeats training's last validation number), `--all` on every token once; `--gpu` (with `cxxgpt-gpu`), exact fp32 products by default |
 | `sample` | generates text from a prompt (`--tools` as for `eval-reasoning`); `--gpu` (with `cxxgpt-gpu`) chooses every token on the GPU, the same text as the CPU's |

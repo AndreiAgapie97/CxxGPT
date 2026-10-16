@@ -251,8 +251,11 @@ Math problem-solving accuracy is the first evaluation focus.
   night.sh command for each) and `scripts/night.sh` (one night of
   training, validated on the GSM8K test set, or dev with `DEV=1`; `STEP0=`
   continues a copied checkpoint, `INIT=` starts from an earlier night's
-  weights); `scripts/dashboard.py` shows a run live in the browser (only
-  reads night.sh's files; `tests/test_dashboard.py`), `scripts/report.sh`
+  weights; `VAL_SOURCES`: `train --val-sources`, `src/val_sources.h`, each
+  held-out file's loss at every validation, GSM8K's final answers (after
+  `####`) apart, in `runs/$RUN.val.csv`); `scripts/dashboard.py` shows a
+  run live in the browser (only reads night.sh's files;
+  `tests/test_dashboard.py`), `scripts/report.sh`
   sums up a night's log, and
   `scripts/ledger.sh RUN "note"` writes its row in `docs/runs.md`, the
   committed ledger of runs (tokens, hours, energy, scores; `runs/` is

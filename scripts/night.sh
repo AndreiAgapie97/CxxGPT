@@ -36,6 +36,12 @@
 #   The tokenizer is $CORPUS/tok.bpe, the RunPod model's; the GSM8K files
 #   for validation and exams are the ones encoded with it, in $CORPUS.
 #   DEV=1: use the held-out GSM8K dev files for both validation and exams.
+#   VAL_SOURCES: held-out files scored one by one at every evaluation (train
+#        --val-sources: GSM8K's answers and final answers apart, each part of
+#        the mix on its own; runs/$RUN.val.csv, the dashboard's chart). By
+#        default the GSM8K validation file, the word problems' dev split and
+#        a val shard each of textbooks, DOAB and arXiv; a default file that
+#        is missing is left out. VAL_SOURCES= turns it off.
 # Validation defaults to the GSM8K test set, which training never sees: the loss
 # on its worked solutions every 500 steps, and exact answers every 500 too
 # (on the GPU an exam of 250 problems takes about 16 s).
@@ -84,6 +90,20 @@ fi
 for f in "$CORPUS/tok.bpe" "$CORPUS/gsm8k-$validation.tok" "$CORPUS/gsm8k-$validation.txt"; do
   [ -f "$f" ] || { echo "no $f: get the RunPod data first (docs/LAPTOP.md)"; exit 1; }
 done
+if [ -z "${VAL_SOURCES+set}" ]; then
+  VAL_SOURCES=""
+  for source in "gsm8k-$validation=$CORPUS/gsm8k-$validation.tok" "word-dev=$MATH/word-dev.tok" \
+    "textbooks=$CORPUS/blocks/textbooks-libretexts-0000/val-0000.tok" \
+    "doab=$CORPUS/blocks/doab-doab-0000/val-0000.tok" "arxiv=$CORPUS/blocks/arxiv-arxiv-papers-0000/val-0000.tok"; do
+    if [ -f "${source#*=}" ]; then
+      VAL_SOURCES+="${VAL_SOURCES:+,}$source"
+    else
+      echo "validation by source: no ${source#*=}, left out"
+    fi
+  done
+fi
+val_sources=()
+[ -z "$VAL_SOURCES" ] || val_sources=(--val-sources "$VAL_SOURCES" --val-log "runs/$RUN.val.csv")
 
 per_step=$((SEQ * BATCH * ACCUM))
 # 90% of the night: evaluations and checkpoints take the rest.
@@ -142,7 +162,7 @@ fi
 # tee -i: Ctrl-C reaches only the trainer, which saves before it stops.
 # shellcheck disable=SC2086
 "$CX" train $GPU --data "$MIX" --val "$CORPUS/gsm8k-$validation.tok" --bpe "$CORPUS/tok.bpe" \
-  --reason-test "$CORPUS/gsm8k-$validation.txt" --reason-every 500 --reason-limit 250 \
+  --reason-test "$CORPUS/gsm8k-$validation.txt" --reason-every 500 --reason-limit 250 "${val_sources[@]}" \
   "${model[@]}" $OPT --seq "$SEQ" --batch "$BATCH" --accum "$ACCUM" --steps "$steps" --warmup 500 --lr "$LR" \
   "${schedule[@]}" \
   --eval-every 500 --eval-batches "$eval_batches" --save-every 1000 --log-every 50 --time-limit "$minutes" \

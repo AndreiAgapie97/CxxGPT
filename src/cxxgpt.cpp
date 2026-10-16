@@ -49,6 +49,7 @@
 #include "tokenizer.h"
 #include "train.h"
 #include "train_control.h"
+#include "val_sources.h"
 #include "wordgen.h"
 #include "mathgen.h"
 #include "mathgen_fractions.h"
@@ -1108,6 +1109,9 @@ int cmd_train(Args& a) {
             "cxxgpt train --data FILE[,FILE*N...] [options]  (*N repeats a file N times)\n"
             "data:   --val FILE (default: last --val-frac of --data, 0.05)\n"
             "        --bpe tok.bpe (the tokenizer the data was made with, for --reason-test)\n"
+            "        --val-sources NAME=FILE,... (each held-out file's loss on its own at every\n"
+            "        evaluation and at the start; a file with questions and answers gives its answers'\n"
+            "        loss and its final answers' (the tokens after ####, needs --bpe); --val-log FILE.csv)\n"
             "model:  --seq 256 --dim 256 --layers 4 --heads 4 --ffn 0(auto)\n"
             "        --experts 0 --topk 2 --ehidden 0(auto) --shared 0 --ternary\n"
             "        --fp-attn (with --ternary: attention stays full precision; --fp-attn 0 clears it on --init)\n"
@@ -1154,6 +1158,8 @@ int cmd_train(Args& a) {
     const std::string data_path = a.str("data"), val_path = a.str("val");
     const std::string out = a.str("out", "model.ckpt"), log_path = a.str("log"), init = a.str("init");
     const std::string load_log_path = a.str("load-log");
+    const std::string val_sources_spec = a.str("val-sources"), val_log_path = a.str("val-log");
+    CHECK(val_log_path.empty() || !val_sources_spec.empty(), "--val-log needs --val-sources");
     CHECK(!data_path.empty(), "--data is required (see cxxgpt train --help)");
     bool repeated_data = false;
     const TokenData data = load_token_list(data_path,&repeated_data);
@@ -1244,6 +1250,23 @@ int cmd_train(Args& a) {
     CHECK(!cfg.moe() || cfg.top_k > 1,
           "--topk 1 cannot train this router: a one-logit softmax has zero task gradient; use --topk 2 or more");
     CHECK(log_every > 0 && eval_batches > 0, "log interval and evaluation batch count must be positive");
+    std::vector<ValSource> val_sources;
+    for (const auto& [name, path] : parse_val_sources(val_sources_spec)) {
+        ValSource src{name, path, load_token_list(path), {}};
+        CHECK(cfg.vocab >= int(src.data.vocab), "--val-sources %s: model vocab %d < its vocab %u", name.c_str(),
+              cfg.vocab, src.data.vocab);
+        if (!src.data.mask.empty()) {
+            // Equal sizes are all this can check: the file must come from --bpe.
+            CHECK(tok.vocab_size() == int(src.data.vocab),
+                  "--val-sources %s: finding its final answers needs --bpe, the tokenizer it was made with "
+                  "(%u tokens; --bpe gives %d)", name.c_str(), src.data.vocab, tok.vocab_size());
+            src.final_only = src.data;
+            src.final_only.mask = final_answer_mask(src.data, [&](int id) -> const std::string& {
+                return tok.token_bytes(id);
+            });
+        }
+        val_sources.push_back(std::move(src));
+    }
     AccumulationBatch group(B, Tn, accum);
 
     Model<float> model(cfg);
@@ -1416,6 +1439,42 @@ int cmd_train(Args& a) {
         }
     };
 
+    // Each --val-sources file's loss, on one line and in --val-log.
+    FILE* val_log = nullptr;
+    if (!val_log_path.empty()) {
+        const bool fresh = !std::filesystem::exists(val_log_path);
+        val_log = create_file(val_log_path, "a");
+        CHECK(val_log, "cannot open %s", val_log_path.c_str());
+        if (fresh) std::fprintf(val_log, "step,name,part,targets,loss\n");
+    }
+    auto source_eval = [&](long at_step) {
+        if (val_sources.empty()) return;
+        const double t0 = now_seconds();
+        const auto forward = [&](const int* inp, const int* tgt, int b, int t) {
+            return be.forward(inp, tgt, b, t, false);
+        };
+        std::string line;
+        for (const ValSource& src : val_sources) {
+            const std::vector<ValSourceLoss> parts = score_val_source(forward, src, B, Tn, eval_batches);
+            char buf[160];
+            line += line.empty() ? "" : " | ";
+            for (size_t i = 0; i < parts.size(); ++i) {
+                const ValSourceLoss& p = parts[i];
+                if (i == 0) std::snprintf(buf, sizeof buf, "%s %.4f", p.name.c_str(), p.loss);
+                else std::snprintf(buf, sizeof buf, " (%s %.4f)", p.part.c_str(), p.loss);
+                line += buf;
+                if (val_log)
+                    std::fprintf(val_log, "%ld,%s,%s,%zu,%.5f\n", at_step, p.name.c_str(), p.part.c_str(), p.targets,
+                                 p.loss);
+            }
+            if (parts.empty()) line += src.name + " (no trained targets)";
+        }
+        std::printf("val sources at step %ld (%.1f s): %s\n", at_step, now_seconds() - t0, line.c_str());
+        std::fflush(stdout);
+        if (val_log) std::fflush(val_log);
+    };
+    if (eval_every > 0 && steps > opt.step) source_eval(opt.step);  // where this start begins
+
     const double t_start = now_seconds();
     double loss_acc = 0, ms_acc = 0;
     int n_acc = 0;
@@ -1455,6 +1514,7 @@ int cmd_train(Args& a) {
                     char what[64];
                     std::snprintf(what, sizeof what, "validation %.5f", vloss);
                     note(what);
+                    source_eval(step);
                 } else {
                     note("eval skipped: no validation range a window long");
                 }
@@ -1545,6 +1605,7 @@ int cmd_train(Args& a) {
             n_acc = 0;
             ul_acc = {};
         }
+        if (vloss >= 0) source_eval(step + 1);  // with the validation, after its log line
         if ((step + 1) % log_every == 0 || last) {
             be.flush_loads(load_interval);
             load_interval.write(step + 1, load_log, load_warnings);
@@ -1575,6 +1636,7 @@ int cmd_train(Args& a) {
         else
             std::printf("not saved: no checkpoint yet; start again with a lower --lr\n");
         if (log) std::fclose(log);
+        if (val_log) std::fclose(val_log);
         return 1;
     }
     // Time-limited runs may end between evaluations. SIGINT still saves promptly;
@@ -1582,6 +1644,7 @@ int cmd_train(Args& a) {
     if (!g_stop && eval_every > 0 && last_validation_step != opt.step && val_hi >= val_lo + Tn + 1) {
         const double vloss = eval_loss(be, *val, val_lo, val_hi, B, Tn, eval_batches);
         std::printf("step %6ld | val %.4f (final validation)\n", opt.step, vloss);
+        source_eval(opt.step);
         // Numeric CSV rows keep their seven columns; comments already carry reasoning evals.
         if (log) std::fprintf(log, "# final validation step %ld: %.5f\n", opt.step, vloss);
     }
@@ -1590,6 +1653,7 @@ int cmd_train(Args& a) {
     std::printf("saved %s at step %ld%s\n", out.c_str(), opt.step, g_stop ? " (interrupted)" : "");
     if (!g_stop) reason_eval(step);
     if (log) std::fclose(log);
+    if (val_log) std::fclose(val_log);
     return 0;
 }
 

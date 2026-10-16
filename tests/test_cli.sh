@@ -301,6 +301,22 @@ grep -q '^sampler: qa (20 question-answer documents that fit in a window start t
     "$TEST_DIR/sampler-qa.log"
 "$CXXGPT" train "${SHORT[@]}" > "$TEST_DIR/sampler-random.log"
 require_absent -q '^sampler:' "$TEST_DIR/sampler-random.log"
+# --val-sources: each file's loss on its own at the start and at every
+# evaluation; a file with questions and answers also on its final answers
+# (after ####). One CSV row per number.
+"$CXXGPT" train "${SHORT[@]}" --val-sources "qa=$TEST_DIR/short-qa.tok,text=$TEST_DIR/data.tok" \
+    --val-log "$TEST_DIR/val-sources.csv" > "$TEST_DIR/val-sources.log"
+grep -Eq '^val sources at step 0 \([0-9.]+ s\): qa [0-9.]+ \(final [0-9.]+\) \| text [0-9.]+$' "$TEST_DIR/val-sources.log"
+grep -Eq '^val sources at step 2 \(' "$TEST_DIR/val-sources.log"
+[[ $(head -n 1 "$TEST_DIR/val-sources.csv") == step,name,part,targets,loss ]]
+awk -F, 'NR > 1 { seen[$1 "," $2 "," $3] = $4 }
+    END { exit !(seen["0,qa,answers"] > seen["0,qa,final"] && seen["0,qa,final"] > 0 && seen["0,text,text"] == 8 &&
+                 seen["2,qa,final"] == seen["0,qa,final"]) }' "$TEST_DIR/val-sources.csv"
+status=0
+"$CXXGPT" train "${SHORT[@]}" --val-log "$TEST_DIR/x.csv" > "$TEST_DIR/val-sources-bad.log" 2>&1 || status=$?
+[[ "$status" == 1 ]]
+grep -q -- '--val-log needs --val-sources' "$TEST_DIR/val-sources-bad.log"
+printf 'CLI: train --val-sources scores each held-out file, and Q&A files on their final answers\n'
 status=0
 "$CXXGPT" train "${SHORT[@]}" --sampler docs > "$TEST_DIR/sampler-bad.log" 2>&1 || status=$?
 [[ "$status" == 1 ]]
@@ -984,6 +1000,19 @@ grep -q "no $math/gsm8k-train.tok: get the RunPod data first" "$TEST_DIR/night-m
 MOCK_ARGS="$TEST_DIR/night.args" DATA="$TEST_DIR/night-data" RUN="$run" TOKS=100 \
     CX="$TEST_DIR/night-mock" bash scripts/night.sh > "$TEST_DIR/night-mix.log"
 [[ $(awk '$0=="--data" {getline; print}' "$TEST_DIR/night.args") == "$expected" ]]
+# Validation by source: the default files that exist, the others left out
+# with a note; VAL_SOURCES= turns it off.
+grep -q "validation by source: no $math/word-dev.tok, left out" "$TEST_DIR/night-mix.log"
+[[ $(awk '$0=="--val-sources" {getline; print}' "$TEST_DIR/night.args") == "gsm8k-test=$corpus/gsm8k-test.tok" ]]
+: > "$math/word-dev.tok"
+for s in textbooks-libretexts-0000 doab-doab-0000 arxiv-arxiv-papers-0000; do : > "$corpus/blocks/$s/val-0000.tok"; done
+MOCK_ARGS="$TEST_DIR/night.args" DATA="$TEST_DIR/night-data" RUN="$run" TOKS=100 DEV=1 \
+    CX="$TEST_DIR/night-mock" bash scripts/night.sh > "$TEST_DIR/night-mix.log"
+[[ $(awk '$0=="--val-sources" {getline; print}' "$TEST_DIR/night.args") == "gsm8k-dev=$corpus/gsm8k-dev.tok,word-dev=$math/word-dev.tok,textbooks=$corpus/blocks/textbooks-libretexts-0000/val-0000.tok,doab=$corpus/blocks/doab-doab-0000/val-0000.tok,arxiv=$corpus/blocks/arxiv-arxiv-papers-0000/val-0000.tok" ]]
+[[ $(awk '$0=="--val-log" {getline; print}' "$TEST_DIR/night.args") == "runs/$run.val.csv" ]]
+MOCK_ARGS="$TEST_DIR/night.args" DATA="$TEST_DIR/night-data" RUN="$run" TOKS=100 VAL_SOURCES= \
+    CX="$TEST_DIR/night-mock" bash scripts/night.sh > "$TEST_DIR/night-mix.log"
+require_absent -q -- --val-sources "$TEST_DIR/night.args"
 rm "runs/$run.log"
 # Without the tokenizer it stops too.
 mv "$corpus/tok.bpe" "$corpus/tok.bpe.away"

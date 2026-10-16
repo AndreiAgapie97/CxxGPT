@@ -13,6 +13,8 @@ stopped and restarted at any time, also in the middle of a night:
   - runs/RUN.csv: loss, validation loss, learning rate, gradient norm and
     time per step, every 50 steps;
   - runs/RUN.load.csv: each layer's share per expert;
+  - runs/RUN.val.csv: each held-out file's loss (train --val-sources),
+    GSM8K's final answers apart;
   - runs/RUN.gpu.csv: the GPU's clock, temperature, power and memory every
     10 s (the only file with clock times);
   - runs/RUN.ckpt.control: the control file, if one was written.
@@ -224,6 +226,26 @@ def log_event(line):
     return None
 
 
+def parse_val_sources(lines):
+    """runs/RUN.val.csv (train --val-sources): step,name,part,targets,loss.
+    Per name and part, the losses by step; a step written again (a resume
+    from an older checkpoint) replaces the earlier number."""
+    series = {}
+    for line in lines:
+        f = line.strip().split(",")
+        if len(f) != 5 or f[0] == "step":
+            continue
+        loss = number(f[4])
+        try:
+            step = int(f[0])
+        except ValueError:
+            continue
+        if loss is not None:
+            series.setdefault(f[1], {}).setdefault(f[2], {})[step] = loss
+    return {name: {part: sorted(points.items()) for part, points in parts.items()}
+            for name, parts in series.items()}
+
+
 def parse_gpu(lines):
     """runs/RUN.gpu.csv, no header: time, clock, temperature, power, load,
     memory, slowdown reasons, and the last logged step ("start" before)."""
@@ -386,7 +408,8 @@ class Run:
         self.runs, self.name = runs, name
         base = runs / name
         self.tails = {k: Tail(Path(str(base) + suffix)) for k, suffix in
-                      [("log", ".log"), ("csv", ".csv"), ("gpu", ".gpu.csv"), ("load", ".load.csv")]}
+                      [("log", ".log"), ("csv", ".csv"), ("gpu", ".gpu.csv"), ("load", ".load.csv"),
+                       ("val", ".val.csv")]}
         self.control = Path(str(base) + ".ckpt.control")
         self.parsed = {}
         self.lock = threading.Lock()
@@ -397,7 +420,7 @@ class Run:
             for key, tail in self.tails.items():
                 if tail.update() or key not in self.parsed:
                     self.parsed[key] = {"log": parse_log, "csv": parse_csv, "gpu": parse_gpu,
-                                        "load": parse_load}[key](tail.lines)
+                                        "load": parse_load, "val": parse_val_sources}[key](tail.lines)
             log, metrics = self.parsed["log"], self.parsed["csv"]
             gpu, load = self.parsed["gpu"], self.parsed["load"]
             try:
@@ -418,6 +441,7 @@ class Run:
                 "events": log["events"][-40:], "last_wrong": log["last_wrong"],
                 "gpu": thin(session_gpu, 1000),
                 "load_lowest": thin(load["lowest"], 1000), "load_last": load["last"],
+                "val_sources": self.parsed["val"],
                 "tail": self.tails["log"].lines[-40:],
             }
 

@@ -32,6 +32,7 @@
 #include "test_failure_labels.h"
 #include "test_reason_report.h"
 #include "test_eval_loss.h"
+#include "test_val_sources.h"
 
 int main(int argc, char** argv) {
     int threads = int(std::thread::hardware_concurrency());
@@ -70,6 +71,7 @@ int main(int argc, char** argv) {
         {"failure labels", test_failure_labels},
         {"training reasoning reports", test_reason_report},
         {"eval loss windows", test_eval_loss},
+        {"validation by source", test_val_sources},
         {"attention", test_attention},
     };
     for (auto& s : suites) {
