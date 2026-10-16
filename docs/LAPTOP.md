@@ -77,6 +77,31 @@ The commands below are for Git Bash, in the CxxGPT folder; on Windows,
   and power drop, a thermal reason) or sat idle waiting (load drops, clock
   stays up: another program busy on the CPU, such as a build, or Windows).
 
+### Watching a night
+
+`python3 scripts/dashboard.py` (in a second Git Bash window, from the
+repository's folder) opens http://127.0.0.1:8765/ with the run written to
+last; `python3 scripts/dashboard.py rp1` picks one. It only reads the files
+night.sh writes, so it can be started and stopped at any time, also halfway
+through a night, and it never slows the run down (it reads only what was
+added, every 10 s). The page shows:
+- the state (training, ended, stalled, crashed), the step, the time left
+  (the steps still to go at the recent speed, or the time limit) and the
+  speed;
+- warnings: no new log line for 5 minutes, skipped steps, a loss or
+  gradient-norm jump, tokens/s under 80% of the recent speed, an expert
+  under 1%, the GPU at 87 °C or slowing itself down, a control file in use;
+- charts of the training and validation loss, the GSM8K exam score, the
+  learning rate, the gradient norm, the speed, the smallest expert share
+  and the GPU's temperature and power, with "compare with" laying an
+  earlier run over them (dashed);
+- the last wrong exam answer, each layer's expert shares, the events
+  (saves, resumes, skipped steps, warnings), the settings and the log's
+  last lines.
+
+Only this computer can open it (it listens on 127.0.0.1). `--port` changes
+the port; `--no-open` does not open a browser.
+
 ## Changing a run while it trains
 
 A run never has to start again from random weights to change course.
