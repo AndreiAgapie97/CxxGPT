@@ -13,6 +13,25 @@
 
 namespace equation_test {
 
+// After a 1 comes a singular word: "1 part", never "1 parts". Words that end
+// in s without being plurals ("1 is subtracted") are allowed, and so are
+// numbers that only end in 1 ("21 parts", "$4.1", "3:1") and a 1 inside an
+// expression ("2x + 1 years").
+inline void check_singular_after_one(const std::string& text) {
+    static const std::set<std::string> not_plurals = {"is", "was", "has", "as"};
+    for (size_t at = text.find("1 "); at != std::string::npos; at = text.find("1 ", at + 1)) {
+        const char before = at ? text[at - 1] : ' ';
+        if ((before >= '0' && before <= '9') || before == '.' || before == '/' || before == ':') continue;
+        size_t back = at;
+        while (back > 0 && text[back - 1] == ' ') --back;
+        if (back > 0 && (text[back - 1] == '+' || text[back - 1] == '-' || text[back - 1] == '*')) continue;
+        size_t end = at + 2;
+        while (end < text.size() && text[end] >= 'a' && text[end] <= 'z') ++end;
+        const std::string word = text.substr(at + 2, end - at - 2);
+        EXPECT(word.empty() || word.back() != 's' || not_plurals.count(word), "a plural after 1: %s", text.c_str());
+    }
+}
+
 // The whole numbers written in a question, in order.
 inline std::vector<int64_t> written_numbers(const std::string& text) {
     std::vector<int64_t> found;
@@ -54,6 +73,7 @@ inline void check_inputs_written(const EquationProblem& p) {
 inline void check_problem(const EquationProblem& p, bool notes) {
     const Problem& q = p.problem;
     EXPECT(q.task == "equations", "wrong task %s", q.task.c_str());
+    check_singular_after_one(q.question + " " + q.steps);
     EXPECT(q.question.find('{') == std::string::npos && q.question.find('}') == std::string::npos,
            "unfilled placeholder: %s", q.question.c_str());
     EXPECT(extract_answer(q.completion()) == q.answer, "not a GSM8K completion");

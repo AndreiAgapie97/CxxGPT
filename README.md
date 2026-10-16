@@ -371,8 +371,12 @@ often. In 1M problems: puzzles 176k different, mixtures 131k, shares 107k,
 rectangles 46k (at real sizes: a rug of a few meters, a field of up to 150),
 consecutive numbers 7.2k, ages adding up 6.0k, ages in some years only 564
 (realistic ages leave few), so those repeat with other names
-and wordings. The output is not part of the training mix; whether to train
-on it is a separate decision.
+and wordings. `operations/build_gen_math.py` builds `data/gen-math` for
+training: 500,000 problems of each topic and a 1,000-problem dev set from
+the held-out wordings, without calculator notes (like the word problems),
+checked again in Python against GSM8K test and dev, and tokenized with the
+RunPod model's tokenizer; its `manifest.json` records the seeds, counts and
+generator commit.
 
 ### Generated math problems: fractions, percentages, ratios and units
 
