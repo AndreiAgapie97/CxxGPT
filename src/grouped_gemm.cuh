@@ -299,6 +299,146 @@ __global__ void __launch_bounds__(L::threads) grouped_tc(Problem p) {
 }
 
 // ---------------------------------------------------------------------------
+// bf16 on the tensor cores through mma.sync, with operands loaded by ldmatrix
+// ---------------------------------------------------------------------------
+//
+// The same work as grouped_tc in bf16, with more control: each warp keeps a
+// WM x WN block of C in registers and multiplies 16 x 8 x 16 at a time
+// (mma.sync m16n8k16, fp32 sums), its operands read from shared memory by
+// ldmatrix (.trans for A stored [K][M] and B stored [K][N]). Shared-memory
+// rows are padded by 16 bytes, so the eight rows an ldmatrix reads fall in
+// different banks.
+template <int WarpsM_, int WarpsN_, int WM_, int WN_, int Stages_>
+struct MmaTiling {
+    static constexpr int WarpsM = WarpsM_, WarpsN = WarpsN_, WM = WM_, WN = WN_, Stages = Stages_;
+    static constexpr int threads = WarpsM * WarpsN * 32, BM = WarpsM * WM, BN = WarpsN * WN;
+    static constexpr int bk_bytes = 64;          // 32 bf16 per row and step
+    static constexpr int MT = WM / 16, NT = WN / 8;  // mma tiles per warp
+    static_assert(WM % 16 == 0 && WN % 16 == 0, "warp tiles of whole 16 x 16 pairs");
+};
+
+__device__ __forceinline__ unsigned smem_u32(const void* p) {
+    return static_cast<unsigned>(__cvta_generic_to_shared(p));
+}
+__device__ __forceinline__ void ldsm_x4(unsigned (&r)[4], const void* p) {
+    asm volatile("ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%0, %1, %2, %3}, [%4];\n"
+                 : "=r"(r[0]), "=r"(r[1]), "=r"(r[2]), "=r"(r[3])
+                 : "r"(smem_u32(p)));
+}
+__device__ __forceinline__ void ldsm_x4_t(unsigned (&r)[4], const void* p) {
+    asm volatile("ldmatrix.sync.aligned.m8n8.x4.trans.shared.b16 {%0, %1, %2, %3}, [%4];\n"
+                 : "=r"(r[0]), "=r"(r[1]), "=r"(r[2]), "=r"(r[3])
+                 : "r"(smem_u32(p)));
+}
+__device__ __forceinline__ void mma_bf16(float (&c)[4], const unsigned (&a)[4], unsigned b0, unsigned b1) {
+    asm volatile(
+        "mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%0, %1, %2, %3}, {%4, %5, %6, %7}, {%8, %9}, "
+        "{%0, %1, %2, %3};\n"
+        : "+f"(c[0]), "+f"(c[1]), "+f"(c[2]), "+f"(c[3])
+        : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b0), "r"(b1));
+}
+
+template <class L, bool TA, bool TB, bool Reduce>
+__global__ void __launch_bounds__(L::threads) grouped_mma(Problem p) {
+    using T = __nv_bfloat16;
+    using S = Smem<T, L, TA, TB>;
+    constexpr int BK = S::BK, MT = L::MT, NT = L::NT;
+    const Tile t = find_tile<Reduce, L::BM, L::BN>(p, sizeof(T));
+    if (!t.live) return;
+    extern __shared__ __align__(32) unsigned char smem_raw[];
+    T* smem = reinterpret_cast<T*>(smem_raw);
+    const T* A = reinterpret_cast<const T*>(t.A);
+    const T* B = reinterpret_cast<const T*>(t.B);
+    const int lane = threadIdx.x % 32, warp = threadIdx.x / 32, wm = warp / L::WarpsN, wn = warp % L::WarpsN;
+
+    auto load_stage = [&](int stage, int k0) {
+        T* As = smem + stage * S::stage;
+        T* Bs = As + S::a_size;
+        if (TA) load_tile<T, BK, L::BM, L::threads>(As, S::lda, A, p.lda, k0, t.m0, t.K, t.M);
+        else load_tile<T, L::BM, BK, L::threads>(As, S::lda, A, p.lda, t.m0, k0, t.M, t.K);
+        if (TB) load_tile<T, L::BN, BK, L::threads>(Bs, S::ldb, B, p.ldb, t.n0, k0, p.N, t.K);
+        else load_tile<T, BK, L::BN, L::threads>(Bs, S::ldb, B, p.ldb, k0, t.n0, t.K, p.N);
+    };
+
+    float acc[MT][NT][4];
+#pragma unroll
+    for (int i = 0; i < MT; ++i)
+#pragma unroll
+        for (int j = 0; j < NT; ++j)
+#pragma unroll
+            for (int r = 0; r < 4; ++r) acc[i][j][r] = 0.0f;
+
+    // Where this lane's ldmatrix rows start, within a 16 x 16 block.
+    const int a_row = TA ? (lane % 8) + (lane / 16) * 8 : lane % 16;  // TA: k; else m
+    const int a_col = TA ? ((lane / 8) % 2) * 8 : (lane / 16) * 8;    // TA: m; else k
+    const int b_row = TB ? (lane % 8) + (lane / 16) * 8 : (lane % 8) + ((lane / 8) % 2) * 8;  // TB: n; else k
+    const int b_col = TB ? ((lane / 8) % 2) * 8 : (lane / 16) * 8;                            // TB: k; else n
+
+    const int steps = (t.K + BK - 1) / BK;
+#pragma unroll
+    for (int s = 0; s < L::Stages - 1; ++s) {
+        if (s < steps) load_stage(s, s * BK);
+        cp_async_commit();
+    }
+    for (int s = 0; s < steps; ++s) {
+        cp_async_wait<L::Stages - 2>();
+        __syncthreads();
+        const int next = s + L::Stages - 1;
+        if (next < steps) load_stage(next % L::Stages, next * BK);
+        cp_async_commit();
+        const T* As = smem + (s % L::Stages) * S::stage;
+        const T* Bs = As + S::a_size;
+#pragma unroll
+        for (int kk = 0; kk < BK; kk += 16) {
+            unsigned b[NT][2];
+#pragma unroll
+            for (int j = 0; j < NT; j += 2) {
+                const int n = wn * L::WN + j * 8;
+                unsigned r[4];
+                if (TB) ldsm_x4(r, Bs + (n + b_row) * S::ldb + kk + b_col);
+                else ldsm_x4_t(r, Bs + (kk + b_row) * S::ldb + n + b_col);
+                b[j][0] = r[0], b[j][1] = r[1], b[j + 1][0] = r[2], b[j + 1][1] = r[3];
+            }
+#pragma unroll
+            for (int i = 0; i < MT; ++i) {
+                const int m = wm * L::WM + i * 16;
+                unsigned a[4];
+                if (TA) ldsm_x4_t(a, As + (kk + a_row) * S::lda + m + a_col);
+                else ldsm_x4(a, As + (m + a_row) * S::lda + kk + a_col);
+#pragma unroll
+                for (int j = 0; j < NT; ++j) mma_bf16(acc[i][j], a, b[j][0], b[j][1]);
+            }
+        }
+    }
+    cp_async_wait<0>();
+    // c0, c1 at (row, col), (row, col + 1); c2, c3 eight rows below.
+    const int row = t.m0 + wm * L::WM + lane / 4, col = t.n0 + wn * L::WN + (lane % 4) * 2;
+#pragma unroll
+    for (int i = 0; i < MT; ++i)
+#pragma unroll
+        for (int j = 0; j < NT; ++j) {
+            const int r0 = row + i * 16, c0 = col + j * 8;
+            put(p, t, r0, c0, acc[i][j][0]);
+            put(p, t, r0, c0 + 1, acc[i][j][1]);
+            put(p, t, r0 + 8, c0, acc[i][j][2]);
+            put(p, t, r0 + 8, c0 + 1, acc[i][j][3]);
+        }
+}
+
+template <class L, bool TA, bool TB, bool Reduce>
+void launch_mma(const Problem& p, int total_rows) {
+    const dim3 grid = Reduce ? dim3((p.M + L::BM - 1) / L::BM, (p.N + L::BN - 1) / L::BN, p.groups)
+                             : dim3((total_rows + L::BM - 1) / L::BM + p.groups, (p.N + L::BN - 1) / L::BN);
+    if (grid.x == 0 || grid.y == 0 || grid.z == 0) return;
+    constexpr size_t bytes = Smem<__nv_bfloat16, L, TA, TB>::bytes;
+    static const bool once = (cudaFuncSetAttribute(grouped_mma<L, TA, TB, Reduce>,
+                                                   cudaFuncAttributeMaxDynamicSharedMemorySize, int(bytes)),
+                              true);
+    (void)once;
+    grouped_mma<L, TA, TB, Reduce><<<grid, L::threads, bytes>>>(p);
+}
+
+// ---------------------------------------------------------------------------
 // Plain fp32 (exact products), and the fallback for unaligned rows
 // ---------------------------------------------------------------------------
 
@@ -420,8 +560,12 @@ void launch(Kind kind, const Problem& p, int total_rows) {
             if (bf16) launch_tc<__nv_bfloat16, SmallRowsTiling, TA, TB, Reduce>(p, total_rows);
             else launch_tc<float, SmallRowsTiling, TA, TB, Reduce>(p, total_rows);
         } else {
-            if (bf16) launch_tc<__nv_bfloat16, RowsTiling, TA, TB, Reduce>(p, total_rows);
-            else launch_tc<float, RowsTiling, TA, TB, Reduce>(p, total_rows);
+            // bf16, measured in training on the night model (2026-10-16):
+            // the forward products on WMMA 128 x 128 tiles, the input
+            // gradients through mma.sync on 128 x 256.
+            if (!bf16) launch_tc<float, RowsTiling, TA, TB, Reduce>(p, total_rows);
+            else if constexpr (TB) launch_tc<__nv_bfloat16, ReduceTiling, TA, TB, Reduce>(p, total_rows);
+            else launch_mma<MmaTiling<2, 4, 64, 64, 2>, TA, TB, Reduce>(p, total_rows);
         }
         return;
     }

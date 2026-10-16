@@ -1095,7 +1095,7 @@ int cmd_train(Args& a) {
             "        attention is fused by default (no stored weight matrix; on the tensor cores\n"
             "        with tf32/bf16); --no-fused-attn uses cuBLAS products instead\n"
             "        --moe-grouped: the experts' products in one grouped launch each, never waiting\n"
-            "        for the host (#49; about 8%% slower on the laptop for now)\n"
+            "        for the host (#49; about 3%% slower on the laptop for now)\n"
             "reason: --reason-test FILE --reason-every STEPS --reason-limit 300 --max-new 200\n"
             "        --reason-report PREFIX (optional answers/labels in PREFIX.step-N.jsonl)\n"
             "Ctrl-C saves a checkpoint and stops; --resume continues from --out, and\n"

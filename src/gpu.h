@@ -169,8 +169,8 @@ public:
     // never waits for the host (grouped_gemm.cuh, #49), instead of cuBLAS
     // per expert, sized by counts the host waits for in each layer. Off by
     // default until it is as fast: on the RTX 4070 the nights' model trains
-    // about 8% slower with it (2026-10-16), since cuBLAS is more efficient
-    // on the big products of busy experts.
+    // about 3% slower with it (2678 vs 2595 ms a step, 2026-10-16): level in
+    // the forward pass, behind in the backward pass's products.
     void set_grouped_experts(bool on);
     std::vector<std::pair<std::string, double>> take_profile();
 
