@@ -778,6 +778,17 @@ for options in '--matmul invalid' '--no-tf32 --matmul bf16' '--fused-attn --no-f
     grep -q 'check failed' "$TEST_DIR/precision-invalid.log"
 done
 "$CXXGPT" train "${COMMON[@]}" --steps 0 --no-tf32 --out "$TEST_DIR/legacy-precision.ckpt" > "$TEST_DIR/legacy-precision.log"
+# The CPU engine computes in fp32 with its own attention: it takes --matmul
+# fp32 and refuses the GPU's other precision and attention options.
+"$CXXGPT" train "${COMMON[@]}" --steps 0 --matmul fp32 --out "$TEST_DIR/cpu-fp32.ckpt" > "$TEST_DIR/cpu-fp32.log"
+for options in '--matmul bf16' '--matmul tf32' '--fused-attn' '--no-fused-attn'; do
+    status=0
+    # shellcheck disable=SC2086
+    "$CXXGPT" train "${COMMON[@]}" --steps 0 $options --out "$TEST_DIR/cpu-gpu-only.ckpt" \
+        > "$TEST_DIR/cpu-gpu-only.log" 2>&1 || status=$?
+    [[ $status == 1 ]] && grep -q 'need[s]* --gpu' "$TEST_DIR/cpu-gpu-only.log" ||
+        { echo "train $options without --gpu was not refused"; cat "$TEST_DIR/cpu-gpu-only.log"; exit 1; }
+done
 status=0
 "$CXXGPT_TRAINING_CLI" same-sampler "$TEST_DIR/model.ckpt" "$TEST_DIR/fresh.ckpt" > "$TEST_DIR/rng-different.log" 2>&1 || status=$?
 [[ "$status" == 1 ]]

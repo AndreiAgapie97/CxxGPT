@@ -1151,9 +1151,15 @@ int cmd_train(Args& a) {
     // bf16 products by default: 1.45x the tokens/s of tf32 on the night-1
     // model, with the same loss curve. Ternary models default to tf32 (their
     // quantized values are not exact in bf16).
-    const std::string matmul = a.str("matmul", no_tf32 ? "fp32" : cfg.ternary ? "tf32" : "bf16");
-    CHECK(!no_tf32 || matmul == "fp32", "--no-tf32 conflicts with --matmul %s", matmul.c_str());
-    CHECK(matmul == "fp32" || matmul == "tf32" || matmul == "bf16", "--matmul takes fp32, tf32 or bf16");
+    const std::string asked = a.str("matmul", no_tf32 ? "fp32" : cfg.ternary ? "tf32" : "bf16");
+    CHECK(!no_tf32 || asked == "fp32", "--no-tf32 conflicts with --matmul %s", asked.c_str());
+    CHECK(asked == "fp32" || asked == "tf32" || asked == "bf16", "--matmul takes fp32, tf32 or bf16");
+    // The CPU engine multiplies in exact fp32 with its own attention: it
+    // refuses the GPU's precision and attention options rather than ignore them.
+    CHECK(use_gpu || !a.has("matmul") || asked == "fp32", "--matmul %s needs --gpu (the CPU engine computes in fp32)",
+          asked.c_str());
+    CHECK(use_gpu || (!request_fused && !disable_fused), "--fused-attn and --no-fused-attn need --gpu");
+    const std::string matmul = use_gpu ? asked : "fp32";
     AdamW opt;
     opt.weight_decay = a.real("wd", 0.1);
     opt.muon = a.flag("muon");
