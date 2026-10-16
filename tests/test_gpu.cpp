@@ -1390,6 +1390,12 @@ int main() {
     compare("moe top-1, grouped", moe1, 1e-7, 1e-5, 2e-6, {.clip = 0.5, .grouped = true});
     compare("moe tf32, grouped", moe, 2e-5, 1e-2, 2e-6, {.matmul = Matmul::tf32, .grouped = true});
     compare("moe bf16, grouped", moe, 3e-4, 5e-1, 2e-6, {.matmul = Matmul::bf16, .grouped = true});
+    // Experts only, no shared FFN, in bf16: the night model's path, where
+    // the experts' combine writes the residual sum and the scatter writes
+    // the input gradient (nothing zeroed first). Measured: loss 1.4e-5,
+    // gradients 7.2e-3 (an expert's efc).
+    compare("moe top-1 bf16, grouped", moe1, 5e-5, 3e-2, 2e-6,
+            {.clip = 0.5, .matmul = Matmul::bf16, .grouped = true});
     compare("moe muon bf16, grouped", moe, 2e-4, 5e-2, 3e-2, {.muon = true, .matmul = Matmul::bf16, .grouped = true});
     compare("ternary moe, grouped", ours, 1e-5, 1e-2, 2e-6, {.grouped = true});
     compare("moe ul, grouped", moe, 1e-7, 1e-5, 2e-6, {.grouped = true, .ul_alpha = 0.5, .ul_ngram = 3});
@@ -1414,9 +1420,11 @@ int main() {
     // is allowed, as in compare()).
     decode("dense", dense, 1e-6);
     decode("moe+shared", moe, 1e-6);
+    decode("moe top-1", moe1, 1e-6);  // experts only: the combine writes the residual sum
     decode("half NoPE", nope, 1e-6);
     decode("ternary moe", ours, 1e-3);
     decode("moe bf16", moe, 3e-2, Matmul::bf16);
+    decode("moe top-1 bf16", moe1, 1e-2, Matmul::bf16);  // measured 2.9e-3
     eval_on_gpu();
 
     learns_pattern(false);

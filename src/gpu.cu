@@ -978,15 +978,18 @@ __global__ void moe_gather(T* xg, const T* x, const int* order, int NK, int C, i
     xg[i] = x[size_t(order[r] / K) * C + c];
 }
 
-// out[n] += Σ_i gate[n, i] * ey[row_of[n, i]]
-__global__ void moe_combine(float* out, const float* ey, const float* gate, const int* row_of, int N, int C,
-                            int K) {
+// The FFN's output and the residual add in one pass:
+// out[n] = resid[n] + (base[n] + Σ_i gate[n, i] * ey[row_of[n, i]]), with
+// base (the dense or shared FFN's output) 0 when null. The same sums in the
+// same order as adding into a zeroed or dense output and then add_fwd.
+__global__ void moe_combine(float* out, const float* resid, const float* base, const float* ey, const float* gate,
+                            const int* row_of, int N, int C, int K) {
     const size_t i = size_t(blockIdx.x) * blockDim.x + threadIdx.x;
     if (i >= size_t(N) * C) return;
     const size_t n = i / C, c = i % C;
-    float acc = out[i];
+    float acc = base ? base[i] : 0.0f;
     for (int k = 0; k < K; ++k) acc += gate[n * K + k] * ey[size_t(row_of[n * K + k]) * C + c];
-    out[i] = acc;
+    out[i] = resid[i] + acc;
 }
 
 // One warp per assignment j: dey[row] = gate * dout[n] (or deyh, in bf16),
@@ -1008,12 +1011,13 @@ __global__ void moe_bwd_combine(float* dey, __nv_bfloat16* deyh, float* dgate, c
     if (lane == 0) dgate[j] = dot;
 }
 
-// dx[n] += Σ_i dxg[row_of[n, i]]
-__global__ void moe_scatter(float* dx, const float* dxg, const int* row_of, int N, int C, int K) {
+// dx[n] += Σ_i dxg[row_of[n, i]], or with add false dx[n] = that sum (dx is
+// not read: the first writer of a buffer needs no zeroing first).
+__global__ void moe_scatter(float* dx, const float* dxg, const int* row_of, int N, int C, int K, bool add) {
     const size_t i = size_t(blockIdx.x) * blockDim.x + threadIdx.x;
     if (i >= size_t(N) * C) return;
     const size_t n = i / C, c = i % C;
-    float acc = dx[i];
+    float acc = add ? dx[i] : 0.0f;
     for (int k = 0; k < K; ++k) acc += dxg[size_t(row_of[n * K + k]) * C + c];
     dx[i] = acc;
 }
@@ -1528,17 +1532,19 @@ struct GpuTrainer::Impl {
         CHECK(x.f, "an fp32 product got a bf16 input");
         gemm(false, true, N, OC, IC, x.f, IC, w, IC, y, OC, 0.0f);
     }
-    // linear_backward: dx += dy · w (if dx), dw += dyᵀ · x
+    // linear_backward: dx = dy · w + dx_beta dx (if dx), dw += dyᵀ · x.
+    // dx_beta 0 writes dx (its first writer: no zeroing needed), 1 adds.
+    // The weight gradient always adds: it sums over a step's micro-batches.
     void linear_backward(float* dx, float* dw, Operand dy, Operand x, const float* w, int N, int IC, int OC,
-                         bool low = true) {
+                         float dx_beta, bool low = true) {
         if (bf16_ops && low) {
             const auto* dyb = as_bf16(dy, op_dy, size_t(N) * OC);
-            if (dx) gemm(false, false, N, IC, OC, dyb, OC, WB(w), IC, dx, IC, 1.0f, true);
+            if (dx) gemm(false, false, N, IC, OC, dyb, OC, WB(w), IC, dx, IC, dx_beta, true);
             gemm(true, false, OC, IC, N, dyb, OC, as_bf16(x, op_x, size_t(N) * IC), IC, dw, IC, 1.0f, true);
             return;
         }
         CHECK(x.f && dy.f, "an fp32 product got a bf16 input");
-        if (dx) gemm(false, false, N, IC, OC, dy.f, OC, w, IC, dx, IC, 1.0f);
+        if (dx) gemm(false, false, N, IC, OC, dy.f, OC, w, IC, dx, IC, dx_beta);
         gemm(true, false, OC, IC, N, dy.f, OC, x.f, IC, dw, IC, 1.0f);
     }
 
@@ -1558,13 +1564,13 @@ struct GpuTrainer::Impl {
         }
         linear_forward(y, x, W(woff, q), N, IC, OC);
     }
-    void proj_backward(float* dx, Operand dy, Operand x, size_t woff, int N, int IC, int OC, bool q) {
+    void proj_backward(float* dx, Operand dy, Operand x, size_t woff, int N, int IC, int OC, bool q, float dx_beta) {
         Region r(*this, "matmul bwd");
         if (q) {
             act_quantize(xq.p, x.f, N, IC);
             x = Operand(xq.p);
         }
-        linear_backward(dx, G(woff), dy, x, W(woff, q), N, IC, OC);
+        linear_backward(dx, G(woff), dy, x, W(woff, q), N, IC, OC, dx_beta);
     }
 
     // Into out, outh (bf16) or both; the other may be null.
@@ -1757,31 +1763,36 @@ struct GpuTrainer::Impl {
         if (bf16_ops) dlogitsh.resize(N * V);
     }
 
-    void ffn_forward(int l, float* out, int N, bool training) {
+    // The FFN of layer l, with the residual: out = resid + ffn(ln2). The
+    // experts' combine writes out itself (no zeroed buffer to add into, no
+    // separate add).
+    void ffn_forward(int l, float* out, const float* resid, int N, bool training) {
         auto& a = acts[l];
         const auto& o = layer[l];
         const int C = cfg.d_model, F = cfg.always_hidden();
+        CHECK(F > 0 || cfg.moe(), "a layer without an FFN");
         if (F > 0) {
             proj_forward(a.fc.p, pick(a.ln2, a.ln2h), o.wfc, N, C, 2 * F, cfg.ternary);
             swiglu_forward(a.sw.p, a.swh.p, a.fc.p, N, F);
-            proj_forward(out, pick(a.sw, a.swh), o.wproj, N, F, C, cfg.ternary);
-        } else {
-            CUDA_CHECK(cudaMemsetAsync(out, 0, size_t(N) * C * sizeof(float)));
+            proj_forward(out_tmp.p, pick(a.sw, a.swh), o.wproj, N, F, C, cfg.ternary);
         }
-        if (cfg.moe()) moe_forward(l, out, N, training);
+        if (cfg.moe()) moe_forward(l, out, resid, F > 0 ? out_tmp.p : nullptr, N, training);
+        else add(out, resid, out_tmp.p, size_t(N) * C);
     }
 
-    void ffn_backward(int l, float* dx, const float* dout, int N) {
+    // Adds the FFN's input gradient into dx, or with add false writes it.
+    void ffn_backward(int l, float* dx, const float* dout, int N, bool add) {
         auto& a = acts[l];
         const auto& o = layer[l];
         const int C = cfg.d_model, F = cfg.always_hidden();
         if (F > 0) {
-            dsw.zero(size_t(N) * F);
-            proj_backward(dsw.p, dout, pick(a.sw, a.swh), o.wproj, N, F, C, cfg.ternary);
+            proj_backward(dsw.p, dout, pick(a.sw, a.swh), o.wproj, N, F, C, cfg.ternary, 0.0f);
             swiglu_backward(dfc.p, dfch.p, dsw.p, a.fc.p, N, F);
-            proj_backward(dx, pick(dfc, dfch), pick(a.ln2, a.ln2h), o.wfc, N, C, 2 * F, cfg.ternary);
+            proj_backward(dx, pick(dfc, dfch), pick(a.ln2, a.ln2h), o.wfc, N, C, 2 * F, cfg.ternary,
+                          add ? 1.0f : 0.0f);
+            add = true;  // the experts add to it
         }
-        if (cfg.moe()) moe_backward(l, dx, dout, N);
+        if (cfg.moe()) moe_backward(l, dx, dout, N, add);
     }
 
     // The experts' products for all experts at once (grouped_gemm.cuh), as
@@ -1857,7 +1868,8 @@ struct GpuTrainer::Impl {
     // Routing, then every expert's rows through its two projections. The
     // router's counts never leave the GPU: the grouped products find each
     // expert's rows in a.starts.
-    void moe_forward(int l, float* out, int N, bool training) {
+    // out = resid + base + the experts' gated outputs (base may be null).
+    void moe_forward(int l, float* out, const float* resid, const float* base, int N, bool training) {
         auto& a = acts[l];
         const auto& o = layer[l];
         const int C = cfg.d_model, E = cfg.n_experts, K = cfg.top_k, Fe = cfg.ehidden(), NK = N * K;
@@ -1911,11 +1923,14 @@ struct GpuTrainer::Impl {
             }
         }
         Region combine(*this, "moe routing");
-        moe_combine<<<blocks_for(size_t(N) * C), kBlock>>>(out, a.ey.p, a.gate.p, a.row_of.p, N, C, K);
+        moe_combine<<<blocks_for(size_t(N) * C), kBlock>>>(out, resid, base, a.ey.p, a.gate.p, a.row_of.p, N, C,
+                                                           K);
         LAUNCH_CHECK();
     }
 
-    void moe_backward(int l, float* dx, const float* dout, int N) {
+    // Adds the experts' and router's input gradient into dx, or with add
+    // false writes it (the scatter writes, then the router's product adds).
+    void moe_backward(int l, float* dx, const float* dout, int N, bool add) {
         auto& a = acts[l];
         const auto& o = layer[l];
         const int C = cfg.d_model, E = cfg.n_experts, K = cfg.top_k, Fe = cfg.ehidden(), NK = N * K;
@@ -1933,26 +1948,26 @@ struct GpuTrainer::Impl {
             experts_backward(dxg.p, pick(dfc, dfch), pick(a.xg, a.xgh), o.efc, efc_per, a.starts.p, NK, C, 2 * Fe,
                              cfg.ternary);
         } else {
-            dxg.zero(size_t(NK) * C);
+            // Each expert writes its own rows of dsw and dxg; together they
+            // cover all NK rows.
             const Operand dy = pick(dey, deyh), xg = pick(a.xg, a.xgh), esw = pick(a.esw, a.eswh);
             for (int e = 0; e < E; ++e) {
                 const int r0 = a.expert_start[e], n = a.expert_start[e + 1] - r0;
                 if (n == 0) continue;
-                dsw.zero(size_t(n) * Fe);
                 proj_backward(dsw.p, dy + size_t(r0) * C, esw + size_t(r0) * Fe, o.eproj + e * eproj_per, n, Fe, C,
-                              cfg.ternary);
+                              cfg.ternary, 0.0f);
                 swiglu_backward(dfc.p, dfch.p, dsw.p, a.efc.p + size_t(r0) * 2 * Fe, n, Fe);
                 proj_backward(dxg.p + size_t(r0) * C, pick(dfc, dfch), xg + size_t(r0) * C, o.efc + e * efc_per, n,
-                              C, 2 * Fe, cfg.ternary);
+                              C, 2 * Fe, cfg.ternary, 0.0f);
             }
         }
         Region r(*this, "moe routing");
-        moe_scatter<<<blocks_for(size_t(N) * C), kBlock>>>(dx, dxg.p, a.row_of.p, N, C, K);
+        moe_scatter<<<blocks_for(size_t(N) * C), kBlock>>>(dx, dxg.p, a.row_of.p, N, C, K, add);
         LAUNCH_CHECK();
         drl.zero(size_t(N) * E);
         moe_router_grad<<<blocks_for(N), kBlock>>>(drl.p, a.gate.p, dgate.p, a.sel.p, N, E, K);
         LAUNCH_CHECK();
-        linear_backward(dx, G(o.router), drl.p, a.ln2.p, P(o.router), N, C, E, false);
+        linear_backward(dx, G(o.router), drl.p, a.ln2.p, P(o.router), N, C, E, 1.0f, false);  // after the scatter
     }
 
     // A forward pass whose loss stays on the GPU: the cross-entropy summed
@@ -1987,8 +2002,7 @@ struct GpuTrainer::Impl {
             proj_forward(out_tmp.p, pick(a.atty, a.attyh), o.wo, N, C, C, attn_ternary());
             add(a.resid1.p, x, out_tmp.p, size_t(N) * C);
             rmsnorm_forward(a.ln2.p, a.ln2h.p, a.rstd2.p, a.resid1.p, P(o.ln2), N, C);
-            ffn_forward(l, out_tmp.p, N, training);
-            add(a.resid2.p, a.resid1.p, out_tmp.p, size_t(N) * C);
+            ffn_forward(l, a.resid2.p, a.resid1.p, N, training);
             x = a.resid2.p;
         }
         rmsnorm_forward(lnf_out.p, lnfh.p, rstdf.p, x, P(lnf), N, C);
@@ -2148,8 +2162,7 @@ struct GpuTrainer::Impl {
             proj_forward(out_tmp.p, pick(a.atty, a.attyh), o.wo, N, C, C, attn_ternary());
             add(a.resid1.p, x, out_tmp.p, size_t(N) * C);
             rmsnorm_forward(a.ln2.p, a.ln2h.p, a.rstd2.p, a.resid1.p, P(o.ln2), N, C);
-            ffn_forward(l, out_tmp.p, N, false);
-            add(a.resid2.p, a.resid1.p, out_tmp.p, size_t(N) * C);
+            ffn_forward(l, a.resid2.p, a.resid1.p, N, false);
             x = a.resid2.p;
         }
         decoding = false;
@@ -2245,8 +2258,11 @@ struct GpuTrainer::Impl {
         check_grads("backward()");
         const int B = B_cur, Tn = T_cur, N = B * Tn, C = cfg.d_model, V = cfg.vocab;
         if (n_valid == 0) return;
+        // Buffers whose first writer is a product or the experts' scatter
+        // are written (beta 0), not zeroed first and added to; dqkv is
+        // zeroed, since the attention backward adds into it, and dresid,
+        // which every norm's backward adds into.
         const float* xL = acts.back().resid2.p;
-        dC.zero(size_t(N) * C);
         {
             Region r(*this, "output layer and loss");
             const float dloss = float(loss_scale / n_valid);
@@ -2259,7 +2275,7 @@ struct GpuTrainer::Impl {
                 LAUNCH_CHECK();
                 ul_active = false;
             }
-            linear_backward(dC.p, G(wte), pick(logits, dlogitsh), pick(lnf_out, lnfh), P(wte), N, C, V);
+            linear_backward(dC.p, G(wte), pick(logits, dlogitsh), pick(lnf_out, lnfh), P(wte), N, C, V, 0.0f);
         }
         dresid.zero(size_t(N) * C);
         rmsnorm_backward(dresid.p, G(lnf), dC.p, xL, P(lnf), rstdf.p, N, C);
@@ -2267,16 +2283,13 @@ struct GpuTrainer::Impl {
             auto& a = acts[l];
             const auto& o = layer[l];
             const float* x_in = l ? acts[l - 1].resid2.p : x0.p;
-            dC.zero(size_t(N) * C);
-            ffn_backward(l, dC.p, dresid.p, N);
+            ffn_backward(l, dC.p, dresid.p, N, false);
             rmsnorm_backward(dresid.p, G(o.ln2), dC.p, a.resid1.p, P(o.ln2), a.rstd2.p, N, C);
-            datty.zero(size_t(N) * C);
-            proj_backward(datty.p, dresid.p, pick(a.atty, a.attyh), o.wo, N, C, C, attn_ternary());
+            proj_backward(datty.p, dresid.p, pick(a.atty, a.attyh), o.wo, N, C, C, attn_ternary(), 0.0f);
             dqkv.zero(size_t(N) * 3 * C);
             attention_backward(dqkv.p, datty.p, a, B, Tn);
             if (cfg.rope_layer(l)) rope_apply(dqkv.p, B, Tn, true);
-            dC.zero(size_t(N) * C);
-            proj_backward(dC.p, dqkv.p, pick(a.ln1, a.ln1h), o.wqkv, N, C, 3 * C, attn_ternary());
+            proj_backward(dC.p, dqkv.p, pick(a.ln1, a.ln1h), o.wqkv, N, C, 3 * C, attn_ternary(), 0.0f);
             rmsnorm_backward(dresid.p, G(o.ln1), dC.p, x_in, P(o.ln1), a.rstd1.p, N, C);
         }
         embedding_bwd<<<blocks_for(size_t(N) * C), kBlock>>>(G(wte), dresid.p, tokens.p, N, C);
