@@ -2,6 +2,7 @@
 #pragma once
 
 #include <algorithm>
+#include <cctype>
 #include <fstream>
 #include <iterator>
 #include <limits>
@@ -256,6 +257,60 @@ inline std::set<int> check_solution(const WordProblem& generated, bool notes) {
     return forms;
 }
 
+// The audit's rules (2026-10-16): what makes a story read like one a person
+// would tell.
+inline void check_sense(const WordProblem& p, bool test) {
+    const std::string text = p.problem.question + "\n" + p.problem.steps;
+    // No "1 cards" or "1 more bookmarks": a 1 on its own before a plural word.
+    for (size_t at = 0; (at = text.find('1', at)) != std::string::npos; ++at) {
+        const bool alone = (at == 0 || std::string("0123456789.$/").find(text[at - 1]) == std::string::npos) &&
+                           at + 1 < text.size() && text[at + 1] == ' ';
+        if (!alone) continue;
+        size_t word = at + 2;
+        if (text.compare(word, 5, "more ") == 0) word += 5;
+        if (text.compare(word, 3, "as ") == 0) continue;  // "= 1 as the result" is not a plural
+        size_t end = word;
+        while (end < text.size() && std::isalpha(static_cast<unsigned char>(text[end]))) ++end;
+        EXPECT(end == word || text[end - 1] != 's', "a plural after 1: %s", text.substr(at, end - at).c_str());
+    }
+    // No step leaves nothing, or exactly one.
+    for (size_t i = 0; i < p.plan.size(); ++i)
+        if (p.plan[i].op) EXPECT(p.values[i] != 0 && p.values[i] != 100, "a step leaves 0 or 1: %s", text.c_str());
+    // A payment a shopper would hand over: above the bill, a multiple of $5,
+    // and at most about twice the bill.
+    if (p.shape == WordProblem::change) {
+        const int64_t pay = p.inputs[2], bill = pay - p.values.back();
+        EXPECT(pay > bill && pay % 500 == 0 && pay <= 2 * bill + 500, "an odd payment: %s",
+               p.problem.question.c_str());
+    }
+    // A family's wording repeats only once all the split's wordings are used.
+    std::array<std::vector<int>, word_detail::family_count> seen;
+    for (int id : p.patterns) {
+        auto& used = seen[size_t(id / 6)];
+        if (used.size() == (test ? 2u : 4u)) used.clear();
+        EXPECT(std::find(used.begin(), used.end(), id % 6) == used.end(), "a wording repeats too soon: %s",
+               p.problem.question.c_str());
+        used.push_back(id % 6);
+    }
+    // Chains: at most two cuts (share, fraction, percentage), never two in a
+    // row; at most one sale and one purchase.
+    if (p.shape == WordProblem::chain) {
+        int cuts = 0, sales = 0, purchases = 0;
+        bool last_cut = false;
+        for (size_t i = 1; i < p.patterns.size(); ++i) {
+            const int family = p.patterns[i] / 6;
+            const bool cut = family == word_detail::share || family == word_detail::fraction ||
+                             family == word_detail::percent;
+            EXPECT(!(cut && last_cut), "two cuts in a row: %s", p.problem.question.c_str());
+            cuts += cut;
+            sales += family == word_detail::sell;
+            purchases += family == word_detail::buy;
+            last_cut = cut;
+        }
+        EXPECT(cuts <= 2 && sales <= 1 && purchases <= 1, "an unlikely chain: %s", p.problem.question.c_str());
+    }
+}
+
 inline void arithmetic() {
     // Boundaries include negative inputs, division by zero, non-cent results,
     // fractional counts, the cap itself, and values that would overflow if
@@ -311,6 +366,7 @@ inline void test_wordgen() {
         for (int i = 0; i < 600; ++i) {
             const auto p = make_word_problem(rng, options);
             for (int form : word_check::check_solution(p, true)) wordings[p.shape].insert(form);
+            word_check::check_sense(p, test);
             shapes_by_length.insert((int(test) * 7 + steps - 2) * WordProblem::shape_count + p.shape);
             if (p.shape == WordProblem::total) {
                 if (p.three_people) saw_three_people = true;

@@ -152,7 +152,11 @@ Math problem-solving accuracy is the first evaluation focus.
   operations, distractor sentences, money spelled three ways; 120 sentence
   patterns, 40 of them held out for the test split. Besides the plan's own
   exact check, a second solver works the five newer shapes out from the
-  story's quantities alone.
+  story's quantities alone. Audited 2026-10-16 (README, "Generated word
+  problems"): no "1 cards", realistic payments, kept items with a source,
+  at most two cuts per chain, no wording repeated too soon; the tests
+  check each rule. `data/targeted-math` was made before the audit (commit
+  3b6d880) and keeps the old flaws until the owner decides to rebuild it.
 - GSM8K dev set: `scripts/get_data.py` holds out 500 GSM8K train problems
   (the 500 questions with the smallest sha256); `DEV=1 scripts/night.sh`
   validates on it instead of the test set. `cxxgpt leak-check` finds
