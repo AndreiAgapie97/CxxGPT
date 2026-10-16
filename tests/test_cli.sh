@@ -15,6 +15,7 @@ require_absent() {
     [[ "$result" == 1 ]]
 }
 cd "$(dirname "$0")/.."
+python3 tests/test_reason_report.py "$CXXGPT"
 TEST_DIR=$(mktemp -d)
 trap 'rm -rf -- "$TEST_DIR"' EXIT
 "$CXXGPT_TRAINING_CLI" clone-fixture "$TEST_DIR"

@@ -44,6 +44,7 @@
 #include "profile.h"
 #include "qa_context.h"
 #include "reasoning.h"
+#include "reason_report.h"
 #include "tokenizer.h"
 #include "train.h"
 #include "wordgen.h"
@@ -894,7 +895,8 @@ struct Backend {
     // for checkpoints and evaluations.
     virtual void sync() = 0;
     // The reasoning exam on the current weights: greedy, exact answers.
-    virtual EvalResult reason(const std::vector<Problem>& problems, const Tokenizer& tok, int max_new) = 0;
+    virtual EvalResult reason(const std::vector<Problem>& problems, const Tokenizer& tok, int max_new,
+                              bool keep_completions) = 0;
     // Device memory held, for the GPU; 0 on the CPU.
     virtual size_t device_bytes() const { return 0; }
     // Unlikelihood training (#34). While it is on, forward() still returns
@@ -949,8 +951,9 @@ struct CpuBackend : Backend {
         return balance_with_load_log(model, rate, interval);
     }
     void sync() override {}
-    EvalResult reason(const std::vector<Problem>& problems, const Tokenizer& tok, int max_new) override {
-        return eval_reasoning(model, problems, tok, 64, max_new);
+    EvalResult reason(const std::vector<Problem>& problems, const Tokenizer& tok, int max_new,
+                      bool keep_completions) override {
+        return eval_reasoning(model, problems, tok, 64, max_new, 8, keep_completions);
     }
 };
 
@@ -1011,18 +1014,19 @@ struct GpuBackend : Backend {
     // change greedy answers). The GPU exam scores the model as training
     // computes it (bf16 products by default), so a CPU eval-reasoning of
     // the checkpoint can differ by a problem or two.
-    EvalResult reason(const std::vector<Problem>& problems, const Tokenizer& tok, int max_new) override {
+    EvalResult reason(const std::vector<Problem>& problems, const Tokenizer& tok, int max_new,
+                      bool keep_completions) override {
         const int batch = gpu.decode_capacity(64);
         if (batch == 0) {
             std::printf("reasoning eval: the GPU decoder needs %zu MB per answer, and the gradient buffer and %zu "
                         "MB of free GPU memory are not enough; on the CPU instead\n",
                         gpu.decode_bytes_per_sequence() >> 20, GpuTrainer::free_device_bytes() >> 20);
             sync();
-            return eval_reasoning(model, problems, tok, 64, max_new);
+            return eval_reasoning(model, problems, tok, 64, max_new, 8, keep_completions);
         }
         std::printf("reasoning eval on the GPU, %d answers at a time\n", batch);
         GpuDecoder dec{model.cfg, gpu};
-        return eval_reasoning(dec, problems, tok, batch, max_new);
+        return eval_reasoning(dec, problems, tok, batch, max_new, 8, keep_completions);
     }
     size_t device_bytes() const override { return gpu.device_bytes(); }
 };
@@ -1069,6 +1073,7 @@ int cmd_train(Args& a) {
             "        attention is fused by default (no stored weight matrix; on the tensor cores\n"
             "        with tf32/bf16); --no-fused-attn uses cuBLAS products instead\n"
             "reason: --reason-test FILE --reason-every STEPS --reason-limit 300 --max-new 200\n"
+            "        --reason-report PREFIX (optional answers/labels in PREFIX.step-N.jsonl)\n"
             "Ctrl-C saves a checkpoint and stops; --resume continues from --out, and\n"
             "takes precedence over --init once --out exists.\n");
         return 0;
@@ -1111,6 +1116,8 @@ int cmd_train(Args& a) {
     const int eval_batches = a.integer_int("eval-batches", 20), save_every = a.integer_int("save-every", 500);
     const double time_limit = a.real("time-limit", 0) * 60.0;
     const std::string reason_path = a.str("reason-test");
+    const std::string reason_report_prefix = a.str("reason-report");
+    CHECK(reason_report_prefix.empty() || !reason_path.empty(), "--reason-report requires --reason-test");
     const Tokenizer tok = load_tokenizer(a.str("bpe"));
     const int reason_every = a.integer_int("reason-every", 0), reason_limit = a.integer_int("reason-limit", 300);
     const int max_new = a.integer_int("max-new", 200);
@@ -1247,17 +1254,32 @@ int cmd_train(Args& a) {
     // Optional exact-answer reasoning eval during training, on an even
     // sample of the test set.
     std::vector<Problem> reason_test;
+    std::vector<size_t> reason_ids;
+    ReasonReport reason_report;
     if (!reason_path.empty()) {
         const std::vector<Problem> all = load_problems(reason_path);
         const size_t n = std::min(all.size(), size_t(std::max(1, reason_limit)));
-        for (size_t i = 0; i < n; ++i) reason_test.push_back(all[i * all.size() / n]);
+        for (size_t i = 0; i < n; ++i) {
+            reason_ids.push_back(i * all.size() / n);
+            reason_test.push_back(all[reason_ids.back()]);
+        }
     }
     auto reason_eval = [&](long at_step) {
         if (reason_test.empty()) return;
         const double t0 = now_seconds();
-        const EvalResult r = be.reason(reason_test, tok, max_new);
+        const EvalResult r = be.reason(reason_test, tok, max_new, !reason_report_prefix.empty());
         std::printf("reasoning eval at step %ld (%.1f s):\n", at_step, now_seconds() - t0);
         print_eval(r, 1);  // one wrong answer, to see what the model writes
+        if (!reason_report_prefix.empty()) {
+            auto str = [](const std::string& s) { return "\"" + labels::json_escape(s) + "\""; };
+            const std::string settings = "{\"type\":\"settings\",\"step\":" + std::to_string(at_step) +
+                ",\"out\":" + str(out) + ",\"test\":" + str(reason_path) + ",\"bpe\":" + str(a.str("bpe")) +
+                ",\"effort\":" + str(r.effort) + ",\"max_new\":" + std::to_string(max_new) +
+                ",\"gpu_requested\":" + (use_gpu ? "true" : "false") + ",\"matmul\":" + str(matmul) +
+                ",\"seed\":" + std::to_string(seed) + "}";
+            reason_report.write(reason_report_prefix, at_step, settings, reason_test, r.completions, reason_ids,
+                                [&](const std::string& c) { return tok.encode(c); });
+        }
         if (log) {
             std::fprintf(log, "# reasoning step %ld: %d/%d\n", at_step, r.correct, r.total);
             std::fflush(log);
