@@ -1078,7 +1078,7 @@ int cmd_train(Args& a) {
             "        wsd: flat at --lr, then a cooldown over the last --decay-steps, default a fifth of\n"
             "        --steps; before the cooldown the rate does not depend on --steps, so a run can be\n"
             "        made longer, or a copy of its checkpoint resumed with --steps STEP+D --decay-steps D\n"
-            "        to cool down a model to evaluate while the run goes on)\n"
+            "        to cool down a copy to evaluate, the run's own checkpoint untouched)\n"
             "        --muon (Muon instead of AdamW for the matrices in the blocks)\n"
             "        --sampler random (qa: a window starting inside a question-answer document that fits\n"
             "        in one moves back to its start, so the answer is trained with its question)\n"

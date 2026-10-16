@@ -130,7 +130,11 @@ run's own options, with logs of the copy's own (`--log`, `--load-log`,
 `--reason-report`). The copy starts its cooldown from the run's exact
 state; `clean1.ckpt` is not touched, so the run itself resumes afterwards
 at the full rate. The laptop's GPU trains one model at a time: run the
-cooldown while the main run is stopped (or on another GPU). With 20% of
+cooldown while the main run is stopped (or on another GPU). This is a
+smooth continuation when the run itself trains with `--schedule wsd`.
+For a run trained with cosine (such as `clean1` so far), give the copy
+`--lr` equal to the last rate in the run's log (`lr` column), or its
+rate jumps back up to `--lr` at the first step. With 20% of
 the steps as cooldown, WSD matched cosine in a published comparison
 (Hagele et al., 2024). The cooldown makes most of its drop early: after a
 quarter of its steps, half the drop is done.
