@@ -1,0 +1,185 @@
+[
+  {
+    "name": "textbooks",
+    "repo": "common-pile/libretexts_filtered",
+    "revision": "70388bca52b4a93515e14b1d56618fd7944988fd",
+    "files": [
+      {
+        "path": "libretexts-0000.json.gz",
+        "bytes": 115037937,
+        "sha256": "71851a2b5acfccf80659729a0eccd07ab6ed737f0edc659a662aa9c1cd2194db"
+      }
+    ]
+  },
+  {
+    "name": "doab",
+    "repo": "common-pile/doab_filtered",
+    "revision": "defb24ca72ef6aba6ce0228b669eec06dcfbffbc",
+    "files": [
+      {
+        "path": "doab-0000.json.gz",
+        "bytes": 773832701,
+        "sha256": "accc516500948254b21255c02c3b5582436e796f264b4268380179a3b222753c"
+      },
+      {
+        "path": "doab-0001.json.gz",
+        "bytes": 777881034,
+        "sha256": "b3086c46769471d5a7deac2239365a36e58baf784f5ae9efb6808694b907c6a2"
+      },
+      {
+        "path": "doab-0002.json.gz",
+        "bytes": 771664304,
+        "sha256": "ed7b1e2c46b9d68a9c67b79c3bd9c9ff7b18356d39d7328898cf0336f9d4ab46"
+      },
+      {
+        "path": "doab-0003.json.gz",
+        "bytes": 766746477,
+        "sha256": "e593b6f447b1346233cd85afce2b1412024250bf3b8868d352ffd135a0e5a00c"
+      },
+      {
+        "path": "doab-0004.json.gz",
+        "bytes": 257342143,
+        "sha256": "e894683cd6f29ce6107c2c5c8080f4ddc385282ce7ee3be84f878239260a4118"
+      }
+    ]
+  },
+  {
+    "name": "arxiv",
+    "repo": "common-pile/arxiv_papers_filtered",
+    "revision": "033cf7f53f9b348deec868c1a5a48484f3ee9e52",
+    "files": [
+      {
+        "path": "arxiv-papers-0000.json.gz",
+        "bytes": 807211839,
+        "sha256": "8fcc333282a73f08e870b91d685957e43dae49746621d4183ca1ecc56595cc7f"
+      },
+      {
+        "path": "arxiv-papers-0001.json.gz",
+        "bytes": 825104906,
+        "sha256": "adc639bd7fec51e92b9a00d6047fd0ef370375860a1d517eff5482d0d17b0be3"
+      },
+      {
+        "path": "arxiv-papers-0002.json.gz",
+        "bytes": 836455630,
+        "sha256": "111b0cd16ff4110fff6995a3b8e98f8a1d82f16894ea699796133fef5c2fb198"
+      },
+      {
+        "path": "arxiv-papers-0003.json.gz",
+        "bytes": 834877687,
+        "sha256": "adaff24434e6468094b17daf6b0368f77741d01329d9c8877cbce15459a72392"
+      },
+      {
+        "path": "arxiv-papers-0004.json.gz",
+        "bytes": 840154089,
+        "sha256": "8f9e9006a5a8c1f1c2beb391ccd313bcd457f047e6e250de083f1f47e8c13857"
+      },
+      {
+        "path": "arxiv-papers-0005.json.gz",
+        "bytes": 842526499,
+        "sha256": "f54481c7318b01aa8e459d1da519d839ed2af694fd9a2c33b86d3b8be63e7470"
+      },
+      {
+        "path": "arxiv-papers-0006.json.gz",
+        "bytes": 840230674,
+        "sha256": "60dbfe42596e6255eb2e54566c715c2ebddb77df0d6030154a293f570d933f32"
+      },
+      {
+        "path": "arxiv-papers-0007.json.gz",
+        "bytes": 210893770,
+        "sha256": "3c930859c88959b37519b77f597da9ccbb5bb2825bba1458d216f9ec5c94a90c"
+      }
+    ]
+  },
+  {
+    "name": "pubmed",
+    "repo": "common-pile/pubmed_filtered",
+    "revision": "c156f0569a92d8f2edc33cebe1f72f7d3e1cae84",
+    "files": [
+      {
+        "path": "licensed_pubmed-0000.json.gz",
+        "bytes": 2584255849,
+        "sha256": "c94eba4da3b5bdc01a304137b57d145257e61f42f4e01809cc7ebeb6fd15df48"
+      },
+      {
+        "path": "licensed_pubmed-0001.json.gz",
+        "bytes": 2699667261,
+        "sha256": "40b607c30c2ce358253a2ec34129b41bb59efc15f22f97e0d022a56e8b3f22ff"
+      },
+      {
+        "path": "licensed_pubmed-0002.json.gz",
+        "bytes": 2704144015,
+        "sha256": "a754ffd73c0d8ba9d3632f0e0bc5486098d1115949a01f95baa2c9721b97bb3e"
+      },
+      {
+        "path": "licensed_pubmed-0003.json.gz",
+        "bytes": 2695060696,
+        "sha256": "48e5ee4896e6d9436704557299247cb9dfd2453ed7da37e1b73c677df382c14e"
+      },
+      {
+        "path": "licensed_pubmed-0004.json.gz",
+        "bytes": 2679174176,
+        "sha256": "6ad9c21b3f499f63a2f369a480f4a66077ccd14a86428a40ad48b4e34e30760f"
+      },
+      {
+        "path": "licensed_pubmed-0005.json.gz",
+        "bytes": 2671835363,
+        "sha256": "0f7d33bd1e325faef3d3d5503bf1a0b1114c7096a431b260216baa488755aa98"
+      },
+      {
+        "path": "licensed_pubmed-0006.json.gz",
+        "bytes": 2660944348,
+        "sha256": "073ed3d8f0b0236a3ea714cbe7fbf7b01393fe34607ef3f4dc612aca1555ca2e"
+      },
+      {
+        "path": "licensed_pubmed-0007.json.gz",
+        "bytes": 2638479833,
+        "sha256": "483e20a094aa868fca95e045bb714ce00ba468f50d5af6b23939f921145dac12"
+      },
+      {
+        "path": "licensed_pubmed-0008.json.gz",
+        "bytes": 2639269576,
+        "sha256": "ac5d5d71898e4e3f01ad1c2115418dbc5fef011812769457ff39e89fd37baa7a"
+      },
+      {
+        "path": "licensed_pubmed-0009.json.gz",
+        "bytes": 2606831493,
+        "sha256": "dd192b69ff802a90c186932a12dbefe78aa896934d36377aa1c47f15e0320cae"
+      },
+      {
+        "path": "licensed_pubmed-0010.json.gz",
+        "bytes": 2611823845,
+        "sha256": "97621e497b53a5a9a9acf60b2488bd55fcba1b95071e80fe1b69bb66d5a80956"
+      },
+      {
+        "path": "licensed_pubmed-0011.json.gz",
+        "bytes": 2615844233,
+        "sha256": "c4c4737a89857525cab3efb5da2ce6c8560441d245fedad762ec2544eec1a71b"
+      },
+      {
+        "path": "licensed_pubmed-0012.json.gz",
+        "bytes": 2597305751,
+        "sha256": "193c9d778804e3e953e749ca36accefad00ec0d8569c09e83761e12168b3575e"
+      },
+      {
+        "path": "licensed_pubmed-0013.json.gz",
+        "bytes": 2583810041,
+        "sha256": "43a40a11b1a756d5e9ccc5f7967d717bb0fcc6e7013cce45fa2252fb45d24a92"
+      },
+      {
+        "path": "licensed_pubmed-0014.json.gz",
+        "bytes": 2602885268,
+        "sha256": "60546ddf63bc9f1f381bb0ac2c6fb78743b5177f762e1ce4131d960911165d08"
+      },
+      {
+        "path": "licensed_pubmed-0015.json.gz",
+        "bytes": 2619726679,
+        "sha256": "514a756ce75d02a7c33b8cdeb90caedd7f826a1122e69d2ce03082d440883eaf"
+      },
+      {
+        "path": "licensed_pubmed-0016.json.gz",
+        "bytes": 1344124178,
+        "sha256": "fb607dc80d67e341fd9608ab3fee93d1891752425d7b02ce2ee85b317a95afce"
+      }
+    ]
+  }
+]
