@@ -204,22 +204,39 @@ inline void test_control_file() {
     c = parse_control("\xEF\xBB\xBF" "stop");  // UTF-8 byte-order mark, no final newline
     EXPECT(c.errors.empty() && c.stop, "UTF-8 control file with a byte-order mark not read");
 
+    // The file, with the clock passed in: a change counts once it has stayed
+    // the same for ControlFile::kSettleSeconds (0.5 s).
     const std::string path = test_path("train.control");
     std::filesystem::remove(path);
     ControlFile file(path);
-    EXPECT(!file.poll(), "a missing control file reads as a change");
+    EXPECT(!file.read_now(), "a missing control file has commands");
+    EXPECT(!file.poll(0) && !file.poll(1), "a missing control file reads as a change");
     auto write = [&](const char* text) { std::ofstream(path, std::ios::binary) << text; };
     write("lr-scale 0.5\nsave\n");
-    auto got = file.poll();
+    EXPECT(!file.poll(2) && !file.poll(2.4), "a control file acted on before it settled");
+    auto got = file.poll(2.6);
     EXPECT(got && got->lr_scale == 0.5 && got->save, "a new control file was not read");
-    EXPECT(!file.poll(), "an unchanged control file reads again");
+    EXPECT(!file.poll(2.7) && !file.poll(9), "an unchanged control file reads again");
+    // A shell's `>`: the file is empty for a moment, then written. The empty
+    // moment never counts, so lr-scale does not go back to 1 in between.
+    write("");
+    EXPECT(!file.poll(10), "an emptied control file counted at once");
     write("lr-scale 0.5\nstop\n");
-    got = file.poll();
+    EXPECT(!file.poll(10.1) && !file.poll(10.5), "a rewritten control file counted before it settled");
+    got = file.poll(10.7);
     EXPECT(got && got->lr_scale == 0.5 && got->stop && !got->save, "a changed control file was not read");
     std::filesystem::remove(path);
-    got = file.poll();
+    EXPECT(!file.poll(11), "a deleted control file counted at once");
+    got = file.poll(11.6);
     EXPECT(got && got->lr_scale == 1 && !got->stop && got->errors.empty(), "a deleted control file is not empty");
-    EXPECT(!file.poll(), "a deleted control file reads twice");
+    EXPECT(!file.poll(12), "a deleted control file reads twice");
+    // Already there at the start: read at once, and not again until it changes.
+    write("lr-scale 2\nstop\n");
+    ControlFile at_start(path);
+    got = at_start.read_now();
+    EXPECT(got && got->lr_scale == 2 && got->stop, "a control file there at the start was not read");
+    EXPECT(!at_start.poll(0) && !at_start.poll(5), "a control file there at the start counts again");
+    std::filesystem::remove(path);
 }
 
 inline void test_train() {

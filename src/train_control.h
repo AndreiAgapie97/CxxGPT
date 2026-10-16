@@ -1,6 +1,7 @@
 // The control file of `cxxgpt train` (--control FILE, default OUT.control):
 // a way to steer a run while it trains, without stopping it. The trainer
-// looks at the file before every step and acts when it has changed:
+// looks at the file before every step and acts when it has changed and
+// then stayed the same for half a second:
 //
 //   lr-scale 0.5   the learning rate is the schedule's times 0.5 from now on
 //                  (a setting: it holds while the line is in the file, also
@@ -81,37 +82,64 @@ inline ControlCommands parse_control(std::string text) {
 
 class ControlFile {
   public:
+    // A change counts once the file has stayed the same this long. A shell's
+    // `>` empties the file before it writes it, and an editor may save in
+    // pieces: read at once, the file could be half written (an emptied file
+    // would set lr-scale back to 1 for a few steps).
+    static constexpr double kSettleSeconds = 0.5;
+
     explicit ControlFile(std::string path) : path_(std::move(path)) {}
     const std::string& path() const { return path_; }
 
-    // The file's commands when it changed since the last look (its time or
-    // its text); a deleted file reads as empty, so lr-scale goes back to 1.
-    // A file that cannot be read now (an editor holding it on Windows) is
-    // tried again next time.
-    std::optional<ControlCommands> poll() {
-        std::error_code ec;
-        std::optional<State> now;
-        if (std::filesystem::exists(path_, ec)) {
-            State s;
-            s.time = std::filesystem::last_write_time(path_, ec);
-            if (ec) return std::nullopt;
-            std::ifstream f(path_, std::ios::binary);
-            if (!f) return std::nullopt;
-            s.text.assign(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>());
-            if (f.bad()) return std::nullopt;
-            now = std::move(s);
+    // At the start: the file's commands as it is now, when it is there.
+    std::optional<ControlCommands> read_now() {
+        const std::optional<State> s = read();
+        if (!s) return std::nullopt;
+        last_ = pending_ = *s;
+        if (!s->exists) return std::nullopt;
+        return parse_control(s->text);
+    }
+
+    // While training: the file's commands when it changed (its time or its
+    // text) and then stayed the same for kSettleSeconds. `now` is in seconds
+    // on a steady clock. A deleted file reads as empty, so lr-scale goes back
+    // to 1. A file that cannot be read now (an editor holding it on Windows)
+    // is tried again next time.
+    std::optional<ControlCommands> poll(double now) {
+        const std::optional<State> s = read();
+        if (!s) return std::nullopt;
+        if (*s != pending_) {  // changed since the last look: wait for it to settle
+            pending_ = *s;
+            pending_since_ = now;
+            return std::nullopt;
         }
-        if (now == last_) return std::nullopt;
-        last_ = now;
-        return parse_control(now ? now->text : std::string());
+        if (pending_ == last_ || now - pending_since_ < kSettleSeconds) return std::nullopt;
+        last_ = pending_;
+        return parse_control(last_.text);
     }
 
   private:
     struct State {
-        std::filesystem::file_time_type time;
+        bool exists = false;  // a missing file: no time, no text
+        std::filesystem::file_time_type time{};
         std::string text;
         bool operator==(const State&) const = default;
     };
+    std::optional<State> read() const {
+        State s;
+        std::error_code ec;
+        if (!std::filesystem::exists(path_, ec)) return ec ? std::nullopt : std::optional<State>(s);
+        s.exists = true;
+        s.time = std::filesystem::last_write_time(path_, ec);
+        if (ec) return std::nullopt;
+        std::ifstream f(path_, std::ios::binary);
+        if (!f) return std::nullopt;
+        s.text.assign(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>());
+        if (f.bad()) return std::nullopt;
+        return s;
+    }
+
     std::string path_;
-    std::optional<State> last_;
+    State last_, pending_;  // what was acted on; what was seen last
+    double pending_since_ = 0;
 };

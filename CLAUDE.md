@@ -222,7 +222,8 @@ Math problem-solving accuracy is the first evaluation focus.
   down with `--resume --steps STEP+D --decay-steps D` (trains exactly as
   an uninterrupted run, `tests/test_cli.sh`). The control file
   (`src/train_control.h`; `--control`, default `OUT.control`), read before
-  every step when it changed: `lr-scale X` (holds while written, also
+  every step, acted on once a change has stayed 0.5 s (a shell's `>`
+  empties the file first): `lr-scale X` (holds while written, also
   after a restart), `save`, `eval`, `reason`, `stop` (once a change; never
   from a file already there at the start).
 - Overnight safety: a step with a non-finite gradient is skipped, ten in a
