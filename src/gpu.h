@@ -231,6 +231,16 @@ void gpu_grouped_product(Matmul matmul, GroupedOp op, const std::vector<float>& 
                          std::vector<float>& C, const std::vector<int>& starts, int M, int N, int K, int lda, int ldb,
                          int ldc, long long stride, float beta, int offset);
 
+// The experts' bf16 input-gradient product (input_grad's shapes, B [K][N]
+// per group) with SwiGLU's backward in its epilogue, as moe_backward runs
+// it: fused gets SwiGLU's input gradient [rows, 2N] in bf16 (returned as
+// floats) from its input inp [rows, 2N] (gate | up), with the product as
+// SwiGLU's output gradient; unfused the same from the product stored in
+// fp32 and then swiglu_bwd, the path fp32 and TF32 take.
+void gpu_grouped_swiglu_grad(const std::vector<float>& A, const std::vector<float>& B, const std::vector<float>& inp,
+                             const std::vector<int>& starts, int N, int K, int offset, std::vector<float>& fused,
+                             std::vector<float>& unfused);
+
 // The fused attention kernels on their own, on host arrays (for tests):
 // out and lse from qkv [B·Tn, 3·NH·HS], then dqkv += the backward pass of
 // dout, as GpuTrainer runs them. tensor_cores picks attention_tc.cuh's

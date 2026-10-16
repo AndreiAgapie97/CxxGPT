@@ -503,13 +503,14 @@ __global__ void swiglu_fwd(float* out, __nv_bfloat16* outh, const float* inp, in
 }
 
 // swiglu_backward, written (not added) into dinp, or into dinph in bf16.
+// The experts' bf16 products do the same in their epilogue (gg::Problem::
+// swiglu), with the same gg::swiglu_grad.
 __global__ void swiglu_bwd(float* dinp, __nv_bfloat16* dinph, const float* dout, const float* inp, int N, int F) {
     const size_t i = size_t(blockIdx.x) * blockDim.x + threadIdx.x;
     if (i >= size_t(N) * F) return;
     const size_t n = i / F, j = i % F;
-    const float g = inp[n * 2 * F + j], u = inp[n * 2 * F + F + j], d = dout[i];
-    const float sg = 1.0f / (1.0f + expf(-g));
-    const float dg = d * u * sg * (1.0f + g * (1.0f - sg)), du = d * g * sg;
+    float dg, du;
+    gg::swiglu_grad(inp[n * 2 * F + j], inp[n * 2 * F + F + j], dout[i], dg, du);
     if (dinp) {
         dinp[n * 2 * F + j] = dg;
         dinp[n * 2 * F + F + j] = du;
@@ -1850,9 +1851,13 @@ struct GpuTrainer::Impl {
         LAUNCH_CHECK();
     }
     // dx[rows of e, IC] = dy · w_e (written, not added), and the weights'
-    // gradient: dw_e += dyᵀ · x over e's rows.
+    // gradient: dw_e += dyᵀ · x over e's rows. With swiglu (the SwiGLU's
+    // input [NK, 2 IC]), dx is SwiGLU's output gradient, which the product
+    // takes through SwiGLU's backward into swiglu_out (bf16) instead of
+    // writing dx.
     void experts_backward(float* dx, Operand dy, Operand x, size_t woff, size_t per, const int* starts, int NK,
-                          int IC, int OC, bool q) {
+                          int IC, int OC, bool q, const float* swiglu = nullptr,
+                          __nv_bfloat16* swiglu_out = nullptr) {
         Region r(*this, "matmul bwd");
         if (q) {
             act_quantize(xq.p, x.f, NK, IC);
@@ -1870,12 +1875,15 @@ struct GpuTrainer::Impl {
             g.B = x.f;
         }
         d.C = dx;
+        d.swiglu = swiglu;
+        d.swiglu_out = swiglu_out;
         d.lda = OC, d.ldb = IC, d.ldc = IC;
         d.strideB = (long long)per;
         d.N = IC, d.K = OC;
         d.starts = starts, d.groups = cfg.n_experts;
         d.beta = 0.0f;
-        gg::launch<false, false, false>(grouped_kind(), d, NK);
+        if (swiglu) gg::launch<false, false, false, true>(grouped_kind(), d, NK);
+        else gg::launch<false, false, false>(grouped_kind(), d, NK);
         LAUNCH_CHECK();
         g.C = G(woff);
         g.lda = OC, g.ldb = IC, g.ldc = IC;
@@ -1964,9 +1972,13 @@ struct GpuTrainer::Impl {
         }
         const size_t efc_per = size_t(2) * Fe * C, eproj_per = size_t(C) * Fe;
         if (grouped_experts) {
+            // With bf16 products, SwiGLU's backward runs in the eproj
+            // product's epilogue, so dsw is never stored (the same values and
+            // formula as swiglu_backward); fp32 and TF32 keep the two passes.
+            const bool fused = bf16_ops;
             experts_backward(dsw.p, pick(dey, deyh), pick(a.esw, a.eswh), o.eproj, eproj_per, a.starts.p, NK, Fe, C,
-                             cfg.ternary);
-            swiglu_backward(dfc.p, dfch.p, dsw.p, a.efc.p, NK, Fe);
+                             cfg.ternary, fused ? a.efc.p : nullptr, fused ? dfch.p : nullptr);
+            if (!fused) swiglu_backward(dfc.p, dfch.p, dsw.p, a.efc.p, NK, Fe);
             experts_backward(dxg.p, pick(dfc, dfch), pick(a.xg, a.xgh), o.efc, efc_per, a.starts.p, NK, C, 2 * Fe,
                              cfg.ternary);
         } else {
@@ -2749,6 +2761,55 @@ void gpu_grouped_product(Matmul matmul, GroupedOp op, const std::vector<float>& 
     }
     LAUNCH_CHECK();
     to_host(C.data(), fc.p, C.size());
+}
+
+void gpu_grouped_swiglu_grad(const std::vector<float>& A, const std::vector<float>& B, const std::vector<float>& inp,
+                             const std::vector<int>& starts, int N, int K, int offset, std::vector<float>& fused,
+                             std::vector<float>& unfused) {
+    const size_t R = size_t(starts.back()), G = starts.size() - 1;
+    DevBuf<float> fa, fb, fi, dsw;
+    DevBuf<__nv_bfloat16> ha, hb, out_f, out_u;
+    DevBuf<int> ds;
+    auto up = [&](DevBuf<float>& f, DevBuf<__nv_bfloat16>& h, const std::vector<float>& x) {
+        f.resize(x.size() + offset);
+        h.resize(x.size() + offset);
+        to_device(f.p + offset, x.data(), x.size());
+        if (!x.empty()) to_bf16<<<std::min(blocks_for(x.size()), 4096), kBlock>>>(h.p + offset, f.p + offset, x.size());
+        LAUNCH_CHECK();
+        return h.p + offset;
+    };
+    gg::Problem p;
+    p.A = up(fa, ha, A);  // [R][K]
+    p.B = up(fb, hb, B);  // per group [K][N]
+    fi.resize(inp.size());
+    to_device(fi.p, inp.data(), inp.size());
+    ds.resize(starts.size());
+    to_device(ds.p, starts.data(), starts.size());
+    dsw.resize(R * N);
+    out_f.resize(R * 2 * N);
+    out_u.resize(R * 2 * N);
+    p.lda = K, p.ldb = N, p.ldc = N;
+    p.N = N, p.K = K;
+    p.strideB = (long long)K * N;
+    p.starts = ds.p;
+    p.groups = int(G);
+    p.C = dsw.p;
+    gg::launch<false, false, false>(gg::Kind::bf16, p, int(R));  // the product into dsw, then swiglu_bwd
+    LAUNCH_CHECK();
+    if (R) swiglu_bwd<<<blocks_for(R * N), kBlock>>>(nullptr, out_u.p, dsw.p, fi.p, int(R), N);
+    LAUNCH_CHECK();
+    p.swiglu = fi.p;  // the same product with SwiGLU's backward in its epilogue
+    p.swiglu_out = out_f.p;
+    gg::launch<false, false, false, true>(gg::Kind::bf16, p, int(R));
+    LAUNCH_CHECK();
+    std::vector<__nv_bfloat16> h(R * 2 * N);
+    auto down = [&](std::vector<float>& v, const DevBuf<__nv_bfloat16>& d) {
+        to_host(h.data(), d.p, h.size());
+        v.resize(h.size());
+        for (size_t i = 0; i < h.size(); ++i) v[i] = __bfloat162float(h[i]);
+    };
+    down(fused, out_f);
+    down(unfused, out_u);
 }
 
 std::string GpuTrainer::device_name() {

@@ -21,6 +21,10 @@
 // TA: A is stored [K][M] (A(m, k) at A[k·lda + m]) instead of [M][K]; TB: B
 // is stored [N][K] instead of [K][N].
 //
+// A rows-mode product can also finish SwiGLU's backward pass in its
+// epilogue (Problem::swiglu): the experts' eproj input gradient is SwiGLU's
+// output gradient, which is then never stored.
+//
 // Three kernels: on the tensor cores in bf16 (inputs bf16) and in TF32
 // (inputs fp32, rounded to TF32 as cuBLAS's TF32 mode does), in tiles
 // (Tiling) whose operands are staged in shared memory with cp.async;
@@ -49,7 +53,23 @@ struct Problem {
     const int* starts = nullptr;         // [groups + 1] first rows, on the GPU
     int groups = 0;
     float beta = 0.0f;
+    // With launch<..., Fused = true> (rows mode, beta 0): instead of
+    // C(m, n) = v, v is the gradient of SwiGLU's output at (m, n). With
+    // SwiGLU's input in swiglu (fp32, rows of 2N: gate | up), the gate's
+    // and up's gradients go into swiglu_out (bf16, the same layout) at
+    // (m, n) and (m, N + n), and C is not written.
+    const float* swiglu = nullptr;
+    __nv_bfloat16* swiglu_out = nullptr;
 };
+
+// swiglu_backward for one element (gpu.cu's swiglu_bwd and the epilogue
+// above share it): from the gate g and up u of SwiGLU's input and the
+// gradient d of its output, the gradients of g and u.
+__device__ __forceinline__ void swiglu_grad(float g, float u, float d, float& dg, float& du) {
+    const float sg = 1.0f / (1.0f + expf(-g));
+    dg = d * u * sg * (1.0f + g * (1.0f - sg));
+    du = d * g * sg;
+}
 
 // The group and tile a block works on, and its matrices.
 struct Tile {
@@ -57,6 +77,7 @@ struct Tile {
     const char* B;
     float* C;
     int M, K, m0, n0;  // M, K: this group's
+    int row0;          // rows mode: the group's first row
     bool live;
 };
 
@@ -85,6 +106,7 @@ __device__ Tile find_tile(const Problem& p, size_t esz) {
             t.C = p.C + size_t(s) * p.ldc;
             t.M = n;
             t.K = p.K;
+            t.row0 = s;
             t.m0 = x * BM;
             t.n0 = blockIdx.y * BN;
             t.live = true;
@@ -97,11 +119,45 @@ __device__ Tile find_tile(const Problem& p, size_t esz) {
 }
 
 // C(m, n) = beta·C(m, n) + v, inside the group (m < M, n < N). With beta 0 the
-// old value is not read (it may be anything, NaN included).
+// old value is not read (it may be anything, NaN included). Fused: SwiGLU's
+// backward of v instead (Problem::swiglu). A compile-time choice: the extra
+// code in every kernel's epilogue costs registers, and so speed, even where
+// it is not taken.
+template <bool Fused>
 __device__ __forceinline__ void put(const Problem& p, const Tile& t, int m, int n, float v) {
     if (m >= t.M || n >= p.N) return;
+    if constexpr (Fused) {
+        const size_t at = size_t(t.row0 + m) * 2 * p.N + n;
+        float dg, du;
+        swiglu_grad(p.swiglu[at], p.swiglu[at + p.N], v, dg, du);
+        p.swiglu_out[at] = __float2bfloat16(dg);
+        p.swiglu_out[at + p.N] = __float2bfloat16(du);
+        return;
+    }
     float& c = t.C[size_t(m) * p.ldc + n];
     c = p.beta == 0.0f ? v : p.beta * c + v;
+}
+
+// put of v0, v1 at (m, n), (m, n + 1), n even. Fused, with N even (so every
+// pair starts 8 bytes aligned): the gate and up pairs read as float2, the
+// gradients written as bf16 pairs, the same values as two put calls.
+template <bool Fused>
+__device__ __forceinline__ void put2(const Problem& p, const Tile& t, int m, int n, float v0, float v1) {
+    if constexpr (Fused) {
+        if (m < t.M && n + 1 < p.N && p.N % 2 == 0) {
+            const size_t at = size_t(t.row0 + m) * 2 * p.N + n;
+            const float2 g = *reinterpret_cast<const float2*>(p.swiglu + at);
+            const float2 u = *reinterpret_cast<const float2*>(p.swiglu + at + p.N);
+            float dg0, du0, dg1, du1;
+            swiglu_grad(g.x, u.x, v0, dg0, du0);
+            swiglu_grad(g.y, u.y, v1, dg1, du1);
+            *reinterpret_cast<__nv_bfloat162*>(p.swiglu_out + at) = __floats2bfloat162_rn(dg0, dg1);
+            *reinterpret_cast<__nv_bfloat162*>(p.swiglu_out + at + p.N) = __floats2bfloat162_rn(du0, du1);
+            return;
+        }
+    }
+    put<Fused>(p, t, m, n, v0);
+    put<Fused>(p, t, m, n + 1, v1);
 }
 
 // ---------------------------------------------------------------------------
@@ -196,7 +252,7 @@ struct Smem {
     static_assert(bytes >= size_t(L::threads / 32) * 256 * sizeof(float), "room for the warps' scratch");
 };
 
-template <class T, class L, bool TA, bool TB, bool Reduce>
+template <class T, class L, bool TA, bool TB, bool Reduce, bool Fused>
 __global__ void __launch_bounds__(L::threads) grouped_tc(Problem p) {
     using S = Smem<T, L, TA, TB>;
     using F = TC<T>;
@@ -293,7 +349,7 @@ __global__ void __launch_bounds__(L::threads) grouped_tc(Problem p) {
             wmma::store_matrix_sync(scratch, acc[i][j], 16, wmma::mem_row_major);
             __syncwarp();
             const int m = t.m0 + (wm * FM + i) * 16, n = t.n0 + (wn * FN + j) * 16;
-            for (int e = lane; e < 256; e += 32) put(p, t, m + e / 16, n + e % 16, scratch[e]);
+            for (int e = lane; e < 256; e += 32) put<Fused>(p, t, m + e / 16, n + e % 16, scratch[e]);
             __syncwarp();
         }
 }
@@ -338,7 +394,7 @@ __device__ __forceinline__ void mma_bf16(float (&c)[4], const unsigned (&a)[4], 
         : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b0), "r"(b1));
 }
 
-template <class L, bool TA, bool TB, bool Reduce>
+template <class L, bool TA, bool TB, bool Reduce, bool Fused>
 __global__ void __launch_bounds__(L::threads) grouped_mma(Problem p) {
     using T = __nv_bfloat16;
     using S = Smem<T, L, TA, TB>;
@@ -418,24 +474,22 @@ __global__ void __launch_bounds__(L::threads) grouped_mma(Problem p) {
 #pragma unroll
         for (int j = 0; j < NT; ++j) {
             const int r0 = row + i * 16, c0 = col + j * 8;
-            put(p, t, r0, c0, acc[i][j][0]);
-            put(p, t, r0, c0 + 1, acc[i][j][1]);
-            put(p, t, r0 + 8, c0, acc[i][j][2]);
-            put(p, t, r0 + 8, c0 + 1, acc[i][j][3]);
+            put2<Fused>(p, t, r0, c0, acc[i][j][0], acc[i][j][1]);
+            put2<Fused>(p, t, r0 + 8, c0, acc[i][j][2], acc[i][j][3]);
         }
 }
 
-template <class L, bool TA, bool TB, bool Reduce>
+template <class L, bool TA, bool TB, bool Reduce, bool Fused>
 void launch_mma(const Problem& p, int total_rows) {
     const dim3 grid = Reduce ? dim3((p.M + L::BM - 1) / L::BM, (p.N + L::BN - 1) / L::BN, p.groups)
                              : dim3((total_rows + L::BM - 1) / L::BM + p.groups, (p.N + L::BN - 1) / L::BN);
     if (grid.x == 0 || grid.y == 0 || grid.z == 0) return;
     constexpr size_t bytes = Smem<__nv_bfloat16, L, TA, TB>::bytes;
-    static const bool once = (cudaFuncSetAttribute(grouped_mma<L, TA, TB, Reduce>,
+    static const bool once = (cudaFuncSetAttribute(grouped_mma<L, TA, TB, Reduce, Fused>,
                                                    cudaFuncAttributeMaxDynamicSharedMemorySize, int(bytes)),
                               true);
     (void)once;
-    grouped_mma<L, TA, TB, Reduce><<<grid, L::threads, bytes>>>(p);
+    grouped_mma<L, TA, TB, Reduce, Fused><<<grid, L::threads, bytes>>>(p);
 }
 
 // ---------------------------------------------------------------------------
@@ -464,7 +518,7 @@ __device__ __forceinline__ float value(__nv_bfloat16 x, bool) {
     return __bfloat162float(x);
 }
 
-template <class T, class L, bool TA, bool TB, bool Reduce>
+template <class T, class L, bool TA, bool TB, bool Reduce, bool Fused>
 __global__ void __launch_bounds__(kThreads) grouped_simt(Problem p, bool tf32) {
     constexpr int SM = L::SM, SN = L::SN, SK = L::SK, RM = L::RM, RN = L::RN;
     const Tile t = find_tile<Reduce, SM, SN>(p, sizeof(T));
@@ -505,7 +559,7 @@ __global__ void __launch_bounds__(kThreads) grouped_simt(Problem p, bool tf32) {
 #pragma unroll
     for (int i = 0; i < RM; ++i)
 #pragma unroll
-        for (int j = 0; j < RN; ++j) put(p, t, t.m0 + tm + (SM / RM) * i, t.n0 + tn + L::TN * j, acc[i][j]);
+        for (int j = 0; j < RN; ++j) put<Fused>(p, t, t.m0 + tm + (SM / RM) * i, t.n0 + tn + L::TN * j, acc[i][j]);
 }
 
 // ---------------------------------------------------------------------------
@@ -523,59 +577,61 @@ inline bool aligned16(const Problem& p, size_t esz, bool reduce) {
            (reduce || p.strideB % static_cast<long long>(vec) == 0);
 }
 
-template <class T, class L, bool TA, bool TB, bool Reduce>
+template <class T, class L, bool TA, bool TB, bool Reduce, bool Fused>
 void launch_tc(const Problem& p, int total_rows) {
     const dim3 grid = Reduce ? dim3((p.M + L::BM - 1) / L::BM, (p.N + L::BN - 1) / L::BN, p.groups)
                              : dim3((total_rows + L::BM - 1) / L::BM + p.groups, (p.N + L::BN - 1) / L::BN);
     if (grid.x == 0 || grid.y == 0 || grid.z == 0) return;
     constexpr size_t bytes = Smem<T, L, TA, TB>::bytes;
-    static const bool once = (cudaFuncSetAttribute(grouped_tc<T, L, TA, TB, Reduce>,
+    static const bool once = (cudaFuncSetAttribute(grouped_tc<T, L, TA, TB, Reduce, Fused>,
                                                    cudaFuncAttributeMaxDynamicSharedMemorySize, int(bytes)),
                               true);
     (void)once;
-    grouped_tc<T, L, TA, TB, Reduce><<<grid, L::threads, bytes>>>(p);
+    grouped_tc<T, L, TA, TB, Reduce, Fused><<<grid, L::threads, bytes>>>(p);
 }
 
-template <class T, class L, bool TA, bool TB, bool Reduce>
+template <class T, class L, bool TA, bool TB, bool Reduce, bool Fused>
 void launch_plain(const Problem& p, int total_rows, bool tf32) {
     const dim3 grid = Reduce ? dim3((p.M + L::SM - 1) / L::SM, (p.N + L::SN - 1) / L::SN, p.groups)
                              : dim3((total_rows + L::SM - 1) / L::SM + p.groups, (p.N + L::SN - 1) / L::SN);
     if (grid.x == 0 || grid.y == 0 || grid.z == 0) return;
-    grouped_simt<T, L, TA, TB, Reduce><<<grid, kThreads>>>(p, tf32);
+    grouped_simt<T, L, TA, TB, Reduce, Fused><<<grid, kThreads>>>(p, tf32);
 }
 
 // One grouped product. total_rows (rows mode): the groups' rows together,
 // which bounds the number of row tiles the launch needs. With few rows per
 // group (decoding: about B·top-k / experts), tiles of fewer rows waste less.
-template <bool TA, bool TB, bool Reduce>
+// Fused: SwiGLU's backward in the epilogue (rows mode, Problem::swiglu set).
+template <bool TA, bool TB, bool Reduce, bool Fused = false>
 void launch(Kind kind, const Problem& p, int total_rows) {
+    static_assert(!(Fused && Reduce), "SwiGLU's backward follows a rows-mode product");
     const bool bf16 = kind == Kind::bf16;
     const size_t esz = bf16 ? 2 : 4;
     const bool few = !Reduce && p.groups > 0 && total_rows / p.groups < 64;
     if (kind != Kind::fp32 && aligned16(p, esz, Reduce)) {
         if (Reduce) {
-            if (bf16) launch_tc<__nv_bfloat16, ReduceTiling, TA, TB, Reduce>(p, total_rows);
-            else launch_tc<float, ReduceTiling, TA, TB, Reduce>(p, total_rows);
+            if (bf16) launch_tc<__nv_bfloat16, ReduceTiling, TA, TB, Reduce, Fused>(p, total_rows);
+            else launch_tc<float, ReduceTiling, TA, TB, Reduce, Fused>(p, total_rows);
         } else if (few) {
-            if (bf16) launch_tc<__nv_bfloat16, SmallRowsTiling, TA, TB, Reduce>(p, total_rows);
-            else launch_tc<float, SmallRowsTiling, TA, TB, Reduce>(p, total_rows);
+            if (bf16) launch_tc<__nv_bfloat16, SmallRowsTiling, TA, TB, Reduce, Fused>(p, total_rows);
+            else launch_tc<float, SmallRowsTiling, TA, TB, Reduce, Fused>(p, total_rows);
         } else {
             // bf16, measured in training on the night model (2026-10-16):
             // the forward products on WMMA 128 x 128 tiles, the input
             // gradients through mma.sync on 128 x 256.
-            if (!bf16) launch_tc<float, RowsTiling, TA, TB, Reduce>(p, total_rows);
-            else if constexpr (TB) launch_tc<__nv_bfloat16, ReduceTiling, TA, TB, Reduce>(p, total_rows);
-            else launch_mma<MmaTiling<2, 4, 64, 64, 2>, TA, TB, Reduce>(p, total_rows);
+            if (!bf16) launch_tc<float, RowsTiling, TA, TB, Reduce, Fused>(p, total_rows);
+            else if constexpr (TB) launch_tc<__nv_bfloat16, ReduceTiling, TA, TB, Reduce, Fused>(p, total_rows);
+            else launch_mma<MmaTiling<2, 4, 64, 64, 2>, TA, TB, Reduce, Fused>(p, total_rows);
         }
         return;
     }
     const bool tf32 = kind == Kind::tf32;
     if (few) {
-        if (bf16) launch_plain<__nv_bfloat16, PlainSmall, TA, TB, Reduce>(p, total_rows, false);
-        else launch_plain<float, PlainSmall, TA, TB, Reduce>(p, total_rows, tf32);
+        if (bf16) launch_plain<__nv_bfloat16, PlainSmall, TA, TB, Reduce, Fused>(p, total_rows, false);
+        else launch_plain<float, PlainSmall, TA, TB, Reduce, Fused>(p, total_rows, tf32);
     } else {
-        if (bf16) launch_plain<__nv_bfloat16, PlainBig, TA, TB, Reduce>(p, total_rows, false);
-        else launch_plain<float, PlainBig, TA, TB, Reduce>(p, total_rows, tf32);
+        if (bf16) launch_plain<__nv_bfloat16, PlainBig, TA, TB, Reduce, Fused>(p, total_rows, false);
+        else launch_plain<float, PlainBig, TA, TB, Reduce, Fused>(p, total_rows, tf32);
     }
 }
 

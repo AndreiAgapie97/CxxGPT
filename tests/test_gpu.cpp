@@ -1134,6 +1134,61 @@ void grouped_products() {
     std::printf("  grouped expert products: fp32 %.1e, tf32 %.1e, bf16 %.1e apart\n", worst[0], worst[1], worst[2]);
 }
 
+// The experts' bf16 input-gradient product with SwiGLU's backward in its
+// epilogue (moe_backward with bf16 products) against the same product
+// stored in fp32 and then swiglu_bwd: the same bits, on the mma.sync
+// kernel (at least 64 rows per expert), the small-tile one and the plain
+// one (unaligned rows). Both against SwiGLU's backward in double of the
+// product of the bf16-rounded inputs.
+void grouped_swiglu_grad() {
+    struct Case {
+        const char* name;
+        std::vector<int> rows;
+        int N, K;  // N: SwiGLU's hidden size
+    };
+    const Case cases[] = {
+        {"mma tiles", {0, 300, 0, 129}, 136, 72},
+        {"wide", {200, 0, 70}, 264, 24},
+        {"few rows", {37, 0, 13, 5, 1, 64}, 48, 40},
+        {"all empty", {0, 0, 0}, 32, 16},
+    };
+    Rng rng(10);
+    double worst = 0;
+    for (const Case& c : cases)
+        for (int offset : {0, 1}) {
+            std::vector<int> starts{0};
+            for (int r : c.rows) starts.push_back(starts.back() + r);
+            const int R = starts.back(), G = int(c.rows.size());
+            std::vector<float> A(size_t(R) * c.K), B(size_t(G) * c.K * c.N), inp(size_t(R) * 2 * c.N);
+            for (float& x : A) x = float(rng.normal());
+            for (float& x : B) x = float(rng.normal());
+            for (float& x : inp) x = float(2.0 * rng.normal());
+            std::vector<float> fused, unfused;
+            gpu_grouped_swiglu_grad(A, B, inp, starts, c.N, c.K, offset, fused, unfused);
+            EXPECT(fused.size() == unfused.size() &&
+                       std::memcmp(fused.data(), unfused.data(), fused.size() * sizeof(float)) == 0,
+                   "grouped swiglu grad %s, offset %d: the fused epilogue differs from the product + swiglu_bwd",
+                   c.name, offset);
+            std::vector<float> want(fused.size());
+            for (int g = 0; g < G; ++g)
+                for (int r = starts[g]; r < starts[g + 1]; ++r)
+                    for (int n = 0; n < c.N; ++n) {
+                        double d = 0;
+                        for (int k = 0; k < c.K; ++k)
+                            d += to_bf16(A[size_t(r) * c.K + k]) * to_bf16(B[(size_t(g) * c.K + k) * c.N + n]);
+                        const double gt = inp[size_t(r) * 2 * c.N + n], u = inp[size_t(r) * 2 * c.N + c.N + n];
+                        const double sg = 1.0 / (1.0 + std::exp(-gt));
+                        want[size_t(r) * 2 * c.N + n] = float(d * u * sg * (1.0 + gt * (1.0 - sg)));
+                        want[size_t(r) * 2 * c.N + c.N + n] = float(d * gt * sg);
+                    }
+            const double e = fused.empty() ? 0.0 : rel_l2(fused.data(), want.data(), fused.size());
+            worst = std::max(worst, e);
+            EXPECT(e <= 5e-3, "grouped swiglu grad %s, offset %d: %g from the reference", c.name, offset, e);
+        }
+    // Measured 1.7e-3: the outputs are rounded to bf16.
+    std::printf("  grouped swiglu grad: fused = unfused bit for bit, %.1e from the reference\n", worst);
+}
+
 // The balancing rule on the host, as GpuBackend applied it before #50: each
 // router bias moves +rate for an expert that got fewer tokens than the
 // layer's mean, -rate for more (in float, as the biases are kept).
@@ -1277,6 +1332,7 @@ int main() {
     masked_accumulation();
     fused_kernels();
     grouped_products();
+    grouped_swiglu_grad();
     init_on_gpu();
 
     Config dense;
