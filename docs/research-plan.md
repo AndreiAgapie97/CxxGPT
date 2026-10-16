@@ -985,10 +985,35 @@ What this says:
    by raising registers), and an epilogue that reads memory must read in
    pairs or wider.
 
-   Next, by measured size: the experts' grouped products (25-32 TFLOP/s
-   against 40; up to ~200 ms, #49), the bf16 copies of products' inputs
-   (138 ms, 1249 calls a step), RoPE (64 ms, into attention's loads), the
-   fused output layer and loss, then FP8.
+8. **The experts' bf16 products, tuned** (2026-10-16, #49). All of them
+   (forward, input and weight gradients) now run on one mma.sync kernel
+   with 128 x 128 blocks and 64 x 32 warp tiles, at most 128 registers a
+   thread, so two blocks share an SM. The 128 x 256 input-gradient kernel
+   took 212 registers: one block, 8 warps an SM, too few to hide memory
+   waits. In rows mode a row tile's column tiles now run side by side, so
+   its rows of A come from the L2 cache after the first read (the efc
+   input gradient's A is 33 MB, more than L2, and was read from memory
+   once per column tile), and C is written as float2 pairs. Per layer and
+   micro-batch, the six products: 4.4 -> 3.9 ms (bench; the input gradient
+   with SwiGLU's backward 0.83 -> 0.56, the weight gradients 0.50 -> 0.42
+   and 0.97 -> 0.84). Training, interleaved without `--profile`: 2460 ->
+   2341 ms a step (-4.8%, 26.6k -> 28.0k tokens/s, the same 7.0 GB); the
+   profile's "matmul bwd" 894 -> 765 ms, the forward unchanged. Step-30
+   losses inside the spread of repeated runs.
+
+   Measured and left out: three or four stages, or 64-column steps along
+   K (shared memory then allows one block an SM, slower); running the
+   largest expert's weight gradient first (+0.03 ms with balanced experts,
+   -0.03 to -0.07 with one expert holding half the rows). cuBLAS itself
+   reaches only 23-36 TFLOP/s on these shapes, so ~40 is not a realistic
+   target here; the products now run at 30-34 (the fused one at 23, as it
+   also moves 100 MB for SwiGLU). The TF32 grouped products (ternary
+   models' default) are 9.4-10.0 ms a layer against 6.9 for cuBLAS per
+   expert: an mma.sync TF32 kernel is the next step there.
+
+   Next, by measured size: the bf16 copies of products' inputs (138 ms,
+   1249 calls a step), RoPE (64 ms, into attention's loads), the fused
+   output layer and loss, then FP8.
 
 **Size nights by the real speed.** `night.sh` sizes a night from the probe's
 tokens/s with a 10% margin, but night 1 lost about 30 minutes to the exams,

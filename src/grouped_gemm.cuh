@@ -25,12 +25,18 @@
 // epilogue (Problem::swiglu): the experts' eproj input gradient is SwiGLU's
 // output gradient, which is then never stored.
 //
-// Three kernels: on the tensor cores in bf16 (inputs bf16) and in TF32
-// (inputs fp32, rounded to TF32 as cuBLAS's TF32 mode does), in tiles
-// (Tiling) whose operands are staged in shared memory with cp.async;
+// Three kernels: on the tensor cores in bf16 (inputs bf16; mma.sync,
+// grouped_mma) and in TF32 (inputs fp32, rounded to TF32 as cuBLAS's TF32
+// mode does; WMMA, grouped_tc, which also takes decoding's few rows in
+// bf16), in tiles whose operands are staged in shared memory with cp.async;
 // and a plain fp32 kernel for exact products, which also takes the cases the
 // tensor-core kernels cannot (rows not 16-byte aligned), rounding to TF32 or
 // reading bf16 itself. Sums are fp32 throughout.
+//
+// In rows mode the column tiles of a row tile run next to each other
+// (blockIdx.x is the column tile), so its rows of A are read from memory
+// once and then from the L2 cache: with the row tiles first, a 33 MB A (the
+// efc input gradient's) was read from memory once per column tile.
 #pragma once
 
 #include <cuda_bf16.h>
@@ -96,8 +102,9 @@ __device__ Tile find_tile(const Problem& p, size_t esz) {
         t.live = t.m0 < t.M;
         return t;
     }
-    // Rows mode: blockIdx.x counts (group, row tile) pairs, groups in order.
-    int x = blockIdx.x;
+    // Rows mode: blockIdx.y counts (group, row tile) pairs, groups in order;
+    // blockIdx.x is the column tile.
+    int x = blockIdx.y;
     for (int g = 0; g < p.groups; ++g) {
         const int s = p.starts[g], n = p.starts[g + 1] - s, tiles = (n + BM - 1) / BM;
         if (x < tiles) {
@@ -108,7 +115,7 @@ __device__ Tile find_tile(const Problem& p, size_t esz) {
             t.K = p.K;
             t.row0 = s;
             t.m0 = x * BM;
-            t.n0 = blockIdx.y * BN;
+            t.n0 = blockIdx.x * BN;
             t.live = true;
             return t;
         }
@@ -138,9 +145,11 @@ __device__ __forceinline__ void put(const Problem& p, const Tile& t, int m, int 
     c = p.beta == 0.0f ? v : p.beta * c + v;
 }
 
-// put of v0, v1 at (m, n), (m, n + 1), n even. Fused, with N even (so every
-// pair starts 8 bytes aligned): the gate and up pairs read as float2, the
-// gradients written as bf16 pairs, the same values as two put calls.
+// put of v0, v1 at (m, n), (m, n + 1), n even: the same values as two put
+// calls, in half the memory instructions. Fused, with N even (so every pair
+// starts 8 bytes aligned): the gate and up pairs read as float2, the
+// gradients written as bf16 pairs. Otherwise C's pair as one float2 where
+// it is 8 bytes aligned.
 template <bool Fused>
 __device__ __forceinline__ void put2(const Problem& p, const Tile& t, int m, int n, float v0, float v1) {
     if constexpr (Fused) {
@@ -153,6 +162,18 @@ __device__ __forceinline__ void put2(const Problem& p, const Tile& t, int m, int
             swiglu_grad(g.y, u.y, v1, dg1, du1);
             *reinterpret_cast<__nv_bfloat162*>(p.swiglu_out + at) = __floats2bfloat162_rn(dg0, dg1);
             *reinterpret_cast<__nv_bfloat162*>(p.swiglu_out + at + p.N) = __floats2bfloat162_rn(du0, du1);
+            return;
+        }
+    } else if (m < t.M && n + 1 < p.N) {
+        float* c = t.C + size_t(m) * p.ldc + n;
+        if (reinterpret_cast<uintptr_t>(c) % 8 == 0) {  // a float2 at once
+            float2& c2 = *reinterpret_cast<float2*>(c);
+            if (p.beta == 0.0f) {
+                c2 = make_float2(v0, v1);
+            } else {
+                const float2 old = c2;
+                c2 = make_float2(p.beta * old.x + v0, p.beta * old.y + v1);
+            }
             return;
         }
     }
@@ -205,9 +226,10 @@ struct Tiling {
 // Measured on the RTX 4070 laptop GPU on the night model's expert products
 // (8 x 512 x top-2 rows per micro-batch, C 768, Fe 1024; scratchpad bench,
 // 2026-10-16): 128 x 256 tiles, three stages for the row products; 128 x 128,
-// two stages for the weight gradients. All six products of a layer: 4.8 ms
-// in bf16 against 5.3 ms for cuBLAS, one product per expert; 9.0 ms
-// against 10.0 in TF32.
+// two stages for the weight gradients. They now take only TF32 (bf16 runs on
+// grouped_mma, MmaBf16Tiling): all six products of a layer, 9.4-10.0 ms
+// against 6.9 ms for cuBLAS one product per expert (measured again later
+// that day; the first measurement, 9.0 against 10.0, did not hold up).
 using RowsTiling = Tiling<2, 4, 4, 4, 64, 3>;
 using ReduceTiling = Tiling<2, 4, 4, 2, 64, 2>;
 using SmallRowsTiling = Tiling<1, 4, 1, 2, 64, 2>;  // 16 x 128: decoding's few rows per expert
@@ -364,14 +386,25 @@ __global__ void __launch_bounds__(L::threads) grouped_tc(Problem p) {
 // ldmatrix (.trans for A stored [K][M] and B stored [K][N]). Shared-memory
 // rows are padded by 16 bytes, so the eight rows an ldmatrix reads fall in
 // different banks.
-template <int WarpsM_, int WarpsN_, int WM_, int WN_, int Stages_>
+template <int WarpsM_, int WarpsN_, int WM_, int WN_, int Stages_, int BKBytes = 64, int MinBlocks_ = 1>
 struct MmaTiling {
     static constexpr int WarpsM = WarpsM_, WarpsN = WarpsN_, WM = WM_, WN = WN_, Stages = Stages_;
     static constexpr int threads = WarpsM * WarpsN * 32, BM = WarpsM * WM, BN = WarpsN * WN;
-    static constexpr int bk_bytes = 64;          // 32 bf16 per row and step
+    static constexpr int bk_bytes = BKBytes;     // 64: 32 bf16 per row and step
+    static constexpr int min_blocks = MinBlocks_;  // blocks per SM the registers must leave room for
     static constexpr int MT = WM / 16, NT = WN / 8;  // mma tiles per warp
     static_assert(WM % 16 == 0 && WN % 16 == 0, "warp tiles of whole 16 x 16 pairs");
 };
+
+// Measured on the night model's expert products (scratchpad bench, 2026-10-16,
+// training's forms: the eproj input gradient fused with SwiGLU's backward):
+// 128 x 128 blocks of eight 64 x 32 warp tiles, two stages, at most 128
+// registers a thread, so two blocks share an SM (16 warps hide each other's
+// waits; 64 x 64 warp tiles took 212 registers, one block and 8 warps an SM).
+// All six products of a layer: 3.9 ms against 4.4 ms for the kernels
+// before (WMMA for the forward and weight gradients, 128 x 256 mma.sync for
+// the input gradients).
+using MmaBf16Tiling = MmaTiling<2, 4, 64, 32, 2, 64, 2>;
 
 __device__ __forceinline__ unsigned smem_u32(const void* p) {
     return static_cast<unsigned>(__cvta_generic_to_shared(p));
@@ -395,7 +428,7 @@ __device__ __forceinline__ void mma_bf16(float (&c)[4], const unsigned (&a)[4], 
 }
 
 template <class L, bool TA, bool TB, bool Reduce, bool Fused>
-__global__ void __launch_bounds__(L::threads) grouped_mma(Problem p) {
+__global__ void __launch_bounds__(L::threads, L::min_blocks) grouped_mma(Problem p) {
     using T = __nv_bfloat16;
     using S = Smem<T, L, TA, TB>;
     constexpr int BK = S::BK, MT = L::MT, NT = L::NT;
@@ -482,7 +515,7 @@ __global__ void __launch_bounds__(L::threads) grouped_mma(Problem p) {
 template <class L, bool TA, bool TB, bool Reduce, bool Fused>
 void launch_mma(const Problem& p, int total_rows) {
     const dim3 grid = Reduce ? dim3((p.M + L::BM - 1) / L::BM, (p.N + L::BN - 1) / L::BN, p.groups)
-                             : dim3((total_rows + L::BM - 1) / L::BM + p.groups, (p.N + L::BN - 1) / L::BN);
+                             : dim3((p.N + L::BN - 1) / L::BN, (total_rows + L::BM - 1) / L::BM + p.groups);
     if (grid.x == 0 || grid.y == 0 || grid.z == 0) return;
     constexpr size_t bytes = Smem<__nv_bfloat16, L, TA, TB>::bytes;
     static const bool once = (cudaFuncSetAttribute(grouped_mma<L, TA, TB, Reduce, Fused>,
@@ -580,7 +613,7 @@ inline bool aligned16(const Problem& p, size_t esz, bool reduce) {
 template <class T, class L, bool TA, bool TB, bool Reduce, bool Fused>
 void launch_tc(const Problem& p, int total_rows) {
     const dim3 grid = Reduce ? dim3((p.M + L::BM - 1) / L::BM, (p.N + L::BN - 1) / L::BN, p.groups)
-                             : dim3((total_rows + L::BM - 1) / L::BM + p.groups, (p.N + L::BN - 1) / L::BN);
+                             : dim3((p.N + L::BN - 1) / L::BN, (total_rows + L::BM - 1) / L::BM + p.groups);
     if (grid.x == 0 || grid.y == 0 || grid.z == 0) return;
     constexpr size_t bytes = Smem<T, L, TA, TB>::bytes;
     static const bool once = (cudaFuncSetAttribute(grouped_tc<T, L, TA, TB, Reduce, Fused>,
@@ -593,7 +626,7 @@ void launch_tc(const Problem& p, int total_rows) {
 template <class T, class L, bool TA, bool TB, bool Reduce, bool Fused>
 void launch_plain(const Problem& p, int total_rows, bool tf32) {
     const dim3 grid = Reduce ? dim3((p.M + L::SM - 1) / L::SM, (p.N + L::SN - 1) / L::SN, p.groups)
-                             : dim3((total_rows + L::SM - 1) / L::SM + p.groups, (p.N + L::SN - 1) / L::SN);
+                             : dim3((p.N + L::SN - 1) / L::SN, (total_rows + L::SM - 1) / L::SM + p.groups);
     if (grid.x == 0 || grid.y == 0 || grid.z == 0) return;
     grouped_simt<T, L, TA, TB, Reduce, Fused><<<grid, kThreads>>>(p, tf32);
 }
@@ -609,19 +642,15 @@ void launch(Kind kind, const Problem& p, int total_rows) {
     const size_t esz = bf16 ? 2 : 4;
     const bool few = !Reduce && p.groups > 0 && total_rows / p.groups < 64;
     if (kind != Kind::fp32 && aligned16(p, esz, Reduce)) {
-        if (Reduce) {
-            if (bf16) launch_tc<__nv_bfloat16, ReduceTiling, TA, TB, Reduce, Fused>(p, total_rows);
-            else launch_tc<float, ReduceTiling, TA, TB, Reduce, Fused>(p, total_rows);
-        } else if (few) {
+        if (few) {
             if (bf16) launch_tc<__nv_bfloat16, SmallRowsTiling, TA, TB, Reduce, Fused>(p, total_rows);
             else launch_tc<float, SmallRowsTiling, TA, TB, Reduce, Fused>(p, total_rows);
+        } else if (bf16) {
+            launch_mma<MmaBf16Tiling, TA, TB, Reduce, Fused>(p, total_rows);
+        } else if (Reduce) {
+            launch_tc<float, ReduceTiling, TA, TB, Reduce, Fused>(p, total_rows);
         } else {
-            // bf16, measured in training on the night model (2026-10-16):
-            // the forward products on WMMA 128 x 128 tiles, the input
-            // gradients through mma.sync on 128 x 256.
-            if (!bf16) launch_tc<float, RowsTiling, TA, TB, Reduce, Fused>(p, total_rows);
-            else if constexpr (TB) launch_tc<__nv_bfloat16, ReduceTiling, TA, TB, Reduce, Fused>(p, total_rows);
-            else launch_mma<MmaTiling<2, 4, 64, 64, 2>, TA, TB, Reduce, Fused>(p, total_rows);
+            launch_tc<float, RowsTiling, TA, TB, Reduce, Fused>(p, total_rows);
         }
         return;
     }

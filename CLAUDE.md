@@ -103,7 +103,9 @@ Math problem-solving accuracy is the first evaluation focus.
   zeroed, a one-pass RMSNorm backward, SwiGLU's backward in the bf16
   `eproj` product (`launch<..., Fused>`), Muon's norm over many blocks:
   2665 -> 2489 ms a step on the night model (-6.6%, 24.6k -> 26.3k
-  tokens/s, the same 7.0 GB). Training is not bitwise
+  tokens/s, the same 7.0 GB); then all the experts' bf16 products on one
+  mma.sync kernel that fits two blocks an SM (item 8, #49): 2460 -> 2341
+  ms (-4.8%, 28.0k tokens/s). Training is not bitwise
   reproducible (atomic adds in the gradients), so "same numbers" means
   within the spread of repeated runs.
   `tests/test_gpu.cpp` checks it against `src/gpu_ref.cu`, the model in
