@@ -127,14 +127,17 @@ int main(int argc, char** argv) {
         return 2;
     }
 
-    if (argc == 3 && std::string(argv[1]) == "word") {
+    // gen-word (word) and gen-math (math) write the same two files.
+    if (argc == 3 && (std::string(argv[1]) == "word" || std::string(argv[1]) == "math")) {
+        const bool math = std::string(argv[1]) == "math";
         const std::string prefix(argv[2]);
         const auto ps = load_problems(prefix + ".txt");
-        EXPECT(ps.size() == 28, "wrong gen-word count");
+        EXPECT(ps.size() == 28, "wrong problem count");
         std::string expected_text;
         std::vector<uint16_t> expected_tokens;
         for (const auto& p : ps) {
-            EXPECT(p.task == "word" && p.difficulty >= 2 && p.difficulty <= 8, "bad word metadata");
+            EXPECT(math ? p.task == "equations" && p.difficulty >= 1
+                        : p.task == "word" && p.difficulty >= 2 && p.difficulty <= 8, "bad problem metadata");
             const std::string document = p.prompt() + p.completion();
             expected_text += document + "<|endoftext|>\n";
             expected_tokens.push_back(kBos);

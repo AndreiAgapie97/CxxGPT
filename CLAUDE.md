@@ -153,6 +153,22 @@ Math problem-solving accuracy is the first evaluation focus.
   patterns, 40 of them held out for the test split. Besides the plan's own
   exact check, a second solver works the five newer shapes out from the
   story's quantities alone.
+- `src/mathgen.h` (`cxxgpt gen-math --topic equations`, 2026-10-16): word
+  problems with one unknown (number puzzles, ages, two kinds of tickets,
+  animals or packs, consecutive numbers, rectangles, three-way shares),
+  built from a chosen whole-number answer, solved in the text as an
+  equation with calculator notes. Every problem is solved again before it
+  is written by `equation_check`, which shares no code with the generator
+  (trying every whole number the story allows; exactly one must fit), and
+  every note by calc.h; tests show the checker rejects broken problems.
+  84 sentence patterns, 28 held out for test. `--exclude
+  data/licensed-10b/gsm8k-test.txt,data/licensed-10b/gsm8k-dev.txt` is
+  needed for any training use: without it a large file repeats a few GSM8K
+  test questions almost word for word. With it, 0 of GSM8K test and dev share a 13-word run, or
+  their numbers and answer, with 300k problems. Not in the training mix
+  (the owner decides). Next topics, in order: fractions/percentages/ratios/
+  units, number theory, counting (the answer format of probability needs a
+  decision first).
 - GSM8K dev set: `scripts/get_data.py` holds out 500 GSM8K train problems
   (the 500 questions with the smallest sha256); `DEV=1 scripts/night.sh`
   validates on it instead of the test set. `cxxgpt leak-check` finds

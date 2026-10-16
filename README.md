@@ -152,6 +152,7 @@ patterns for inspection and do not establish the cause of a wrong answer.
 |---|---|
 | `gen-reasoning` | writes the synthetic curriculum: problems with step-by-step solutions, train/val token files and a test set one difficulty level beyond training |
 | `gen-word` | writes exact word problems, worked solutions, and separate train/test sentence patterns |
+| `gen-math` | writes math problems built from a chosen answer (equations so far), each solved again by a second solver |
 | `bpe-train` | trains a BPE tokenizer on a text file |
 | `text2tok` | encodes text into a token file (parallel, streaming; `--doc-sep` splits documents) |
 | `prep-qa` | turns question/answer JSONL (GSM8K and the like) into token files with a loss mask and a test set |
@@ -282,6 +283,76 @@ only two patterns per sentence family, the same addition pattern often
 appears two or three times in one story. Success on its held-out wording alone is not evidence of improvement on
 GSM8K or SVAMP. No generated datasets are checked into the repository, and
 this command does not change the night data mix.
+
+### Generated math problems: equations
+
+```sh
+./cxxgpt gen-math --topic equations --out data/math/eq-train --split train --seed 1 --count 100000 \
+    --exclude data/licensed-10b/gsm8k-test.txt,data/licensed-10b/gsm8k-dev.txt
+./cxxgpt gen-math --topic equations --out data/math/eq-test --split test --seed 2 --count 1000 \
+    --exclude data/licensed-10b/gsm8k-test.txt,data/licensed-10b/gsm8k-dev.txt
+```
+
+`gen-math` (`src/mathgen.h`) writes the same two files as `gen-word`
+(`PREFIX.txt` for `eval-reasoning`, `PREFIX.text` for `text2tok`), with the
+task `equations` and, as the difficulty, the number of calculator steps in
+the solution (2-7). Its stories are the ones GSM8K solves with one unknown:
+
+- a number puzzle ("thinks of a number, multiplies it by 3, adds 7 and gets
+  31"), solved by undoing the steps from the end;
+- two ages that add up to a total, or that keep a ratio in some years;
+- two kinds of one thing: adult and child tickets, cows and chickens (their
+  legs), large and small packs;
+- consecutive whole, even or odd numbers with a given sum;
+- a rectangle whose length depends on its width, from its perimeter (asking
+  for the width, the length or the area);
+- three people sharing money ("Leo gets $5 more than Maya, Zoe gets 3 times
+  as much as Leo").
+
+The solution writes the equation (`Let x be Leo's age. Then Maya is 3x + 5
+years old.`) and solves it one step at a time, each number step a calculator
+note: `Taking 5 from both sides: 41-5 = <<41-5=36>>36, so 4x = 36.` The
+equation itself stays outside the notes, so the calculator never reads
+`3x` as a multiplication.
+
+How every problem is checked before it is written:
+
+1. The unknown is drawn first, then the story is built around it, in whole
+   numbers; a story that does not come out whole is drawn again, never
+   rounded.
+2. A second solver that shares no code with the generator solves the story
+   again from its numbers alone, by trying every whole number the story
+   allows (each possible age, ticket count, width), and must find exactly
+   one that fits: the answer written. The number puzzle is checked another
+   way: its steps are combined into one formula and solved backward.
+3. Every calculator note is worked out again with the exact calculator
+   (`src/calc.h`).
+
+If any check fails, the program stops instead of writing the problem. The
+tests also show the checker rejects broken problems (a wrong answer, a
+changed number, a wrong note).
+
+`--exclude FILES` (comma-separated problems files or one question per line)
+keeps the output clear of evaluation questions. These stories are classic,
+and without it a large file repeats a few GSM8K test questions almost word
+for word, numbers included ("Ruby is 6 times older than Sam. In 9 years,
+Ruby will be 3 times as old as Sam.", or a farm of only sheep and geese
+with 20 heads and 70 legs). A problem is drawn again when its question shares a 13-word run
+with an excluded question (`leak-check`'s rule), or has the same numbers and
+the same answer, which also catches the same problem in other words. Of
+300,000 problems, about 520 are drawn again this way; afterwards none of
+GSM8K test or dev shares a 13-word run, or its numbers and answer, with the
+output. Without `--exclude` the command says so.
+
+Other options are `gen-word`'s: `--seed`, `--count`, `--out`, `--split
+train|test` (four of six wordings per sentence for train, the other two for
+test), `--distractors on|off` and `--notes on|off`; none of the last two
+changes a random draw. Kinds with few different problems are drawn less
+often. In 1M problems: puzzles 176k different, mixtures 131k, shares 107k,
+rectangles 54k, consecutive numbers 7.2k, ages adding up 6.0k, ages in some
+years only 592 (realistic ages leave few), so those repeat with other names
+and wordings. The output is not part of the training mix; whether to train
+on it is a separate decision.
 
 ### Real data and GPU training
 
