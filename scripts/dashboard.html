@@ -264,6 +264,23 @@ function render() {
       {name: r.name, color: C[2], points: exams(r), dots: true},
       {name: vs ? vs.name : "", color: C[2], points: vs ? exams(vs) : [], dashed: true},
     ], {zero: true, marks}),
+  );
+  // train --val-sources: each held-out file on its own (a Q&A file's
+  // answers), and the final answers (after ####) of the Q&A files.
+  const vsrc = r.val_sources || {}, names = Object.keys(vsrc);
+  const palette = [C[0], C[1], C[2], C[3], css("--warn"), css("--muted")];
+  const color = n => palette[names.indexOf(n) % palette.length];
+  if (names.length) {
+    charts.append(chart("Validation loss by source (Q&A files: their answers)", names.map(n => {
+      const p = vsrc[n].answers || vsrc[n].text || [];
+      return {name: n, color: color(n), points: p, dots: p.length < 30};
+    }), {marks}));
+    const finals = names.filter(n => vsrc[n].final);
+    if (finals.length)
+      charts.append(chart("Final answers' loss (the tokens after ####)", finals.map(n =>
+        ({name: n, color: color(n), points: vsrc[n].final, dots: vsrc[n].final.length < 30})), {marks}));
+  }
+  charts.append(
     chart("Learning rate", [{name: "lr", color: C[3], points: pts(r.rows, "lr")}], {zero: true, marks}),
     chart("Gradient norm", [
       {name: "before clipping", color: C[0], points: pts(r.rows, "grad_norm")},

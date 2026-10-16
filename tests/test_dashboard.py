@@ -101,6 +101,14 @@ class ParseTest(unittest.TestCase):
         self.assertEqual(load["lowest"], [[50, 0.005], [100, 0.3]])
         self.assertEqual(load["last"], {"step": 100, "layers": [[0.6, 0.4], [0.7, 0.3]]})
 
+    def test_val_sources(self):
+        v = dash.parse_val_sources(["step,name,part,targets,loss", "0,gsm8k-dev,answers,900,1.5",
+                                    "0,gsm8k-dev,final,40,2.5", "0,books,text,8000,3.0\r",
+                                    "500,gsm8k-dev,answers,900,1.2", "500,gsm8k-dev,answers,900,1.25",
+                                    "500,books,text,8000,nan", "broken"])
+        self.assertEqual(v, {"gsm8k-dev": {"answers": [(0, 1.5), (500, 1.25)], "final": [(0, 2.5)]},
+                             "books": {"text": [(0, 3.0)]}})
+
 
 class LiveRunTest(unittest.TestCase):
     """A run read while it grows, the way the page polls it."""
@@ -189,6 +197,7 @@ class LiveRunTest(unittest.TestCase):
             self.assertEqual(json.loads(get("/api/runs")[1]), ["rp1"])
             status, body = get("/api/run?name=rp1")
             self.assertEqual((status, json.loads(body)["summary"]["last_step"]), (200, 47000))
+            self.assertEqual(json.loads(body)["val_sources"], {})
             for name in ("secret", "..%2Fsecret", "rp1.log"):
                 self.assertEqual(get("/api/run?name=" + name)[0], 404)
         finally:

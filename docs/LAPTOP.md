@@ -92,12 +92,26 @@ added, every 10 s). The page shows:
   gradient-norm jump, tokens/s under 80% of the recent speed, an expert
   under 1%, the GPU at 87 °C or slowing itself down, a control file in use;
 - charts of the training and validation loss, the GSM8K exam score, the
-  learning rate, the gradient norm, the speed, the smallest expert share
+  validation loss of each part of the mix and of GSM8K's final answers
+  (below), the learning rate, the gradient norm, the speed, the smallest expert share
   and the GPU's temperature and power, with "compare with" laying an
   earlier run over them (dashed);
 - the last wrong exam answer, each layer's expert shares, the events
   (saves, resumes, skipped steps, warnings), the settings and the log's
   last lines.
+
+One validation number hides which part of the mix improves, so night.sh
+also scores held-out files one by one (`train --val-sources`, `VAL_SOURCES`
+in night.sh): at the start and with every validation, the GSM8K
+validation set, the word problems' dev split (`data/targeted-math/word-dev.tok`)
+and a val shard each of textbooks, DOAB books and arXiv papers. A file of
+questions and answers gives two numbers: its answers' loss, and its final
+answers' (the tokens after `####`, what the exam scores). The log has one
+line each time (`val sources at step N`), and `runs/$RUN.val.csv` a row
+per number. On the RunPod model it should take about 10 s every 500 steps
+(an estimate from the forward time, not yet timed). Small
+files are scored on every token, the larger DOAB and arXiv shards on
+night.sh's 160 fixed windows.
 
 Only this computer can open it (it listens on 127.0.0.1). `--port` changes
 the port; `--no-open` does not open a browser.

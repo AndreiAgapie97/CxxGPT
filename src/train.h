@@ -423,15 +423,19 @@ struct TokenLossMean {
 // time, so the numbers are comparable. This is train's validation loss;
 // cxxgpt eval-loss gives the same number for a checkpoint. `forward(inputs,
 // targets, B, Tn)` returns the mean loss over a batch's trained targets.
+// `targets`, if given, receives how many targets were scored.
 template <class Forward>
-double sampled_loss(Forward forward, const TokenData& data, size_t lo, size_t hi, int B, int Tn, int batches) {
+double sampled_loss(Forward forward, const TokenData& data, size_t lo, size_t hi, int B, int Tn, int batches,
+                    size_t* targets = nullptr) {
     Rng rng(12345);
     std::vector<int> inp(size_t(B) * Tn), tgt(size_t(B) * Tn);
     TokenLossMean total;
     for (int i = 0; i < batches; ++i) {
         data.sample_batch(rng, B, Tn, lo, hi, inp.data(), tgt.data());
-        total.add(forward(inp.data(), tgt.data(), B, Tn), count_targets(tgt.data(), tgt.size()));
+        const size_t valid = count_targets(tgt.data(), tgt.size());
+        if (valid) total.add(forward(inp.data(), tgt.data(), B, Tn), valid);  // no 0/0 on fully masked windows
     }
+    if (targets) *targets = total.count;
     return total.value();
 }
 
