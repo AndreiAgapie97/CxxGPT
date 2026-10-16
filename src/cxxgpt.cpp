@@ -11,6 +11,7 @@
 //                                      sample N tries per problem; the headline becomes their maj@N vote
 //       [--no-repeat N]                never write a run of N tokens twice (also on sample)
 //       [--labels FILE.jsonl]          why each first try is wrong, one JSON line per problem
+//   cxxgpt eval-loss --ckpt model.ckpt --data a.tok,b.tok [--all]  loss on held-out text
 //   cxxgpt qa-context --data a.tok,b.tok [--seq 512]   answers trained without their question
 //   cxxgpt bench-infer [--ckpt model.ckpt | model options]  ternary engine vs fp32 decode
 //
@@ -1033,14 +1034,8 @@ struct GpuBackend : Backend {
 #endif
 
 double eval_loss(Backend& be, const TokenData& data, size_t lo, size_t hi, int B, int Tn, int batches) {
-    Rng rng(12345);  // the same batches every time, so evals are comparable
-    std::vector<int> inp(size_t(B) * Tn), tgt(size_t(B) * Tn);
-    TokenLossMean total;
-    for (int i = 0; i < batches; ++i) {
-        data.sample_batch(rng, B, Tn, lo, hi, inp.data(), tgt.data());
-        total.add(be.forward(inp.data(), tgt.data(), B, Tn, false), count_targets(tgt.data(), tgt.size()));
-    }
-    return total.value();
+    return sampled_loss([&](const int* inp, const int* tgt, int b, int t) { return be.forward(inp, tgt, b, t, false); },
+                        data, lo, hi, B, Tn, batches);
 }
 
 int cmd_train(Args& a) {
@@ -1420,6 +1415,87 @@ int cmd_train(Args& a) {
     return 0;
 }
 
+// A checkpoint's loss on held-out token files, one line per file: whether
+// training on math kept the model's general text (textbooks-val, wiki-val,
+// doab-val, arxiv-val), without training. By default the same random
+// windows as train --val, so with the same --batch and --batches (train's
+// --eval-batches) the number matches training's last validation; --all
+// scores every token once instead.
+int cmd_eval_loss(Args& a) {
+    if (a.flag("help")) {
+        std::printf(
+            "cxxgpt eval-loss --ckpt FILE --data a.tok[,b.tok...] [options]\n"
+            "        the token files must come from the tokenizer the model was trained with\n"
+            "        --batch 8 --batches 20 (night.sh's validation: 160 windows; train's --eval-batches)\n"
+            "        --seq (default: the model's context)\n"
+            "        --all: every token once instead of random windows (exact, slower on big files)\n"
+            "        --gpu (cxxgpt-gpu) --matmul fp32 (tf32, bf16: as training computes it)\n");
+        return 0;
+    }
+    ThreadPool tp(threads_arg(a));
+    g_pool = &tp;
+    const std::string ckpt = a.str("ckpt", "model.ckpt"), data_arg = a.str("data");
+    CHECK(!data_arg.empty(), "usage: cxxgpt eval-loss --ckpt FILE --data a.tok[,b.tok...]");
+    // night.sh's validation shape by default; on the 8 GB laptop GPU a
+    // batch of 12 or more windows of 512 already spills into system memory
+    // and runs about 10x slower.
+    const int B = a.integer_int("batch", 8), batches = a.integer_int("batches", 20);
+    CHECK(B > 0 && batches > 0, "--batch and --batches must be positive");
+    const bool all = a.flag("all");
+    const bool use_gpu = a.flag("gpu");
+    CHECK(use_gpu || !a.has("matmul"), "--matmul needs --gpu");
+    const std::string matmul = a.str("matmul", "fp32");
+    CHECK(matmul == "fp32" || matmul == "tf32" || matmul == "bf16", "--matmul takes fp32, tf32 or bf16");
+    Model<float> model(peek_checkpoint_config(ckpt));
+    const int Tn = a.integer_int("seq", model.cfg.seq_len);
+    CHECK(Tn > 0 && Tn <= model.cfg.seq_len, "--seq must be in [1, %d], the model's context", model.cfg.seq_len);
+    a.done();
+#ifndef CXXGPT_CUDA
+    CHECK(!use_gpu, "this cxxgpt was built without CUDA; use cxxgpt-gpu (make gpu) for --gpu");
+#endif
+    load_checkpoint(ckpt, model, nullptr, nullptr);
+    std::function<double(const int*, const int*, int, int)> forward = [&](const int* inp, const int* tgt, int b,
+                                                                          int t) {
+        return model.forward(inp, tgt, b, t, false);
+    };
+#ifdef CXXGPT_CUDA
+    std::unique_ptr<GpuTrainer> gpu;
+    if (use_gpu) {
+        const Matmul mm = matmul == "fp32" ? Matmul::fp32 : matmul == "bf16" ? Matmul::bf16 : Matmul::tf32;
+        const bool fused = fused_attention_fits(model.cfg.head_size());  // as train's default
+        gpu = std::make_unique<GpuTrainer>(model.cfg, model.infos, mm, fused);
+        gpu->set_params(model.params.data());
+        gpu->set_router_bias(model.router_bias);
+        std::printf("gpu: %s, %s matmuls, %s attention\n", GpuTrainer::device_name().c_str(), matmul.c_str(),
+                    !fused                                                     ? "cuBLAS"
+                    : fused_attention_on_tensor_cores(mm, model.cfg.head_size()) ? "fused tensor-core"
+                                                                                 : "fused fp32");
+        forward = [&](const int* inp, const int* tgt, int b, int t) { return gpu->forward(inp, tgt, b, t, false); };
+    }
+#endif
+    std::printf("%s: %s, %d x %d tokens a batch\n", ckpt.c_str(),
+                all ? "every token once" : (std::to_string(batches) + " batches of random windows").c_str(), B, Tn);
+    for (const std::string& path : split(data_arg, ',')) {
+        const TokenData data = TokenData::load(path);
+        CHECK(int(data.vocab) <= model.cfg.vocab, "%s has vocab %u, more than the model's %d: another tokenizer?",
+              path.c_str(), data.vocab, model.cfg.vocab);
+        const double t0 = now_seconds();
+        size_t targets = 0;
+        double loss = 0;
+        if (all) {
+            loss = full_loss(forward, data, 0, data.tokens.size(), B, Tn, &targets);
+        } else {
+            CHECK(data.tokens.size() >= size_t(Tn) + 1, "%s has %zu tokens, fewer than a window of %d", path.c_str(),
+                  data.tokens.size(), Tn + 1);
+            loss = sampled_loss(forward, data, 0, data.tokens.size(), B, Tn, batches);
+        }
+        std::printf("%s: loss %.4f", path.c_str(), loss);
+        if (all) std::printf(" over %zu targets", targets);
+        std::printf(" (%zu tokens, %.1f s)\n", data.tokens.size(), now_seconds() - t0);
+    }
+    return 0;
+}
+
 int cmd_sample(Args& a) {
     ThreadPool tp(threads_arg(a));
     g_pool = &tp;
@@ -1613,6 +1689,7 @@ int main(int argc, char** argv) {
         {"gen-word", cmd_gen_word, "writes exact word problems with held-out sentence patterns"},
         {"prep-qa", cmd_prep_qa, "turns question/answer JSON Lines into problems and token files"},
         {"eval-reasoning", cmd_eval_reasoning, "exact-answer accuracy on a problems file"},
+        {"eval-loss", cmd_eval_loss, "a checkpoint's loss on held-out token files"},
         {"bench-infer", cmd_bench_infer, "times the ternary inference engine against fp32 decoding"},
         {"leak-check", cmd_leak_check, "finds questions that share a 13-word run with training files"},
         {"qa-context", cmd_qa_context, "how often training windows cut an answer off from its question"},

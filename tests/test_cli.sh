@@ -72,6 +72,19 @@ COMMON=(--data "$TEST_DIR/data.tok" --val "$TEST_DIR/data.tok" --seq 8 --dim 8 -
 "$CXXGPT" train "${COMMON[@]}" > "$TEST_DIR/train.log"
 grep -q '9 train tokens, 9 val tokens' "$TEST_DIR/train.log"
 grep -q '| val ' "$TEST_DIR/train.log"
+# eval-loss scores the saved checkpoint with train --val's windows: the same
+# number as the last validation. Nine tokens and --seq 8 leave one window,
+# so --all (every token once) gives it too.
+val=$(sed -n 's/.*| val \([0-9.]*\).*//p' "$TEST_DIR/train.log" | tail -n 1)
+"$CXXGPT" eval-loss --ckpt "$TEST_DIR/model.ckpt" --data "$TEST_DIR/data.tok" --batch 1 --batches 1     --threads 2 > "$TEST_DIR/eval-loss.log"
+grep -q "data.tok: loss $val (9 tokens" "$TEST_DIR/eval-loss.log"
+"$CXXGPT" eval-loss --ckpt "$TEST_DIR/model.ckpt" --data "$TEST_DIR/data.tok,$TEST_DIR/data.tok" --all     --batch 3 --threads 2 > "$TEST_DIR/eval-loss.log"
+[[ $(grep -c "data.tok: loss $val over 8 targets" "$TEST_DIR/eval-loss.log") == 2 ]]
+status=0
+"$CXXGPT" eval-loss --ckpt "$TEST_DIR/model.ckpt" --data "$TEST_DIR/data.tok" --seq 9     > "$TEST_DIR/eval-loss.log" 2>&1 || status=$?
+[[ "$status" == 1 ]] && grep -q 'check failed' "$TEST_DIR/eval-loss.log"
+printf 'CLI: eval-loss matches the last validation, with random windows and with --all
+'
 for option in dim heads experts shared ffn ehidden topk batch accum log-every eval-batches nope-every; do
     value=-1
     if [[ "$option" == dim || "$option" == heads || "$option" == topk || "$option" == batch || "$option" == accum || "$option" == log-every || "$option" == eval-batches ]]; then value=0; fi

@@ -29,6 +29,7 @@
 #include "test_ternary_codes.h"
 #include "test_failure_labels.h"
 #include "test_reason_report.h"
+#include "test_eval_loss.h"
 
 int main(int argc, char** argv) {
     int threads = int(std::thread::hardware_concurrency());
@@ -64,6 +65,7 @@ int main(int argc, char** argv) {
         {"ternary codes", test_ternary_codes},
         {"failure labels", test_failure_labels},
         {"training reasoning reports", test_reason_report},
+        {"eval loss windows", test_eval_loss},
         {"attention", test_attention},
     };
     for (auto& s : suites) {

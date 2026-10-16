@@ -398,6 +398,53 @@ struct TokenLossMean {
     double value() const { return count ? sum / double(count) : 0.0; }
 };
 
+// The mean loss per trained target over `batches` batches of B random
+// windows in [lo, hi), drawn from a fixed seed: the same windows every
+// time, so the numbers are comparable. This is train's validation loss;
+// cxxgpt eval-loss gives the same number for a checkpoint. `forward(inputs,
+// targets, B, Tn)` returns the mean loss over a batch's trained targets.
+template <class Forward>
+double sampled_loss(Forward forward, const TokenData& data, size_t lo, size_t hi, int B, int Tn, int batches) {
+    Rng rng(12345);
+    std::vector<int> inp(size_t(B) * Tn), tgt(size_t(B) * Tn);
+    TokenLossMean total;
+    for (int i = 0; i < batches; ++i) {
+        data.sample_batch(rng, B, Tn, lo, hi, inp.data(), tgt.data());
+        total.add(forward(inp.data(), tgt.data(), B, Tn), count_targets(tgt.data(), tgt.size()));
+    }
+    return total.value();
+}
+
+// The mean loss over every trained target in [lo, hi) exactly once
+// (cxxgpt eval-loss --all). Windows of Tn targets follow each other: window
+// k predicts tokens lo + k*Tn + 1 to lo + (k+1)*Tn from the tokens before
+// them in the window, B windows at a time. Like random windows, a target
+// sees between 0 and Tn - 1 tokens before it, so the two estimate the same
+// thing; this one has no sampling noise. The last window (and the unused
+// rows of the last batch) are padded with ignored targets. `targets`, if
+// given, receives how many targets were scored.
+template <class Forward>
+double full_loss(Forward forward, const TokenData& data, size_t lo, size_t hi, int B, int Tn,
+                 size_t* targets = nullptr) {
+    CHECK(B > 0 && Tn > 0 && lo <= hi && hi <= data.tokens.size(), "invalid data range or shape");
+    std::vector<int> inp(size_t(B) * Tn), tgt(size_t(B) * Tn);
+    TokenLossMean total;
+    size_t s = lo;  // the next window's first input
+    while (s + 1 < hi) {
+        for (int b = 0; b < B; ++b, s += size_t(Tn))
+            for (int t = 0; t < Tn; ++t) {
+                const size_t i = s + size_t(t);  // input position; its target is i + 1
+                const bool real = i + 1 < hi;
+                inp[size_t(b) * Tn + t] = real ? data.tokens[i] : 0;
+                tgt[size_t(b) * Tn + t] = real && (data.mask.empty() || data.mask[i + 1]) ? data.tokens[i + 1] : -1;
+            }
+        const size_t valid = count_targets(tgt.data(), tgt.size());
+        if (valid) total.add(forward(inp.data(), tgt.data(), B, Tn), valid);  // no 0/0 on fully masked text
+    }
+    if (targets) *targets = total.count;
+    return total.value();
+}
+
 // Stage only host token IDs, not activations, so all denominators are known
 // before backward. This avoids accumulating large unnormalized gradients.
 class AccumulationBatch {

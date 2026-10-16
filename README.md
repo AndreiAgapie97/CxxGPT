@@ -153,6 +153,7 @@ patterns for inspection and do not establish the cause of a wrong answer.
 | `prep-qa` | turns question/answer JSONL (GSM8K and the like) into token files with a loss mask and a test set |
 | `train` | trains or resumes a model (CPU, or GPU with `cxxgpt-gpu --gpu`) |
 | `eval-reasoning` | exact-answer accuracy per task and difficulty; greedy by default, or a vote over several sampled tries (below); `--tools calc-notes` or `calc-plain` also scores the same problems with an exact calculator filling in the model's arithmetic ([docs/calculator.md](docs/calculator.md)); `--gpu` (with `cxxgpt-gpu`) decodes on the GPU, with exact fp32 products by default, so the scores are the CPU's (`--matmul tf32` or `bf16` scores the model as training computes it) |
+| `eval-loss` | a checkpoint's loss on held-out token files, one line per file: by default on the same random windows as `train --val` (`--batch 8 --batches 20`, `night.sh`'s 160 windows; with training's `--batch` and `--eval-batches` it repeats training's last validation number), `--all` on every token once; `--gpu` (with `cxxgpt-gpu`), exact fp32 products by default |
 | `sample` | generates text from a prompt (`--tools` as for `eval-reasoning`) |
 | `bench-infer` | times the ternary inference engine against an fp32 baseline |
 | `leak-check` | finds questions (such as the GSM8K dev set) that share a run of 13 words with training files |
@@ -342,6 +343,17 @@ seen them. `night.sh` trains on this mix unless `MIX=` names others. The
 old sets are kept in `data/old/` (moved there, not deleted): for comparing
 old and new data, and for questions about nights 1 and 2. `prepare_data.sh`
 writes them to `data/` again if run.
+
+To see whether math training costs the model its general text, score a
+checkpoint on the four held-out files (the model must use `data/tok.bpe`,
+the tokenizer they were made with):
+
+```
+build/cxxgpt-gpu eval-loss --gpu --all --ckpt runs/clean1.ckpt     --data data/clean-20261015/textbooks-val.tok,data/clean-20261015/wiki-val.tok,data/clean-20261015/doab-val.tok,data/clean-20261015/arxiv-val.tok
+```
+
+Lower is better; compare checkpoints of the same model, with the same
+settings.
 
 **Answers with their questions.** Training windows start at random
 offsets, so a window often begins in the middle of a math problem: the
