@@ -1004,6 +1004,28 @@ What this says:
    rounding by integer arithmetic (the same bits for every finite float,
    no faster), 8-float K steps with 3-6 stages.
 
+   So the experts' default follows the precision (owner's decision,
+   2026-10-16): grouped with bf16, cuBLAS per expert with TF32 and fp32;
+   `--moe-grouped` or `--moe-cublas` forces one, and train's `gpu:` line
+   names the one used. Ternary night model, the same binary interleaved:
+   3627 ms a step (median) by default against 3842 with `--moe-grouped`
+   (-5.6%), the same losses. Our kernels reach ~75% of the tensor cores'
+   peak in both precisions (bf16 32 of ~40 TFLOP/s, TF32 15 of ~20);
+   cuBLAS's bf16 kernels do worse on these narrow per-expert shapes, its
+   TF32 ones better (~85%). The cuBLAS path waits for the host in every
+   layer, so a busy CPU slows it more (one run had two slow log intervals,
+   3928 and 4145 ms, while the CPU was in use).
+
+   The next big step for ternary nights: bf16 products for ternary models
+   (now refused, as code x scale is not exact in bf16). Multiplying the
+   codes themselves (int8 activations, -1/0/+1 weights: exact in bf16,
+   sums exact in fp32) and applying the scales after the sum would make
+   the forward products exact and as fast as bf16 ones (ternary 3627 ms a
+   step against bf16's 2341); the backward products would round their
+   gradients to bf16 as bf16 models do. A numerics change: it needs the
+   owner's yes and a curve check. int8 tensor cores (twice bf16's rate)
+   are the step after.
+
    Next, by measured size: the bf16 copies of products' inputs (138 ms,
    1249 calls a step), RoPE (64 ms, into attention's loads), the fused
    output layer and loss, then FP8.

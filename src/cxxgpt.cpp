@@ -1100,8 +1100,9 @@ int cmd_train(Args& a) {
             "        --no-tf32 is an alias for fp32\n"
             "        attention is fused by default (no stored weight matrix; on the tensor cores\n"
             "        with tf32/bf16); --no-fused-attn uses cuBLAS products instead\n"
-            "        --moe-cublas: the experts' products through cuBLAS, one per expert, sized by\n"
-            "        counts the host waits for (the default before #49, about 3%% faster for now)\n"
+            "        MoE experts: with bf16, all experts' products in one grouped launch each (no host\n"
+            "        waits); with tf32/fp32, cuBLAS per expert (faster there, sized by counts the host\n"
+            "        waits for); --moe-grouped or --moe-cublas picks one for any precision\n"
             "reason: --reason-test FILE --reason-every STEPS --reason-limit 300 --max-new 200\n"
             "        --reason-report PREFIX (optional answers/labels in PREFIX.step-N.jsonl)\n"
             "Ctrl-C saves a checkpoint and stops; --resume continues from --out, and\n"
@@ -1166,8 +1167,10 @@ int cmd_train(Args& a) {
     CHECK(max_new > 0, "--max-new must be positive");
     g_profiler.enabled = a.flag("profile");
     const bool use_gpu = a.flag("gpu"), request_fused = a.flag("fused-attn"), disable_fused = a.flag("no-fused-attn");
-    const bool moe_cublas = a.flag("moe-cublas");
+    const bool moe_cublas = a.flag("moe-cublas"), moe_grouped = a.flag("moe-grouped");
     CHECK(!moe_cublas || use_gpu, "--moe-cublas needs --gpu");
+    CHECK(!moe_grouped || use_gpu, "--moe-grouped needs --gpu");
+    CHECK(!moe_cublas || !moe_grouped, "choose only one of --moe-cublas and --moe-grouped");
     CHECK(!request_fused || !disable_fused, "choose only one of --fused-attn and --no-fused-attn");
     const bool no_tf32 = a.flag("no-tf32");
     // bf16 products by default: 1.45x the tokens/s of tf32 on the night-1
@@ -1221,7 +1224,12 @@ int cmd_train(Args& a) {
         // with --no-fused-attn (or larger heads).
         const bool fused_attn = request_fused || (!disable_fused && fused_attention_fits(cfg.head_size()));
         auto gpu_backend = std::make_unique<GpuBackend>(model, opt, mm, fused_attn);
-        gpu_backend->gpu.set_grouped_experts(!moe_cublas);
+        // The experts' products: grouped by default in bf16, where our
+        // kernels beat cuBLAS per expert (2341 vs ~2460 ms a step on the
+        // night model); cuBLAS per expert in TF32 (ternary models: ~3610-3680
+        // vs 3810) and fp32. 2026-10-16, docs/research-plan.md "Speed" item 8.
+        const bool grouped = moe_grouped || (!moe_cublas && mm == Matmul::bf16);
+        gpu_backend->gpu.set_grouped_experts(grouped);
         if (!resume && init.empty()) {
             // A new model: its weights are made on the GPU, and copied back
             // for the host's checkpoints.
@@ -1230,12 +1238,13 @@ int cmd_train(Args& a) {
             model.weights_dirty = true;
         }
         backend = std::move(gpu_backend);
-        std::printf("gpu: %s, %s matmuls, %s attention\n", GpuTrainer::device_name().c_str(), matmul.c_str(),
+        std::printf("gpu: %s, %s matmuls, %s attention%s\n", GpuTrainer::device_name().c_str(), matmul.c_str(),
                     !fused_attn                                              ? "cuBLAS"
                     : fused_attention_on_tensor_cores(mm, cfg.head_size()) ? "fused tensor-core"
-                                                                           : "fused fp32");
+                                                                           : "fused fp32",
+                    cfg.n_experts == 0 ? "" : grouped ? ", grouped experts" : ", cuBLAS per expert");
 #else
-        (void)request_fused, (void)moe_cublas;
+        (void)request_fused, (void)moe_cublas, (void)moe_grouped;
         CHECK(false, "this cxxgpt was built without CUDA; use cxxgpt-gpu (make gpu)");
 #endif
     } else {

@@ -93,9 +93,11 @@ Math problem-solving accuracy is the first evaluation focus.
   a CPU emulator, `tests/cuda_emu.h`).
   `--profile` times each part of a step. Since 2026-10-16 the step's
   sums (loss, gradient norm, clip, the skip of a non-finite step, router
-  balancing) stay on the GPU, MoE experts run as one grouped product per
-  projection without waiting for the host (`src/grouped_gemm.cuh`, #49;
-  `--moe-cublas` is the old path), tokens for decoding are chosen there
+  balancing) stay on the GPU, MoE experts in bf16 run as one grouped
+  product per projection without waiting for the host
+  (`src/grouped_gemm.cuh`, #49; TF32 and fp32 use cuBLAS per expert,
+  faster there; `--moe-grouped`/`--moe-cublas` force one), tokens for
+  decoding are chosen there
   (only ids come back), and new models are initialized there
   (`GpuTrainer::init_params`, other weights than the CPU's `Model::init`
   for the same seed). The speed plan's fusions (2026-10-16,
@@ -106,8 +108,8 @@ Math problem-solving accuracy is the first evaluation focus.
   tokens/s, the same 7.0 GB); then all the experts' bf16 products on one
   mma.sync kernel that fits two blocks an SM (item 8, #49): 2460 -> 2341
   ms (-4.8%, 28.0k tokens/s); in TF32 (ternary models) the same kernel
-  layout: 4186 -> 3810 ms a step, though `--moe-cublas` is faster still
-  there (~3610). Training is not bitwise
+  layout: 4186 -> 3810 ms a step, but cuBLAS per expert is faster there,
+  so TF32 defaults to it (3627 ms). Training is not bitwise
   reproducible (atomic adds in the gradients), so "same numbers" means
   within the spread of repeated runs.
   `tests/test_gpu.cpp` checks it against `src/gpu_ref.cu`, the model in

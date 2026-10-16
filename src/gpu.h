@@ -174,10 +174,10 @@ public:
     void set_profile(bool on);
     // The MoE experts' products as one grouped launch per projection that
     // never waits for the host (grouped_gemm.cuh, #49): on by default. Off:
-    // cuBLAS per expert, sized by counts the host waits for in each layer
-    // (train --moe-cublas), about 3% faster on the RTX 4070 for now (2595 vs
-    // 2678 ms a step on the nights' model, 2026-10-16: the grouped kernels
-    // are level in the forward pass, behind in the backward pass).
+    // cuBLAS per expert, sized by counts the host waits for in each layer.
+    // train turns it on for bf16 products (faster than cuBLAS per expert)
+    // and off for TF32/fp32 (slower there), unless --moe-grouped or
+    // --moe-cublas says otherwise. Decoding always groups.
     void set_grouped_experts(bool on);
     std::vector<std::pair<std::string, double>> take_profile();
 
