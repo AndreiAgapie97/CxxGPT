@@ -671,7 +671,7 @@ for ((poll=0; poll<1000; ++poll)); do
     if ! kill -0 "$trainer" 2>/dev/null; then wait "$trainer"; exit 1; fi
     sleep 0.01
 done
-if [[ ! -f "$TEST_DIR/signal.ckpt" ]]; then kill -TERM "$trainer"; wait "$trainer"; exit 1; fi
+if [[ ! -f "$TEST_DIR/signal.ckpt" ]]; then echo "control test failed at line $LINENO"; tail -n 40 "$TEST_DIR/control.log"; tail -n 15 "$TEST_DIR/control.csv"; ls -la "$TEST_DIR" | grep control; kill -TERM "$trainer"; wait "$trainer"; exit 1; fi
 kill -INT "$trainer"
 wait "$trainer"
 grep -q 'saved .* (interrupted)' "$TEST_DIR/signal.log"
@@ -723,6 +723,7 @@ printf 'CLI: WSD schedule, branched cooldown and schedule options passed\n'
 
 # The control file: a stop already there at the start is old, so ignored;
 # commands written while training act at the next step.
+trap 'echo "control test failed at line $LINENO"; tail -n 40 "$TEST_DIR/control.log"; tail -n 15 "$TEST_DIR/control.csv"; ls -la "$TEST_DIR" | grep control' ERR
 CONTROL="$TEST_DIR/control.ckpt.control"
 printf 'stop\n' > "$CONTROL"
 "$CXXGPT" train "${COMMON[@]}" --steps 1000000 --log-every 1 --eval-every 0 --save-every 0 \
@@ -736,10 +737,10 @@ wait_for_line() {
     done
     return 1
 }
-if ! wait_for_line '^step  *5 |'; then kill -TERM "$trainer"; wait "$trainer"; exit 1; fi
+if ! wait_for_line '^step  *5 |'; then echo "control test failed at line $LINENO"; tail -n 40 "$TEST_DIR/control.log"; tail -n 15 "$TEST_DIR/control.csv"; ls -la "$TEST_DIR" | grep control; kill -TERM "$trainer"; wait "$trainer"; exit 1; fi
 grep -q "^control file .* is already there: lr-scale 1 holds" "$TEST_DIR/control.log"
 printf 'lr-scale 0.5\nsave\neval\nreason\n' > "$CONTROL"
-if ! wait_for_line '^control: validation'; then kill -TERM "$trainer"; wait "$trainer"; exit 1; fi
+if ! wait_for_line '^control: validation'; then echo "control test failed at line $LINENO"; tail -n 40 "$TEST_DIR/control.log"; tail -n 15 "$TEST_DIR/control.csv"; ls -la "$TEST_DIR" | grep control; kill -TERM "$trainer"; wait "$trainer"; exit 1; fi
 [[ -f "$TEST_DIR/control.ckpt" ]]
 printf 'lr-scale 0.5\nstop\n' > "$CONTROL"
 wait "$trainer"
