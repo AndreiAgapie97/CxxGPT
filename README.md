@@ -426,6 +426,7 @@ walk or a drive of up to 8 km a day).
 scripts/probe.sh                     # GPU speed and memory per model size, and the
                                      #   night.sh command for each
 TOKS=... MODEL=... scripts/night.sh  # one night of training, checked on GSM8K
+python3 scripts/dashboard.py rp1     # watch it live in the browser (docs/LAPTOP.md)
 scripts/report.sh rp1                # the night on one screen
 scripts/ledger.sh rp1 "note"         # its row in docs/runs.md, the ledger of runs
 ```
