@@ -24,6 +24,8 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -671,6 +673,114 @@ void eval_on_gpu() {
 
 }  // namespace
 
+// The step on the GPU (forward_train, finish_step: train --gpu since #50)
+// against the same step driven from the host as GpuBackend did it before:
+// the norm, the clip scale and the update check computed on the host from
+// numbers copied back, the router biases nudged on the host
+// (Model::update_router_bias) and sent back. Two trainers from the same
+// weights, on the same batches of two micro-batches each. Gradients add up
+// with atomics in a varying order, so the two agree to rounding, not bit
+// for bit. Then a weight set to NaN: the GPU skips the update, keeps every
+// weight and the optimizer step, and drops the step's expert loads.
+void step_on_gpu(const char* name, const Config& cfg, bool muon, double max_norm) {
+    Model<float> host(cfg);  // the weights, and the host side's biases and loads
+    host.init(7);
+    Rng rng(8);
+    for (auto& layer : host.router_bias)
+        for (auto& b : layer) b = float(0.01 * rng.normal());
+    AdamW opt;
+    GpuTrainer old_way(cfg, host.infos, Matmul::fp32, true), new_way(cfg, host.infos, Matmul::fp32, true);
+    for (GpuTrainer* g : {&old_way, &new_way}) {
+        g->set_params(host.params.data());
+        g->set_adam_state(0, nullptr, nullptr);
+        g->set_router_bias(host.router_bias);
+        g->set_muon(muon, opt.muon_momentum, opt.muon_steps);
+    }
+    const int B = 2, Tn = cfg.seq_len, micros = 2;
+    const double lr = 1e-2, rate = 1e-2;
+    std::vector<float> pa(host.num_params()), pb(pa.size());
+    std::vector<std::vector<double>> interval(cfg.n_layers, std::vector<double>(std::max(1, cfg.n_experts), 0.0));
+    double worst_loss = 0, worst_norm = 0, worst_param = 0;
+    bool biases_equal = true, ratios_equal = true;
+    for (int step = 0; step < 4; ++step) {
+        std::vector<std::vector<int>> tok(micros), tgt(micros);
+        size_t valid[micros], total = 0;
+        for (int k = 0; k < micros; ++k) {
+            random_batch(rng, cfg.vocab, B * Tn, tok[k], tgt[k]);
+            valid[k] = count_targets(tgt[k].data(), tgt[k].size());
+            total += valid[k];
+        }
+        // The host-driven step.
+        old_way.zero_grad();
+        TokenLossMean loss;
+        for (int k = 0; k < micros; ++k) {
+            loss.add(old_way.forward(tok[k].data(), tgt[k].data(), B, Tn, true), valid[k]);
+            old_way.backward(double(valid[k]) / double(total));
+        }
+        const double norm = old_way.grad_norm();
+        const double scale = max_norm > 0 && norm > max_norm ? double(float(max_norm / norm)) : 1.0;
+        old_way.adamw_step(lr, opt.beta1, opt.beta2, opt.eps, opt.weight_decay, scale);
+        const auto loads = old_way.take_expert_load();
+        for (size_t l = 0; l < loads.size() && cfg.moe(); ++l)
+            for (size_t e = 0; e < loads[l].size(); ++e) {
+                host.expert_load[l][e] = loads[l][e];
+                interval[l][e] += loads[l][e];
+            }
+        const double ratio = host.max_load_ratio();
+        host.update_router_bias(rate);
+        old_way.set_router_bias(host.router_bias);
+        // The step on the GPU.
+        new_way.zero_grad();
+        for (int k = 0; k < micros; ++k) {
+            new_way.forward_train(tok[k].data(), tgt[k].data(), B, Tn);
+            new_way.backward(double(valid[k]) / double(total));
+        }
+        const GpuTrainer::StepStats s =
+            new_way.finish_step(lr, opt.beta1, opt.beta2, opt.eps, opt.weight_decay, max_norm, rate);
+        EXPECT(s.ok, "%s: a finite step was skipped", name);
+        worst_loss = std::max(worst_loss, std::abs(s.ce_sum / double(total) - loss.value()) / loss.value());
+        worst_norm = std::max(worst_norm, std::abs(s.norm - norm) / norm);
+        old_way.get_params(pa.data());
+        new_way.get_params(pb.data());
+        worst_param = std::max(worst_param, rel_l2(pb.data(), pa.data(), pa.size()));
+        if (cfg.moe()) {
+            biases_equal &= new_way.get_router_bias() == host.router_bias;
+            ratios_equal &= new_way.last_load_ratio() == ratio;
+        }
+    }
+    if (cfg.moe())
+        EXPECT(new_way.take_interval_load() == interval, "%s: the interval's expert loads differ", name);
+    EXPECT(biases_equal && ratios_equal, "%s: router biases or load ratios differ from the host's", name);
+    std::printf("  %-16s loss %.1e, norm %.1e, params %.1e%s\n", name, worst_loss, worst_norm, worst_param,
+                cfg.moe() ? ", biases and loads exact" : "");
+    EXPECT(worst_loss <= 1e-6 && worst_norm <= 1e-5 && worst_param <= 1e-5,
+           "%s: the GPU step differs from the host-driven one", name);
+
+    // A NaN weight: nothing changes but the step's loads, which go.
+    new_way.get_params(pb.data());
+    pb[0] = std::numeric_limits<float>::quiet_NaN();
+    new_way.set_params(pb.data());
+    long step_before = 0, step_after = 0;
+    std::vector<float> m(pb.size()), v(pb.size()), after(pb.size());
+    new_way.get_adam_state(&step_before, m.data(), v.data());
+    const auto bias_before = new_way.get_router_bias();
+    std::vector<int> tok, tgt;
+    random_batch(rng, cfg.vocab, B * Tn, tok, tgt);
+    new_way.zero_grad();
+    new_way.forward_train(tok.data(), tgt.data(), B, Tn);
+    new_way.backward(1.0);
+    const GpuTrainer::StepStats s =
+        new_way.finish_step(lr, opt.beta1, opt.beta2, opt.eps, opt.weight_decay, max_norm, rate);
+    new_way.get_params(after.data());
+    new_way.get_adam_state(&step_after, m.data(), v.data());
+    bool load_dropped = true;
+    for (const auto& layer : new_way.take_expert_load())
+        for (double c : layer) load_dropped &= c == 0;
+    EXPECT(!s.ok && std::memcmp(after.data(), pb.data(), pb.size() * sizeof(float)) == 0 &&
+               step_after == step_before && new_way.get_router_bias() == bias_before && load_dropped,
+           "%s: a non-finite step changed the weights, the optimizer step, the biases or kept its loads", name);
+}
+
 int main() {
     ThreadPool tp(4);
     g_pool = &tp;
@@ -756,6 +866,11 @@ int main() {
     // times more than AdamW does, hence the looser weight tolerance.
     compare("dense muon", dense, 1e-5, 1e-4, 1e-3, {.muon = true});
     compare("moe muon", moe, 1e-5, 1e-4, 1e-3, {.muon = true, .clip = 0.5});
+
+    // The whole step on the GPU (#50), plain and clipped, AdamW and Muon.
+    step_on_gpu("dense step", dense, false, 0.0);
+    step_on_gpu("moe step, clipped", moe, false, 0.05);
+    step_on_gpu("moe muon step", moe, true, 0.05);
 
     // Unlikelihood (#34): the term on both sides, exact products and bf16
     // (whose gradients go through the bf16 copy of the logits' gradient).

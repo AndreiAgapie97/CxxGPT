@@ -881,17 +881,27 @@ int cmd_eval_reasoning(Args& a) {
 // One training step's operations, on the CPU or the GPU.
 struct Backend {
     virtual ~Backend() = default;
+    // The mean loss of one batch, for validation (eval_loss).
     virtual double forward(const int* inp, const int* tgt, int B, int Tn, bool training) = 0;
-    virtual void backward(double loss_scale) = 0;
-    virtual void zero_grad() = 0;
-    // Clips the gradient to max_norm (if > 0), then takes an AdamW step;
-    // a gradient that is not finite (overflow, NaN) is skipped instead.
-    // Returns the gradient norm before clipping.
-    virtual double step(double lr, double max_norm) = 0;
-    // Updates the router biases from the expert loads since the last call;
-    // returns the busiest expert's load ratio (see Model::max_load_ratio).
-    // A non-null interval also collects those loads for --load-log.
-    virtual double balance(double rate, ExpertLoadLog* interval) = 0;
+    // One training step on a sampled group: the gradient of its mean loss
+    // (accumulated over its micro-batches); then, if the loss and the
+    // gradient norm are finite, the optimizer step on the gradient clipped
+    // to max_norm (if > 0), and the router biases nudged by bias_rate from
+    // the step's expert loads, which a non-null interval also collects for
+    // --load-log. Otherwise (overflow, NaN) the weights stay as they were
+    // and the step's loads are dropped.
+    struct StepResult {
+        double loss = 0, gnorm = 0;  // gnorm: before clipping
+        bool ok = false;             // the update ran
+    };
+    virtual StepResult train_step(const AccumulationBatch& group, double lr, double max_norm, double bias_rate,
+                                  ExpertLoadLog* interval) = 0;
+    // The busiest expert's load against an even split (Model::max_load_ratio),
+    // worst layer, in the last step that updated; 1 for a dense model.
+    virtual double load_ratio() = 0;
+    // Expert loads the backend kept for --load-log since the last call
+    // (the GPU keeps them there between log lines), into interval.
+    virtual void flush_loads(ExpertLoadLog& interval) { (void)interval; }
     // Brings the weights and optimizer state into the host Model and AdamW,
     // for checkpoints and evaluations.
     virtual void sync() = 0;
@@ -917,11 +927,14 @@ protected:
     // adds the term's numbers and returns the cross-entropy.
     double add_unlikelihood(double ce, double ul, size_t fired, size_t negatives, const int* tgt, int N) {
         const size_t targets = count_targets(tgt, size_t(N));
-        ul_.sum += ul * double(targets);
+        add_unlikelihood_sums(ul * double(targets), targets, fired, negatives);
+        return ce;
+    }
+    void add_unlikelihood_sums(double sum, size_t targets, size_t fired, size_t negatives) {
+        ul_.sum += sum;
         ul_.targets += targets;
         ul_.fired += fired;
         ul_.negatives += negatives;
-        return ce;
     }
 
 private:
@@ -931,26 +944,41 @@ private:
 struct CpuBackend : Backend {
     Model<float>& model;
     AdamW& opt;
+    double load_ = 1.0;  // load_ratio()
     CpuBackend(Model<float>& m, AdamW& o) : model(m), opt(o) {}
     double forward(const int* inp, const int* tgt, int B, int Tn, bool training) override {
         const double loss = model.forward(inp, tgt, B, Tn, training);
         if (!training || ul_alpha_ <= 0 || !tgt) return loss;
         return add_unlikelihood(model.last_ce, model.last_ul, model.last_fired, model.last_negatives, tgt, B * Tn);
     }
-    void backward(double loss_scale) override { model.backward(loss_scale); }
+    void backward(double loss_scale) { model.backward(loss_scale); }
     void set_unlikelihood(double alpha, int ngram) override {
         ul_alpha_ = alpha;
         model.unlikelihood = {alpha, ngram};
     }
-    void zero_grad() override { model.zero_grad(); }
-    double step(double lr, double max_norm) override {
+    void zero_grad() { model.zero_grad(); }
+    // Clips the gradient to max_norm (if > 0), then takes an AdamW step;
+    // a gradient that is not finite is skipped instead. Returns the norm
+    // before clipping.
+    double step(double lr, double max_norm) {
         const double norm = clip_grad_norm(model, max_norm);
         if (std::isfinite(norm)) opt.update(model, lr);
         return norm;
     }
-    double balance(double rate, ExpertLoadLog* interval) override {
+    double balance(double rate, ExpertLoadLog* interval) {
         return balance_with_load_log(model, rate, interval);
     }
+    StepResult train_step(const AccumulationBatch& group, double lr, double max_norm, double bias_rate,
+                          ExpertLoadLog* interval) override {
+        StepResult r;
+        r.loss = accumulated_backward(*this, group);
+        r.gnorm = std::isfinite(r.loss) ? step(lr, max_norm) : std::numeric_limits<double>::quiet_NaN();
+        r.ok = std::isfinite(r.loss) && std::isfinite(r.gnorm);
+        if (r.ok) load_ = balance(bias_rate, interval);
+        else balance(0, nullptr);  // drop this attempt's loads without changing biases
+        return r;
+    }
+    double load_ratio() override { return load_; }
     void sync() override {}
     EvalResult reason(const std::vector<Problem>& problems, const Tokenizer& tok, int max_new,
                       bool keep_completions) override {
@@ -973,38 +1001,43 @@ struct GpuBackend : Backend {
         gpu.set_profile(g_profiler.enabled);
     }
     double forward(const int* inp, const int* tgt, int B, int Tn, bool training) override {
-        const double loss = gpu.forward(inp, tgt, B, Tn, training);
-        if (!training || ul_alpha_ <= 0) return loss;
-        const GpuTrainer::ForwardParts f = gpu.last_parts();
-        return add_unlikelihood(f.ce, f.ul, f.fired, f.negatives, tgt, B * Tn);
+        return gpu.forward(inp, tgt, B, Tn, training);
     }
-    void backward(double loss_scale) override { gpu.backward(loss_scale); }
     void set_unlikelihood(double alpha, int ngram) override {
         ul_alpha_ = alpha;
         gpu.set_unlikelihood(alpha, ngram);
     }
-    void zero_grad() override { gpu.zero_grad(); }
-    double step(double lr, double max_norm) override {
-        const double norm = gpu.grad_norm();
-        if (!std::isfinite(norm)) return norm;
-        const double scale = max_norm > 0 && norm > max_norm ? double(float(max_norm / norm)) : 1.0;
-        gpu.adamw_step(lr, opt.beta1, opt.beta2, opt.eps, opt.weight_decay, scale);
-        ++opt.step;
+    // The whole step on the GPU (GpuTrainer::finish_step): the losses, the
+    // norm, the checks, clipping and the router biases stay there; one
+    // small copy at the end brings back what the log and the checks need.
+    StepResult train_step(const AccumulationBatch& group, double lr, double max_norm, double bias_rate,
+                          ExpertLoadLog* interval) override {
+        (void)interval;  // the GPU keeps the loads until flush_loads
+        gpu.zero_grad();
+        size_t fired = 0, negatives = 0;
+        for (int micro = 0; micro < group.micros; ++micro) {
+            gpu.forward_train(group.input(micro), group.target(micro), group.batch, group.seq);
+            const GpuTrainer::ForwardParts f = gpu.last_parts();
+            fired += f.fired;
+            negatives += f.negatives;
+            gpu.backward(double(group.valid[micro]) / double(group.total_valid));
+        }
+        const GpuTrainer::StepStats s =
+            gpu.finish_step(lr, opt.beta1, opt.beta2, opt.eps, opt.weight_decay, max_norm, bias_rate);
+        if (ul_alpha_ > 0) add_unlikelihood_sums(s.ul_sum, group.total_valid, fired, negatives);
+        if (s.ok) ++opt.step;
         // GPU time per part of the step (evaluation passes included).
         if (g_profiler.enabled)
             for (const auto& [name, seconds] : gpu.take_profile()) g_profiler.add(name.c_str(), seconds);
-        return norm;
+        return {s.ce_sum / double(group.total_valid), s.norm, s.ok};
     }
-    double balance(double rate, ExpertLoadLog* interval) override {
-        const auto loads = gpu.take_expert_load();
-        for (size_t l = 0; l < loads.size(); ++l)
-            for (size_t e = 0; e < loads[l].size(); ++e) model.expert_load[l][e] += loads[l][e];
-        const double load = balance_with_load_log(model, rate, interval);
-        gpu.set_router_bias(model.router_bias);
-        return load;
+    double load_ratio() override { return gpu.last_load_ratio(); }
+    void flush_loads(ExpertLoadLog& interval) override {
+        if (model.cfg.moe()) interval.add(gpu.take_interval_load());
     }
     void sync() override {
         gpu.get_params(model.params.data());
+        model.router_bias = gpu.get_router_bias();  // finish_step changes them on the GPU
         model.weights_dirty = true;
         opt.m.resize(model.params.size());
         opt.v.resize(model.params.size());
@@ -1304,16 +1337,15 @@ int cmd_train(Args& a) {
             }
             continue;  // no Adam moments, decay, balancing, or schedule step
         }
-        const double loss = accumulated_backward(be, group);
-        const Backend::UnlikelihoodStats ul_step = be.take_unlikelihood();  // this attempt's only
         const double lr_now = lr_at(step, warmup, steps, lr, min_frac);
-        const double gnorm = std::isfinite(loss) ? be.step(lr_now, clip)
-                                               : std::numeric_limits<double>::quiet_NaN();
-        // A non-finite gradient leaves the weights untouched (Backend::step). A run
-        // of them stops training rather than spending the night on NaNs.
-        if (!std::isfinite(gnorm) || !std::isfinite(loss)) {
+        const Backend::StepResult r = be.train_step(group, lr_now, clip, bias_rate, &load_interval);
+        const Backend::UnlikelihoodStats ul_step = be.take_unlikelihood();  // this attempt's only
+        const double loss = r.loss, gnorm = r.gnorm;
+        // A non-finite loss or gradient leaves the weights untouched
+        // (Backend::train_step). A run of them stops training rather than
+        // spending the night on NaNs.
+        if (!r.ok) {
             std::printf("step %ld: loss %g, gradient norm %g; update skipped\n", step + 1, loss, gnorm);
-            be.balance(0, nullptr);  // discard this attempt's loads without changing biases
             if (++bad_steps == kMaxBadSteps) {
                 std::printf("stopping: %d diverged steps in a row\n", kMaxBadSteps);
                 diverged = true;
@@ -1326,7 +1358,6 @@ int cmd_train(Args& a) {
             continue;  // failed attempts do not advance optimizer or schedule
         }
         bad_steps = 0;
-        const double load = be.balance(bias_rate, &load_interval);
         const double ms = (now_seconds() - t0) * 1e3;
         if (step == first_step && be.device_bytes() > 0)
             std::printf("gpu memory: %.0f MB after the first step\n", double(be.device_bytes()) / (1 << 20));
@@ -1345,6 +1376,7 @@ int cmd_train(Args& a) {
             last_validation_step = step + 1;
         }
         if ((step + 1) % log_every == 0 || last || vloss >= 0) {
+            const double load = be.load_ratio();  // read from the GPU only for the log
             std::printf("step %6ld | loss %.4f", step + 1, loss_acc / n_acc);
             if (vloss >= 0) std::printf(" | val %.4f", vloss);
             std::printf(" | lr %.2e | gnorm %6.3f | %6.1f ms | %7.0f tok/s", lr_now, gnorm,
@@ -1370,8 +1402,10 @@ int cmd_train(Args& a) {
             n_acc = 0;
             ul_acc = {};
         }
-        if ((step + 1) % log_every == 0 || last)
+        if ((step + 1) % log_every == 0 || last) {
+            be.flush_loads(load_interval);
             load_interval.write(step + 1, load_log, load_warnings);
+        }
         if (save_every > 0 && (step + 1) % save_every == 0) {
             be.sync();
             if (save_checkpoint(out, model, opt, data_rng, true)) saved_step = opt.step;
@@ -1385,6 +1419,7 @@ int cmd_train(Args& a) {
     }
     // Also preserve a partial interval when a time limit, signal or failed
     // attempt stops the run between ordinary logging steps.
+    be.flush_loads(load_interval);
     load_interval.write(opt.step, load_log, load_warnings);
     if (load_log) CHECK(std::fclose(load_log) == 0, "cannot close expert load log");
     if (g_profiler.enabled) g_profiler.report(int(step - first_step));

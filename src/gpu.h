@@ -63,8 +63,9 @@ public:
     void get_adam_state(long* step, float* m, float* v) const;
     void set_router_bias(const std::vector<std::vector<float>>& bias);  // [layer][expert]
 
-    // Mean cross-entropy over the targets that are not -1, as Model::forward.
-    // training = true counts expert loads for the router bias.
+    // Mean cross-entropy over the targets that are not -1, as Model::forward
+    // (summed on the GPU; only the sum comes back). training = true counts
+    // expert loads for the router bias.
     double forward(const int* tokens, const int* targets, int B, int Tn, bool training = false);
     // Accumulates d(loss * loss_scale) into the gradients, as Model::backward.
     void backward(double loss_scale = 1.0);
@@ -89,8 +90,36 @@ public:
     // config.h) Muon steps instead, as AdamW::update with muon = true; their
     // momentum lives in the AdamW m. Off by default.
     void set_muon(bool on, double momentum = 0.95, int ns_steps = 5);
-    // Tokens routed to each expert since the last call, [layer][expert].
+    // Tokens routed to each expert in training forwards since the last call
+    // or the last finish_step, [layer][expert].
     std::vector<std::vector<double>> take_expert_load();
+
+    // A training step that stays on the GPU (train --gpu): zero_grad(),
+    // then forward_train and backward for each micro-batch, then
+    // finish_step. forward_train is forward(..., true) with the loss summed
+    // on the GPU instead of copied back. finish_step computes the gradient
+    // norm, whether it and the loss are finite, and the clip scale (to
+    // max_norm, if > 0) on the GPU, and copies those back in one small
+    // copy. If they are finite it takes the optimizer step (adamw_step with
+    // that scale) and nudges the router biases by bias_rate from the step's
+    // expert loads (Model::update_router_bias); otherwise it leaves the
+    // weights and drops the step's loads.
+    void forward_train(const int* tokens, const int* targets, int B, int Tn);
+    struct StepStats {
+        double ce_sum = 0, ul_sum = 0;  // summed over the step's trained targets
+        double norm = 0;
+        bool ok = false;
+    };
+    StepStats finish_step(double lr, double beta1, double beta2, double eps, double weight_decay, double max_norm,
+                          double bias_rate);
+    // After finish_step: the busiest expert's load against an even split,
+    // worst layer, in the last step that updated (Model::max_load_ratio).
+    double last_load_ratio() const;
+    // The expert loads of the steps that updated since the last call
+    // (for --load-log), [layer][expert].
+    std::vector<std::vector<double>> take_interval_load();
+    // The router biases, which finish_step changes on the GPU.
+    std::vector<std::vector<float>> get_router_bias() const;
 
     // Incremental decoding with a KV cache on the GPU, as Model::decode_begin
     // and decode_step (generate.h runs it through GpuDecoder, below): B

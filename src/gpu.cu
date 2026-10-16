@@ -12,6 +12,7 @@
 
 #include <algorithm>
 #include <cfloat>
+#include <cstddef>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -506,9 +507,87 @@ __global__ void to_bf16(__nv_bfloat16* out, const float* in, size_t n) {
         out[i] = __float2bfloat16(in[i]);
 }
 
-// AdamW::update for one tensor, with the gradient scaled by gscale (clipping).
+// ---------------------------------------------------------------------------
+// The end of a training step (finish_step): sums, checks and balancing that
+// the host used to do on numbers copied back
+// ---------------------------------------------------------------------------
+
+// What a training step leaves on the GPU for the host to read once, in one
+// copy, at its end (finish_step).
+struct StepState {
+    double ce = 0, ul = 0;  // the step's summed cross-entropy and unlikelihood term, over its trained targets
+    double norm = 0;        // the gradient's L2 norm
+    float scale = 1.0f;     // what clipping multiplies the gradient by (1: no clipping)
+    int ok = 0;             // norm and loss finite: the update runs
+    double load_ratio = 1.0;  // the busiest expert's share against an even split, worst layer (max_load_ratio)
+};
+
+// *sum += Σ losses[n] over the rows with a target (targets[n] >= 0), in
+// double. One block, so the order of the sum is the same every time.
+__global__ void sum_trained(double* sum, const float* losses, const int* targets, int N) {
+    __shared__ double sh[kWarp + 1];
+    double s = 0.0;
+    for (int n = threadIdx.x; n < N; n += blockDim.x)
+        if (targets[n] >= 0) s += double(losses[n]);
+    s = block_reduce(s, sh, false);
+    if (threadIdx.x == 0) *sum += s;
+}
+
+// *sum += Σ x[n]. One block.
+__global__ void sum_all(double* sum, const double* x, int N) {
+    __shared__ double sh[kWarp + 1];
+    double s = 0.0;
+    for (int n = threadIdx.x; n < N; n += blockDim.x) s += x[n];
+    s = block_reduce(s, sh, false);
+    if (threadIdx.x == 0) *sum += s;
+}
+
+// The gradient norm from partial_sums' n partials, summed in order as the
+// host did, whether the step may update, and the clipping scale, as
+// GpuBackend::step computed them: max_norm / norm, rounded to float, when
+// the norm is over max_norm (> 0). One thread.
+__global__ void step_check(StepState* s, const double* partial, int n, double max_norm) {
+    double sum = 0.0;
+    for (int i = 0; i < n; ++i) sum += partial[i];
+    const double norm = sqrt(sum);
+    s->norm = norm;
+    s->ok = isfinite(norm) && isfinite(s->ce);
+    s->scale = max_norm > 0 && norm > max_norm ? float(max_norm / norm) : 1.0f;
+}
+
+// Model::max_load_ratio and update_router_bias on the step's expert counts
+// ([layer, expert]), exactly as the host did it: the busiest expert's ratio
+// into s->load_ratio, each bias +rate below its layer's mean and -rate
+// above. The counts then go into the interval's (for --load-log) and are
+// cleared. One thread: layers x experts is a few hundred numbers.
+__global__ void balance_router(StepState* s, float* bias, unsigned long long* step, unsigned long long* interval,
+                               int L, int E, float rate) {
+    double worst = 1.0;
+    for (int l = 0; l < L; ++l) {
+        unsigned long long* c = step + size_t(l) * E;
+        double total = 0.0, busiest = 0.0;
+        for (int e = 0; e < E; ++e) total += double(c[e]), busiest = fmax(busiest, double(c[e]));
+        if (total > 0) worst = fmax(worst, busiest * E / total);
+        const double mean = total / E;
+        for (int e = 0; e < E; ++e) {
+            if (double(c[e]) < mean) bias[size_t(l) * E + e] += rate;
+            else if (double(c[e]) > mean) bias[size_t(l) * E + e] -= rate;
+            interval[size_t(l) * E + e] += c[e];
+            c[e] = 0;
+        }
+    }
+    s->load_ratio = worst;
+}
+
+// counts[e] tokens went to expert e in this layer: add them to the step's.
+__global__ void add_counts(unsigned long long* step, const int* counts, int E) {
+    for (int e = threadIdx.x; e < E; e += blockDim.x) step[e] += (unsigned long long)counts[e];
+}
+
+// AdamW::update for one tensor, with the gradient scaled by *gscale (clipping).
 __global__ void adamw(float* p, const float* g, float* m, float* v, size_t n, float lr, float b1, float b2,
-                      float c1, float c2, float eps, float wd, float gscale) {
+                      float c1, float c2, float eps, float wd, const float* gscale_p) {
+    const float gscale = *gscale_p;
     for (size_t i = size_t(blockIdx.x) * blockDim.x + threadIdx.x; i < n; i += size_t(gridDim.x) * blockDim.x) {
         const float gi = g[i] * gscale;
         m[i] = b1 * m[i] + (1.0f - b1) * gi;
@@ -522,7 +601,8 @@ __global__ void adamw(float* p, const float* g, float* m, float* v, size_t n, fl
 // Nesterov momentum into mom, and the update copied to X in the
 // orientation Newton–Schulz works on (transposed when r > c).
 __global__ void muon_momentum(float* X, float* mom, const float* g, int batch, int r, int c, float mu,
-                              float gscale) {
+                              const float* gscale_p) {
+    const float gscale = *gscale_p;
     const size_t rc = size_t(r) * c, n = rc * batch;
     for (size_t i = size_t(blockIdx.x) * blockDim.x + threadIdx.x; i < n; i += size_t(gridDim.x) * blockDim.x) {
         const float gi = g[i] * gscale;
@@ -823,7 +903,44 @@ struct GpuTrainer::Impl {
 
     DevBuf<float> rope_cos, rope_sin;
     DevBuf<float> router_bias;  // [layer, expert]
-    std::vector<std::vector<double>> expert_load;
+    // Tokens routed to each expert [layer, expert]: in this step (cleared
+    // by balancing or take_expert_load) and since the last load-log line.
+    DevBuf<unsigned long long> step_load, interval_load;
+    // The step's sums, checks and clip scale (StepState), and its host copy.
+    DevBuf<StepState> state;
+    DevBuf<double> fwd_sums;  // forward()'s own cross-entropy and term sums, outside a step's
+    StepState* state_h = nullptr;  // pinned
+
+    // Token ids go up from pinned host memory without waiting, so the host
+    // can queue the next micro-batch while the GPU still works on this one.
+    // The slots take turns; before refilling one, the host waits for its
+    // last copy to finish.
+    struct Upload {
+        int* h = nullptr;
+        size_t cap = 0;
+        cudaEvent_t done = nullptr;
+    };
+    static constexpr int kUploads = 4;
+    Upload uploads[kUploads];
+    int upload_turn = 0;
+
+    void upload(int* dst, const int* src, size_t n) {
+        Upload& u = uploads[upload_turn];
+        upload_turn = (upload_turn + 1) % kUploads;
+        CUDA_CHECK(cudaEventSynchronize(u.done));
+        if (u.cap < n) {
+            if (u.h) CUDA_CHECK(cudaFreeHost(u.h));
+            CUDA_CHECK(cudaMallocHost(&u.h, n * sizeof(int)));
+            u.cap = n;
+        }
+        std::copy(src, src + n, u.h);
+        CUDA_CHECK(cudaMemcpyAsync(dst, u.h, n * sizeof(int), cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaEventRecord(u.done));
+    }
+    // The address of one StepState field on the GPU, for kernels to read.
+    template <class T>
+    T* state_field(size_t offset) { return reinterpret_cast<T*>(reinterpret_cast<char*>(state.p) + offset); }
+    const float* grad_scale() { return state_field<float>(offsetof(StepState, scale)); }
 
     // Profiling (set_profile): GPU time per named region of the step, from
     // CUDA events recorded around it, so timing never makes the GPU wait.
@@ -908,13 +1025,11 @@ struct GpuTrainer::Impl {
     int ul_ngram = 8;
     RepeatNegatives negatives_h;
     std::vector<int> neg_row_h;
-    std::vector<double> row_ul_h;
     DevBuf<int> neg_off, neg_tok, neg_row;
     DevBuf<float> neg_p, row_scale;
     DevBuf<double> neg_w, row_w, row_ul;
     bool ul_active = false;
     GpuTrainer::ForwardParts parts;
-    std::vector<float> losses_h;
     // The experts' row counts, copied back to the host (pinned memory, so
     // the copy can run behind other work) once counts_ready has passed.
     int* counts_h = nullptr;
@@ -1039,16 +1154,33 @@ struct GpuTrainer::Impl {
         const int E = std::max(1, cfg.n_experts);
         router_bias.resize(size_t(cfg.n_layers) * E);
         router_bias.zero();
-        expert_load.assign(cfg.n_layers, std::vector<double>(E, 0.0));
+        step_load.resize(size_t(cfg.n_layers) * E);
+        interval_load.resize(size_t(cfg.n_layers) * E);
+        step_load.zero();
+        interval_load.zero();
         counts.resize(E);
         CUDA_CHECK(cudaMallocHost(&counts_h, E * sizeof(int)));
         CUDA_CHECK(cudaEventCreateWithFlags(&counts_ready, cudaEventDisableTiming));
+        state.resize(1);
+        const StepState fresh;
+        to_device(state.p, &fresh, 1);
+        fwd_sums.resize(2);
+        CUDA_CHECK(cudaMallocHost(&state_h, sizeof(StepState)));
+        for (Upload& u : uploads) {
+            CUDA_CHECK(cudaEventCreateWithFlags(&u.done, cudaEventDisableTiming));
+            CUDA_CHECK(cudaEventRecord(u.done));
+        }
         CUDA_CHECK(cudaDeviceSynchronize());
     }
 
     ~Impl() {
         if (counts_h) cudaFreeHost(counts_h);
         if (counts_ready) cudaEventDestroy(counts_ready);
+        if (state_h) cudaFreeHost(state_h);
+        for (Upload& u : uploads) {
+            if (u.done) cudaEventSynchronize(u.done), cudaEventDestroy(u.done);
+            if (u.h) cudaFreeHost(u.h);
+        }
         if (blas) cublasDestroy(blas);
         for (const auto& mk : marks) {
             cudaEventDestroy(mk.start);
@@ -1349,7 +1481,6 @@ struct GpuTrainer::Impl {
         dw_partial.resize((N + 63) / 64 * C);
         if (cfg.moe()) { act(dey, deyh, NK * C); dxg.resize(NK * C); drl.resize(N * E); dgate.resize(NK); }
         if (bf16_ops) dlogitsh.resize(N * V);
-        losses_h.resize(N);
     }
 
     void ffn_forward(int l, float* out, int N, bool training) {
@@ -1401,9 +1532,11 @@ struct GpuTrainer::Impl {
         else
             moe_gather<<<blocks_for(size_t(NK) * C), kBlock>>>(a.xg.p, a.ln2.p, a.order.p, NK, C, K);
         LAUNCH_CHECK();
+        if (training) {
+            add_counts<<<1, kWarp>>>(step_load.p + size_t(l) * E, counts.p, E);
+            LAUNCH_CHECK();
+        }
         CUDA_CHECK(cudaEventSynchronize(counts_ready));
-        if (training)
-            for (int e = 0; e < E; ++e) expert_load[l][e] += counts_h[e];
         a.expert_start.assign(E + 1, 0);
         for (int e = 0; e < E; ++e) a.expert_start[e + 1] = a.expert_start[e] + counts_h[e];
         routing.reset();
@@ -1456,7 +1589,12 @@ struct GpuTrainer::Impl {
         linear_backward(dx, G(o.router), drl.p, a.ln2.p, P(o.router), N, C, E, false);
     }
 
-    double forward(const int* tokens_h, const int* targets_h, int B, int Tn, bool training) {
+    // A forward pass whose loss stays on the GPU: the cross-entropy summed
+    // over the trained targets is added to *ce_sum, and with unlikelihood
+    // training the term's sum to *ul_sum (device addresses). The host only
+    // counts the targets it sent (n_valid, for backward's scale).
+    void forward_sums(const int* tokens_h, const int* targets_h, int B, int Tn, bool training, double* ce_sum,
+                      double* ul_sum) {
         CHECK(targets_h, "GpuTrainer::forward needs targets");
         release_decode();  // training never runs with less memory than without decoding
         allocate(B, Tn);
@@ -1465,8 +1603,8 @@ struct GpuTrainer::Impl {
         const int N = B * Tn, C = cfg.d_model, V = cfg.vocab;
         for (int n = 0; n < N; ++n) CHECK(tokens_h[n] >= 0 && tokens_h[n] < V, "token %d out of range", tokens_h[n]);
         if (weights_dirty) quantize_weights();
-        to_device(tokens.p, tokens_h, N);
-        to_device(targets.p, targets_h, N);
+        upload(tokens.p, tokens_h, N);
+        upload(targets.p, targets_h, N);
 
         embedding_fwd<<<blocks_for(size_t(N) * C), kBlock>>>(x0.p, tokens.p, P(wte), N, C);
         LAUNCH_CHECK();
@@ -1492,22 +1630,32 @@ struct GpuTrainer::Impl {
             linear_forward(logits.p, pick(lnf_out, lnfh), P(wte), N, C, V);  // tied head
             xent_fwd<<<N, kBlock>>>(logits.p, losses.p, targets.p, V);
             LAUNCH_CHECK();
+            sum_trained<<<1, 1024>>>(ce_sum, losses.p, targets.p, N);
+            LAUNCH_CHECK();
         }
-        to_host(losses_h.data(), losses.p, N);
         has_targets = true;
         n_valid = 0;
-        double total = 0.0;
-        for (int n = 0; n < N; ++n)
-            if (targets_h[n] >= 0) total += losses_h[n], ++n_valid;
+        for (int n = 0; n < N; ++n) n_valid += targets_h[n] >= 0;
         parts = {};
-        parts.ce = n_valid ? total / n_valid : 0.0;
         ul_active = false;
-        if (!training || ul_alpha <= 0 || n_valid == 0) return parts.ce;
-        unlikelihood_forward(tokens_h, targets_h, B, Tn);
+        if (!training || ul_alpha <= 0 || n_valid == 0) return;
+        unlikelihood_forward(tokens_h, targets_h, B, Tn, ul_sum);
+    }
+
+    // forward_sums on forward()'s own sums, copied back: the mean
+    // cross-entropy (+ alpha times the term in training), as Model::forward.
+    double forward(const int* tokens_h, const int* targets_h, int B, int Tn, bool training) {
+        fwd_sums.zero();
+        forward_sums(tokens_h, targets_h, B, Tn, training, fwd_sums.p, fwd_sums.p + 1);
+        double sums[2];
+        to_host(sums, fwd_sums.p, 2);
+        parts.ce = n_valid ? sums[0] / n_valid : 0.0;
+        if (!ul_active) return parts.ce;
+        parts.ul = sums[1] / n_valid;
         return parts.ce + ul_alpha * parts.ul;
     }
 
-    void unlikelihood_forward(const int* tokens_h, const int* targets_h, int B, int Tn) {
+    void unlikelihood_forward(const int* tokens_h, const int* targets_h, int B, int Tn, double* ul_sum) {
         const int N = B * Tn, V = cfg.vocab;
         find_repeat_negatives(negatives_h, tokens_h, targets_h, B, Tn, ul_ngram);
         const size_t K = negatives_h.tokens.size();
@@ -1535,12 +1683,9 @@ struct GpuTrainer::Impl {
             ul_fwd<<<N, kBlock>>>(logits.p, neg_off.p, neg_tok.p, neg_p.p, neg_w.p, row_w.p, row_scale.p,
                                   row_ul.p, ul_alpha, V);
             LAUNCH_CHECK();
+            sum_all<<<1, 1024>>>(ul_sum, row_ul.p, N);
+            LAUNCH_CHECK();
         }
-        row_ul_h.resize(N);
-        to_host(row_ul_h.data(), row_ul.p, N);
-        double ul = 0.0;
-        for (double r : row_ul_h) ul += r;
-        parts.ul = ul / n_valid;
         ul_active = true;
     }
 
@@ -1604,7 +1749,7 @@ struct GpuTrainer::Impl {
         CHECK(pos >= 0 && pos < S, "decode position %d outside the context of %d", pos, S);
         for (int n = 0; n < N; ++n) CHECK(tokens_h[n] >= 0 && tokens_h[n] < V, "token %d out of range", tokens_h[n]);
         if (weights_dirty) quantize_weights();
-        to_device(tokens.p, tokens_h, N);
+        upload(tokens.p, tokens_h, N);
         embedding_fwd<<<blocks_for(size_t(N) * C), kBlock>>>(x0.p, tokens.p, P(wte), N, C);
         LAUNCH_CHECK();
         const float scale = 1.0f / std::sqrt(float(HS));
@@ -1684,20 +1829,65 @@ struct GpuTrainer::Impl {
         LAUNCH_CHECK();
     }
 
-    double grad_norm() {
+    // The gradient norm, the update check and the clip scale into state
+    // (step_check), all on the GPU.
+    void check_step(double max_norm) {
         check_grads("grad_norm()");
-        std::optional<Region> r(std::in_place, *this, "gradient norm");
+        Region r(*this, "gradient norm");
         partial_sums<<<dim3(kPartials, 1), kBlock>>>(norm_partial.p, grads.p, all_off.p, all_len.p, false);
+        step_check<<<1, 1>>>(state.p, norm_partial.p, kPartials, max_norm);
         LAUNCH_CHECK();
-        r.reset();
-        double part[kPartials];
-        to_host(part, norm_partial.p, kPartials);
-        double s = 0.0;
-        for (double p : part) s += p;
-        return std::sqrt(s);
+    }
+
+    double grad_norm() {
+        check_step(0.0);
+        double norm = 0.0;
+        to_host(&norm, state_field<double>(offsetof(StepState, norm)), 1);
+        return norm;
+    }
+
+    // A training step's start: its loss sums back to zero (zero_grad).
+    void begin_step() {
+        static_assert(offsetof(StepState, ul) == offsetof(StepState, ce) + sizeof(double), "ce and ul adjacent");
+        CUDA_CHECK(cudaMemsetAsync(state_field<double>(offsetof(StepState, ce)), 0, 2 * sizeof(double)));
+    }
+
+    // The step's end, as GpuBackend::step and Backend::balance did it on the
+    // host: the checks on the GPU, then one copy of them back. With a
+    // finite norm and loss, the optimizer step (gradient times the clip
+    // scale, read on the GPU) and the router biases nudged from the step's
+    // expert loads; otherwise the weights stay and those loads are dropped.
+    GpuTrainer::StepStats finish_step(double lr, double beta1, double beta2, double eps, double weight_decay,
+                                      double max_norm, double bias_rate) {
+        check_step(max_norm);
+        CUDA_CHECK(cudaMemcpy(state_h, state.p, sizeof(StepState), cudaMemcpyDeviceToHost));
+        GpuTrainer::StepStats out;
+        out.ce_sum = state_h->ce;
+        out.ul_sum = state_h->ul;
+        out.norm = state_h->norm;
+        out.ok = state_h->ok != 0;
+        const int E = std::max(1, cfg.n_experts);
+        if (!out.ok) {
+            step_load.zero();
+            return out;
+        }
+        optimizer_step(lr, beta1, beta2, eps, weight_decay);
+        if (cfg.moe()) {
+            balance_router<<<1, 1>>>(state.p, router_bias.p, step_load.p, interval_load.p, cfg.n_layers, E,
+                                     float(bias_rate));
+            LAUNCH_CHECK();
+        }
+        return out;
     }
 
     void adamw_step(double lr, double beta1, double beta2, double eps, double weight_decay, double grad_scale) {
+        const float s = float(grad_scale);
+        CUDA_CHECK(cudaMemcpy(state_field<float>(offsetof(StepState, scale)), &s, sizeof(s), cudaMemcpyHostToDevice));
+        optimizer_step(lr, beta1, beta2, eps, weight_decay);
+    }
+
+    // AdamW (and Muon) with the gradient times the clip scale in state.
+    void optimizer_step(double lr, double beta1, double beta2, double eps, double weight_decay) {
         check_grads("adamw_step()");
         ++adam_step;
         const float c1 = float(1.0 / (1.0 - std::pow(beta1, double(adam_step))));
@@ -1706,14 +1896,14 @@ struct GpuTrainer::Impl {
             const ParamInfo& info = infos[i];
             const float wd = info.decay ? float(weight_decay) : 0.0f;
             if (v_at[i] == kNoV) {
-                muon_step(info, float(lr), wd, float(grad_scale));
+                muon_step(info, float(lr), wd);
                 continue;
             }
             const int grid = std::min(blocks_for(info.size), 4096);
             Region r(*this, "adamw");
             adamw<<<grid, kBlock>>>(params.p + info.offset, grads.p + info.offset, m.p + info.offset,
                                     v.p + v_at[i], info.size, float(lr), float(beta1), float(beta2), c1, c2,
-                                    float(eps), wd, float(grad_scale));
+                                    float(eps), wd, grad_scale());
             LAUNCH_CHECK();
         }
         weights_dirty = true;
@@ -1773,7 +1963,7 @@ struct GpuTrainer::Impl {
     // cuBLAS; newton_schulz (train.h) step for step. With bf16 products the
     // products take bf16 copies of X and A (fp32 sums, X itself stays fp32),
     // and cuBLAS adds the b A and a X terms in.
-    void muon_step(const ParamInfo& info, float lr, float wd, float gscale) {
+    void muon_step(const ParamInfo& info, float lr, float wd) {
         Region r(*this, "muon");
         const MuonShape sh = muon_shape(info);
         const int mr = sh.mrows(), nc = sh.ncols(), batch = sh.batch;
@@ -1783,7 +1973,7 @@ struct GpuTrainer::Impl {
         float *X = ns_x.p, *Y = ns_y.p, *A = ns_a.p, *B = ns_b.p;
         __nv_bfloat16 *Xh = ns_xh.p, *Ah = ns_ah.p;
         muon_momentum<<<grid, kBlock>>>(X, m.p + info.offset, grads.p + info.offset, batch, sh.r, sh.c, muon_mu,
-                                        gscale);
+                                        grad_scale());
         frobenius_normalize<<<batch, kBlock>>>(X, bf16_ops ? Xh : nullptr, size_t(mn));
         LAUNCH_CHECK();
         const float a = 3.4445f, b = -4.7750f, c = 2.0315f;
@@ -1874,6 +2064,16 @@ GpuTrainer::ForwardParts GpuTrainer::last_parts() const { return impl_->parts; }
 void GpuTrainer::zero_grad() {
     impl_->grads.zero();
     impl_->grads_scratch = false;
+    impl_->begin_step();
+}
+void GpuTrainer::forward_train(const int* tokens, const int* targets, int B, int Tn) {
+    Impl& m = *impl_;
+    m.forward_sums(tokens, targets, B, Tn, true, m.state_field<double>(offsetof(StepState, ce)),
+                   m.state_field<double>(offsetof(StepState, ul)));
+}
+GpuTrainer::StepStats GpuTrainer::finish_step(double lr, double beta1, double beta2, double eps,
+                                              double weight_decay, double max_norm, double bias_rate) {
+    return impl_->finish_step(lr, beta1, beta2, eps, weight_decay, max_norm, bias_rate);
 }
 
 void GpuTrainer::decode_begin(int B, const std::vector<int>& start) { impl_->decode_begin(B, start); }
@@ -1907,9 +2107,33 @@ void GpuTrainer::adamw_step(double lr, double beta1, double beta2, double eps, d
 
 void GpuTrainer::set_muon(bool on, double momentum, int ns_steps) { impl_->set_muon(on, momentum, ns_steps); }
 
+// [layer][expert] doubles from a device array of counts, which is then cleared.
+static std::vector<std::vector<double>> take_counts(DevBuf<unsigned long long>& counts, int L, int E) {
+    std::vector<unsigned long long> flat(size_t(L) * E);
+    to_host(flat.data(), counts.p, flat.size());
+    counts.zero();
+    std::vector<std::vector<double>> out(L, std::vector<double>(E));
+    for (int l = 0; l < L; ++l)
+        for (int e = 0; e < E; ++e) out[l][e] = double(flat[size_t(l) * E + e]);
+    return out;
+}
 std::vector<std::vector<double>> GpuTrainer::take_expert_load() {
-    std::vector<std::vector<double>> out = impl_->expert_load;
-    for (auto& l : impl_->expert_load) std::fill(l.begin(), l.end(), 0.0);
+    return take_counts(impl_->step_load, impl_->cfg.n_layers, std::max(1, impl_->cfg.n_experts));
+}
+std::vector<std::vector<double>> GpuTrainer::take_interval_load() {
+    return take_counts(impl_->interval_load, impl_->cfg.n_layers, std::max(1, impl_->cfg.n_experts));
+}
+double GpuTrainer::last_load_ratio() const {
+    double r = 1.0;
+    to_host(&r, impl_->state_field<double>(offsetof(StepState, load_ratio)), 1);
+    return r;
+}
+std::vector<std::vector<float>> GpuTrainer::get_router_bias() const {
+    const int L = impl_->cfg.n_layers, E = std::max(1, impl_->cfg.n_experts);
+    std::vector<float> flat(size_t(L) * E);
+    to_host(flat.data(), impl_->router_bias.p, flat.size());
+    std::vector<std::vector<float>> out(L);
+    for (int l = 0; l < L; ++l) out[l].assign(flat.begin() + size_t(l) * E, flat.begin() + size_t(l + 1) * E);
     return out;
 }
 
