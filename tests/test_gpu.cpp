@@ -62,6 +62,73 @@ void random_batch(Rng& rng, int V, int N, std::vector<int>& tok, std::vector<int
     }
 }
 
+// A decoder for generate()'s host branch (the one without picks_on_device)
+// on the double-precision reference: each step reruns the whole forward on
+// every sequence's tokens so far, unpadded (sequences with the same start
+// share a forward), and returns the last position's logits in float. No KV
+// cache, no left padding: the GPU's decoder must compute the same.
+struct ReferenceDecoder {
+    Config cfg;
+    GpuReference& ref;
+    std::vector<int> start;
+    std::vector<std::vector<int>> hist;
+    std::vector<float> out;
+
+    void decode_begin(int B, const std::vector<int>& s) {
+        CHECK(int(s.size()) == B, "decode_begin: %zu starts for %d sequences", s.size(), B);
+        start = s;
+        hist.assign(size_t(B), {});
+        out.assign(size_t(B) * cfg.vocab, 0.0f);
+    }
+    const float* decode_step(const int* tokens, int pos) {
+        const int B = int(start.size()), V = cfg.vocab;
+        CHECK(pos < cfg.seq_len, "decode position %d >= seq_len %d", pos, cfg.seq_len);
+        for (int b = 0; b < B; ++b)
+            if (pos >= start[b]) hist[size_t(b)].push_back(tokens[b]);
+        std::vector<bool> done(size_t(B), false);
+        for (int b = 0; b < B; ++b) {
+            if (done[size_t(b)] || pos < start[b]) continue;
+            std::vector<int> rows, tok;  // the sequences that start where b does
+            for (int c = b; c < B; ++c)
+                if (start[c] == start[b]) rows.push_back(c), done[size_t(c)] = true;
+            const int Tn = pos - start[b] + 1;
+            for (int c : rows) tok.insert(tok.end(), hist[size_t(c)].begin(), hist[size_t(c)].end());
+            ref.forward(tok.data(), nullptr, int(rows.size()), Tn);
+            const std::vector<double> l = ref.logits();
+            for (size_t i = 0; i < rows.size(); ++i)
+                for (int v = 0; v < V; ++v)
+                    out[size_t(rows[i]) * V + v] = float(l[((i + 1) * size_t(Tn) - 1) * V + v]);
+        }
+        return out.data();
+    }
+};
+
+// Where two generations first differ, and the reference's two largest
+// logits there: a different token must come from a near-tie.
+std::string first_divergence(const std::vector<std::vector<int>>& prompts, const std::vector<std::vector<int>>& want,
+                             const std::vector<std::vector<int>>& got, GpuReference& ref, int V) {
+    for (size_t b = 0; b < want.size() && b < got.size(); ++b)
+        for (size_t i = 0; i < want[b].size() || i < got[b].size(); ++i) {
+            if (i < want[b].size() && i < got[b].size() && want[b][i] == got[b][i]) continue;
+            std::vector<int> prefix = prompts[b];
+            prefix.insert(prefix.end(), want[b].begin(), want[b].begin() + std::ptrdiff_t(i));
+            ref.forward(prefix.data(), nullptr, 1, int(prefix.size()));
+            const std::vector<double> l = ref.logits();
+            const double* row = l.data() + (prefix.size() - 1) * size_t(V);
+            int top = 0, second = -1;
+            for (int v = 1; v < V; ++v)
+                if (row[v] > row[top]) second = top, top = v;
+                else if (second < 0 || row[v] > row[second]) second = v;
+            char buf[192];
+            std::snprintf(buf, sizeof buf,
+                          " (first at sequence %zu, token %zu: %d against %d; reference top two %d %.9g, %d %.9g)", b,
+                          i, i < want[b].size() ? want[b][i] : -1, i < got[b].size() ? got[b][i] : -1, top, row[top],
+                          second, row[second]);
+            return buf;
+        }
+    return "";
+}
+
 struct Run {
     bool muon = false;
     // > 0: clip the gradient to that fraction of its norm, scaling it on
@@ -505,20 +572,26 @@ void profile_regions() {
 }
 
 // Incremental decoding on the GPU (decode_begin / decode_step, what training
-// takes its reasoning exams with) against the CPU's Model: the same tokens
-// into both, prompts of 9, 1 and 5 tokens (left-padded), every step's logits
-// compared, to the end of the context; then generate() on both, and a
-// training forward() after decoding, which must see the same loss and
-// memory as before it (the caches are freed, the training buffers kept).
+// takes its reasoning exams with) against the double-precision reference
+// (ReferenceDecoder: the whole forward on each unpadded prefix): the same
+// tokens into both, prompts of 9, 1 and 5 tokens (left-padded on the GPU),
+// every step's logits compared, to the end of the context; then generate()
+// on both, and a training forward() after decoding, which must see the same
+// loss and memory as before it (the caches are freed, the training buffers
+// kept).
 void decode(const char* name, const Config& cfg, double tol, Matmul matmul = Matmul::fp32) {
-    Model<float> cpu(cfg);
-    cpu.init(9);
+    Model<float> host(cfg);  // the layout and a copy of the weights
+    GpuTrainer gpu(cfg, host.infos, matmul, true);
+    gpu.init_params(9);
+    gpu.get_params(host.params.data());
     Rng rng(10);
-    for (auto& layer : cpu.router_bias)
+    for (auto& layer : host.router_bias)
         for (auto& b : layer) b = float(0.01 * rng.normal());
-    GpuTrainer gpu(cfg, cpu.infos, matmul, true);
-    gpu.set_params(cpu.params.data());
-    gpu.set_router_bias(cpu.router_bias);
+    gpu.set_router_bias(host.router_bias);
+    GpuReference ref(cfg, host.infos);
+    ref.set_params(host.params.data());
+    ref.set_router_bias(host.router_bias);
+    ReferenceDecoder cpu{cfg, ref, {}, {}, {}};
     EXPECT(gpu.decode_capacity(64) >= 3, "%s: decode capacity %d", name, gpu.decode_capacity(64));
     const std::vector<int> lens = {9, 1, 5};
     const int B = int(lens.size()), L = 9, V = cfg.vocab;
@@ -550,7 +623,7 @@ void decode(const char* name, const Config& cfg, double tol, Matmul matmul = Mat
             for (int b = 0; b < B; ++b) {
                 const float* rc = lc + size_t(b) * V;
                 if (pos >= start[b]) worst = std::max(worst, rel_l2(lg + size_t(b) * V, rc, size_t(V)));
-                cur[b] = int(std::max_element(rc, rc + V) - rc);  // the CPU's greedy choice feeds both
+                cur[b] = int(std::max_element(rc, rc + V) - rc);  // the reference's greedy choice feeds both
             }
         }
     }
@@ -563,16 +636,20 @@ void decode(const char* name, const Config& cfg, double tol, Matmul matmul = Mat
     GpuDecoder dec{cfg, gpu};
     const auto gc = generate(cpu, prompts, cfg.seq_len, never);
     const auto gg = generate(dec, prompts, cfg.seq_len, never);
-    if (matmul == Matmul::fp32) EXPECT(gc == gg, "%s: generate() picked different tokens", name);
+    if (matmul == Matmul::fp32)
+        EXPECT(gc == gg, "%s: generate() picked different tokens%s", name,
+               first_divergence(prompts, gc, gg, ref, V).c_str());
     // With the no-repeat block (eval-reasoning --no-repeat), too.
     const auto bc = generate(cpu, prompts, cfg.seq_len, never, 0.0, nullptr, nullptr, calc::Mode::none, nullptr,
                              nullptr, 3);
     const auto bg = generate(dec, prompts, cfg.seq_len, never, 0.0, nullptr, nullptr, calc::Mode::none, nullptr,
                              nullptr, 3);
-    if (matmul == Matmul::fp32) EXPECT(bc == bg, "%s: generate() with --no-repeat 3 picked different tokens", name);
+    if (matmul == Matmul::fp32)
+        EXPECT(bc == bg, "%s: generate() with --no-repeat 3 picked different tokens%s", name,
+               first_divergence(prompts, bc, bg, ref, V).c_str());
     // The caches lived in the gradient buffer; zero_grad() gives it back.
     gpu.zero_grad();
-    std::vector<float> g(cpu.num_params(), 1.0f);
+    std::vector<float> g(host.num_params(), 1.0f);
     gpu.get_grads(g.data());
     EXPECT(std::all_of(g.begin(), g.end(), [](float x) { return x == 0.0f; }),
            "%s: zero_grad() after decoding left gradients", name);
@@ -581,14 +658,16 @@ void decode(const char* name, const Config& cfg, double tol, Matmul matmul = Mat
 }
 
 // eval-reasoning --gpu: eval_reasoning() on GpuDecoder (exact fp32 products)
-// against the CPU's Model, greedy, with 4 sampled tries and a vote, and
+// against the reference (ReferenceDecoder, generate()'s host branch), greedy, with 4 sampled tries and a vote, and
 // with the calculator. A freshly initialized model would never finish an
 // answer or call the calculator, so a tiny byte-level MoE model first
 // learns, on the GPU, to answer "Q: 12*34" with "<<12*34=408>>408\n#### 408":
 // a calculator note (calc-notes mode finishes it) and an answer line. Then
 // both sides must give the same EvalResult: every level's scores, the first
 // tries' texts, the shown failures and the calculator calls, with different
-// batches (12 answers at a time on the CPU, 8 on the GPU), as the CLI runs.
+// batches (12 answers at a time on the reference, 8 on the GPU), as the CLI
+// runs. The GPU chooses its tokens itself (pick_tokens, its own copy of the
+// generators), the reference through pick_token on the host.
 void eval_on_gpu() {
     Config cfg;
     cfg.vocab = Tokenizer{}.vocab_size();
@@ -599,10 +678,9 @@ void eval_on_gpu() {
     cfg.n_experts = 4;
     cfg.top_k = 2;
     cfg.expert_hidden = 64;
-    Model<float> cpu(cfg);
-    cpu.init(11);
-    GpuTrainer gpu(cfg, cpu.infos, Matmul::fp32, false);
-    gpu.set_params(cpu.params.data());
+    Model<float> host(cfg);  // the layout and a copy of the weights
+    GpuTrainer gpu(cfg, host.infos, Matmul::fp32, false);
+    gpu.init_params(11);
     Rng rng(12);
     auto problem = [&](int digits) {
         const int lo = digits == 1 ? 2 : 10, hi = digits == 1 ? 9 : 49;
@@ -634,11 +712,14 @@ void eval_on_gpu() {
         const double norm = gpu.grad_norm();
         gpu.adamw_step(3e-3, 0.9, 0.95, 1e-8, 0.0, norm > 1.0 ? 1.0 / norm : 1.0);
     }
-    gpu.get_params(cpu.params.data());
-    cpu.weights_dirty = true;
-    for (auto& layer : cpu.router_bias)
+    gpu.get_params(host.params.data());
+    for (auto& layer : host.router_bias)
         for (auto& b : layer) b = float(0.01 * rng.normal());
-    gpu.set_router_bias(cpu.router_bias);
+    gpu.set_router_bias(host.router_bias);
+    GpuReference ref(cfg, host.infos);
+    ref.set_params(host.params.data());
+    ref.set_router_bias(host.router_bias);
+    ReferenceDecoder cpu{cfg, ref, {}, {}, {}};
     std::vector<Problem> test;
     for (int i = 0; i < 24; ++i) test.push_back(problem(1 + i % 2));
 
@@ -660,8 +741,8 @@ void eval_on_gpu() {
         const size_t finished = size_t(std::count_if(c.completions.begin(), c.completions.end(), completion_done));
         std::printf("  eval on the GPU, %-15s %2d / %d right, %zu / %zu finished, %zu calculator calls\n", name,
                     c.correct, c.total, finished, c.completions.size(), c.tool_calls.fired);
-        EXPECT(same, "eval on the GPU, %s: the EvalResult differs from the CPU's (%d / %d right against %d)", name,
-               g.correct, g.total, c.correct);
+        EXPECT(same, "eval on the GPU, %s: the EvalResult differs from the reference's (%d / %d right against %d)",
+               name, g.correct, g.total, c.correct);
         if (vote.tries == 1 && vote.no_repeat == 0 && tool == calc::Mode::none) plain = c.completions;
         // The comparison means something only if answers were finished, or
         // (no-repeat) if the block changed them.
@@ -697,7 +778,7 @@ void eval_on_gpu() {
     const auto never = [](const std::vector<int>&) { return false; };
     const auto oc = generate(cpu, prompts, 30, never, 1.0, &rc);
     const auto og = generate(dec, prompts, 30, never, 1.0, &rg);
-    EXPECT(oc == og && rc.next() == rg.next(), "shared-generator sampling differs between the CPU and the GPU");
+    EXPECT(oc == og && rc.next() == rg.next(), "shared-generator sampling differs between the reference and the GPU");
 }
 
 }  // namespace
