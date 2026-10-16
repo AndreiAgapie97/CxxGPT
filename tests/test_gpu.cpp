@@ -365,10 +365,9 @@ void learns_pattern(bool muon, Matmul matmul = Matmul::tf32, bool fused = false)
     cfg.n_experts = 4;
     cfg.top_k = 2;
     cfg.ternary = matmul != Matmul::bf16;
-    Model<float> host(cfg);
-    host.init(7);
+    Model<float> host(cfg);  // the layout
     GpuTrainer gpu(cfg, host.infos, matmul, fused);
-    gpu.set_params(host.params.data());
+    gpu.init_params(7);
     gpu.set_muon(muon);
     const int B = 8, N = B * cfg.seq_len;
     std::vector<int> tok(N), tgt(N);
@@ -392,8 +391,8 @@ void learns_pattern(bool muon, Matmul matmul = Matmul::tf32, bool fused = false)
     EXPECT(last < 0.1 * first, "GPU training with %s did not learn the pattern: %.3f -> %.3f", opt, first, last);
 }
 
-// The fused attention kernels alone, against the double-precision reference
-// (attention_ref.h): attention.cuh's fp32 kernels, and attention_tc.cuh's
+// The fused attention kernels alone, against attention in double on the
+// GPU (reference_attention; random cases from attention_ref.h): attention.cuh's fp32 kernels, and attention_tc.cuh's
 // tensor-core ones, whose inputs are rounded to TF32 as cuBLAS rounds them:
 // 11 significant bits, about 5e-4 apart, which is the size of their errors
 // (2e-4 to 1e-3 on the RTX 4070), hence the bound of 3e-3.
@@ -412,7 +411,12 @@ void fused_kernels() {
     };
     uint64_t seed = 11;
     for (const Shape& s : shapes) {
-        const auto k = attention_ref::make_case(s.B, s.NH, s.HS, s.Tn, seed++);
+        // The exact results from the reference (attention in double).
+        auto k = attention_ref::make_inputs(s.B, s.NH, s.HS, s.Tn, seed++);
+        {
+            const std::vector<double> qkv(k.qkv.begin(), k.qkv.end()), dout(k.dout.begin(), k.dout.end());
+            reference_attention(qkv, dout, k.out, k.lse, k.dqkv, s.B, s.Tn, s.NH, s.HS);
+        }
         for (bool tc : {false, true}) {
             std::vector<float> out(k.out.size()), lse(k.lse.size()), dqkv = k.dqkv0;
             gpu_fused_attention(k.qkv.data(), k.dout.data(), out.data(), lse.data(), dqkv.data(), s.B, s.Tn, s.NH,
@@ -472,13 +476,24 @@ void extreme_cross_entropy() {
 
 // Ternary codes (#40): the GPU quantizes with its own kernels (absolute
 // sums in double, one scale per tensor or expert, rintf), which must give
-// every weight the CPU's code, at the thresholds too, and the CPU's scale
-// to within an ulp; then again on weights the GPU itself trained.
+// every weight the reference's code (reference_ternary, the CPU engine's
+// float rule), at the thresholds too, and its scale to within an ulp; then
+// again on weights the GPU itself trained.
 void ternary_codes_on_gpu(const Config& cfg) {
-    Model<float> cpu(cfg);
-    cpu.init(3);
+    Model<float> cpu(cfg);  // the layout and the weights
+    std::vector<float> rq;  // the reference's ternary weights
     Rng rng(4);
     for (auto& w : cpu.params) w = float(rng.normal() * 0.3);
+    // Every ternary tensor's copies (one per expert) quantized by the reference.
+    auto reference_codes = [&] {
+        rq.assign(cpu.params.size(), 0.0f);
+        for (const ParamInfo& p : cpu.infos)
+            if (p.ternary)
+                for (int c = 0; c < p.count; ++c) {
+                    const size_t per = p.size / p.count, o = p.offset + size_t(c) * per;
+                    reference_ternary(&cpu.params[o], &rq[o], per);
+                }
+    };
     std::vector<std::pair<size_t, std::vector<size_t>>> planted;
     for (const ParamInfo& p : cpu.infos)
         if (p.ternary) {
@@ -496,18 +511,17 @@ void ternary_codes_on_gpu(const Config& cfg) {
         for (const ParamInfo& p : cpu.infos)
             if (p.ternary)
                 for (size_t i = p.offset; i < p.offset + p.size; ++i) {
-                    codes += ternary_sign(q[i]) != ternary_sign(cpu.qparams[i]);
-                    *values += std::abs(q[i] - cpu.qparams[i]) > 1.2e-7f * std::abs(cpu.qparams[i]);
+                    codes += ternary_sign(q[i]) != ternary_sign(rq[i]);
+                    *values += std::abs(q[i] - rq[i]) > 1.2e-7f * std::abs(rq[i]);
                 }
         return codes;
     };
     gpu.set_params(cpu.params.data());
     gpu.get_ternary_weights(q.data());
-    cpu.weights_dirty = true;
-    cpu.quantize_weights();
+    reference_codes();
     size_t values = 0;
     const size_t codes = mismatches(&values);
-    EXPECT(codes == 0 && values == 0, "ternary codes: %zu codes and %zu values differ from the CPU's", codes,
+    EXPECT(codes == 0 && values == 0, "ternary codes: %zu codes and %zu values differ from the reference's", codes,
            values);
     const auto cases = threshold_cases();
     for (size_t c = 0; c < cases.size(); ++c) {
@@ -516,7 +530,7 @@ void ternary_codes_on_gpu(const Config& cfg) {
                ternary_sign(wq), cases[c].second);
     }
 
-    // A few AdamW steps on the GPU, then its own weights quantized on the CPU.
+    // A few AdamW steps on the GPU, then its own weights quantized by the reference.
     std::vector<int> tok, tgt;
     for (int step = 0; step < 3; ++step) {
         random_batch(rng, cfg.vocab, 2 * cfg.seq_len, tok, tgt);
@@ -531,12 +545,11 @@ void ternary_codes_on_gpu(const Config& cfg) {
         size_t(std::count_if(cpu.params.begin(), cpu.params.end(), [](float w) { return !std::isfinite(w); }));
     EXPECT(non_finite == 0, "ternary codes: %zu weights are not finite after 3 GPU steps", non_finite);
     gpu.get_ternary_weights(q.data());
-    cpu.weights_dirty = true;
-    cpu.quantize_weights();
+    reference_codes();
     const size_t trained = mismatches(&values);
     EXPECT(trained == 0 && values == 0, "ternary codes after training: %zu codes and %zu values differ",
            trained, values);
-    std::printf("  ternary codes: GPU = CPU for every weight, before and after 3 GPU steps\n");
+    std::printf("  ternary codes: GPU = reference for every weight, before and after 3 GPU steps\n");
 }
 
 // Unlikelihood with a saturated softmax: the fixture's logits are about
@@ -622,10 +635,9 @@ void profile_regions() {
     cfg.n_experts = 4;
     cfg.top_k = 2;
     cfg.ternary = true;
-    Model<float> host(cfg);
-    host.init(8);
+    Model<float> host(cfg);  // the layout
     GpuTrainer gpu(cfg, host.infos);
-    gpu.set_params(host.params.data());
+    gpu.init_params(8);
     gpu.set_profile(true);
     gpu.set_muon(true);
     const int B = 2, N = B * cfg.seq_len;
@@ -1122,23 +1134,50 @@ void grouped_products() {
     std::printf("  grouped expert products: fp32 %.1e, tf32 %.1e, bf16 %.1e apart\n", worst[0], worst[1], worst[2]);
 }
 
+// The balancing rule on the host, as GpuBackend applied it before #50: each
+// router bias moves +rate for an expert that got fewer tokens than the
+// layer's mean, -rate for more (in float, as the biases are kept).
+void nudge_biases(std::vector<std::vector<float>>& bias, const std::vector<std::vector<double>>& load, double rate) {
+    for (size_t l = 0; l < bias.size(); ++l) {
+        double mean = 0;
+        for (double c : load[l]) mean += c;
+        mean /= double(load[l].size());
+        for (size_t e = 0; e < bias[l].size(); ++e) {
+            if (load[l][e] < mean) bias[l][e] += float(rate);
+            else if (load[l][e] > mean) bias[l][e] -= float(rate);
+        }
+    }
+}
+
+// The busiest expert's share against an even split, worst layer (1 = even).
+double load_ratio(const std::vector<std::vector<double>>& load) {
+    double worst = 1.0;
+    for (const auto& layer : load) {
+        double total = 0;
+        for (double c : layer) total += c;
+        if (total > 0) worst = std::max(worst, *std::max_element(layer.begin(), layer.end()) * double(layer.size()) / total);
+    }
+    return worst;
+}
+
 // The step on the GPU (forward_train, finish_step: train --gpu since #50)
 // against the same step driven from the host as GpuBackend did it before:
 // the norm, the clip scale and the update check computed on the host from
-// numbers copied back, the router biases nudged on the host
-// (Model::update_router_bias) and sent back. Two trainers from the same
+// numbers copied back, the router biases nudged on the host (nudge_biases)
+// and sent back. Two trainers from the same
 // weights, on the same batches of two micro-batches each. Gradients add up
 // with atomics in a varying order, so the two agree to rounding, not bit
 // for bit. Then a weight set to NaN: the GPU skips the update, keeps every
 // weight and the optimizer step, and drops the step's expert loads.
 void step_on_gpu(const char* name, const Config& cfg, bool muon, double max_norm) {
-    Model<float> host(cfg);  // the weights, and the host side's biases and loads
-    host.init(7);
+    Model<float> host(cfg);  // the layout, the weights, and the host side's biases
     Rng rng(8);
     for (auto& layer : host.router_bias)
         for (auto& b : layer) b = float(0.01 * rng.normal());
-    AdamW opt;
+    const ReferenceOptimizer opt;  // its settings
     GpuTrainer old_way(cfg, host.infos, Matmul::fp32, true), new_way(cfg, host.infos, Matmul::fp32, true);
+    old_way.init_params(7);
+    old_way.get_params(host.params.data());
     for (GpuTrainer* g : {&old_way, &new_way}) {
         g->set_params(host.params.data());
         g->set_adam_state(0, nullptr, nullptr);
@@ -1170,13 +1209,13 @@ void step_on_gpu(const char* name, const Config& cfg, bool muon, double max_norm
         const double scale = max_norm > 0 && norm > max_norm ? double(float(max_norm / norm)) : 1.0;
         old_way.adamw_step(lr, opt.beta1, opt.beta2, opt.eps, opt.weight_decay, scale);
         const auto loads = old_way.take_expert_load();
-        for (size_t l = 0; l < loads.size() && cfg.moe(); ++l)
-            for (size_t e = 0; e < loads[l].size(); ++e) {
-                host.expert_load[l][e] = loads[l][e];
-                interval[l][e] += loads[l][e];
-            }
-        const double ratio = host.max_load_ratio();
-        host.update_router_bias(rate);
+        double ratio = 1.0;
+        if (cfg.moe()) {
+            for (size_t l = 0; l < loads.size(); ++l)
+                for (size_t e = 0; e < loads[l].size(); ++e) interval[l][e] += loads[l][e];
+            ratio = load_ratio(loads);
+            nudge_biases(host.router_bias, loads, rate);
+        }
         old_way.set_router_bias(host.router_bias);
         // The step on the GPU.
         new_way.zero_grad();

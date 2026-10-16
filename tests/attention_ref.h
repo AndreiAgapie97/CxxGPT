@@ -36,20 +36,27 @@ struct Case {
     std::vector<double> out, lse, dqkv;           // reference results
 };
 
-inline Case make_case(int B, int NH, int HS, int Tn, uint64_t seed) {
+// A case's random inputs, rounded to float: the exact results are for the
+// inputs the kernels get. dqkv is left at dqkv0, for the backward to add to.
+inline Case make_inputs(int B, int NH, int HS, int Tn, uint64_t seed) {
     Case k{B, NH, HS, Tn, NH * HS, {}, {}, {}, {}, {}, {}};
     const int C = k.C, N = B * Tn;
     Rng rng(seed);
-    std::vector<double> qkv(size_t(N) * 3 * C), dout(size_t(N) * C);
-    k.dqkv.resize(size_t(N) * 3 * C);
-    // Rounded to float first: the exact results are for the inputs the kernels get.
-    for (auto& x : qkv) x = double(float(rng.normal()));
-    for (auto& x : dout) x = double(float(rng.normal()));
-    for (auto& x : k.dqkv) x = double(float(0.1 * rng.normal()));
-    k.qkv.assign(qkv.begin(), qkv.end());
-    k.dout.assign(dout.begin(), dout.end());
-    k.dqkv0.assign(k.dqkv.begin(), k.dqkv.end());
+    k.qkv.resize(size_t(N) * 3 * C);
+    k.dout.resize(size_t(N) * C);
+    k.dqkv0.resize(size_t(N) * 3 * C);
+    for (auto& x : k.qkv) x = float(rng.normal());
+    for (auto& x : k.dout) x = float(rng.normal());
+    for (auto& x : k.dqkv0) x = float(0.1 * rng.normal());
+    k.dqkv.assign(k.dqkv0.begin(), k.dqkv0.end());
+    return k;
+}
 
+// The same case with its exact results from ops.h in double.
+inline Case make_case(int B, int NH, int HS, int Tn, uint64_t seed) {
+    Case k = make_inputs(B, NH, HS, Tn, seed);
+    const int C = k.C, N = B * Tn;
+    const std::vector<double> qkv(k.qkv.begin(), k.qkv.end()), dout(k.dout.begin(), k.dout.end());
     k.out.resize(size_t(N) * C);
     std::vector<double> att(size_t(B) * NH * Tn * Tn);
     attention_forward(k.out.data(), att.data(), qkv.data(), B, Tn, C, NH);
