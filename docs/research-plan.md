@@ -1033,6 +1033,51 @@ What this says:
    at every logged step. Not yet compared over a whole night. int8 tensor
    cores (twice bf16's rate) are the step after.
 
+9. **The tensor-core attention, rewritten** (2026-10-16). The profile
+   had attention at 94 + 293 ms of a 2400 ms step (forward + backward),
+   at only 6-7 TFLOP/s. The WMMA kernels stored every score tile to
+   shared memory, did the softmax there two lanes per row, and loaded it
+   back for the next product. Now (`src/attention_tc.cuh`) every product
+   runs on mma.sync m16n8k8, whose register layout is documented, so
+   scores, softmax and the next product's operand stay in registers (the
+   FlashAttention-2 layout); tiles of 32 rows arrive by cp.async while
+   the warps work on the previous one. Same TF32 rounding (cvt.rna), so
+   the same numbers up to the order of the sums.
+
+   A bench at the night shape (8 x 512 tokens, 12 heads of 64; one layer,
+   one micro-batch) found the second limit: memory. The backward added
+   dq, dk and dv into a dqkv the trainer had zeroed: 37.7 MB written by
+   the memset, read back and written again, and the GPU moves 256 GB/s.
+   The backward kernels now write dqkv (each element exactly once), and
+   the trainer zeroes it only for the paths that add (fp32 kernels,
+   cuBLAS attention):
+
+   | kernel (ms a call) | old | new |
+   |---|---|---|
+   | forward | 0.47 | 0.25 (13 TFLOP/s) |
+   | backward dq | 0.56 | 0.33 (15) |
+   | backward dk, dv | 0.76 | 0.49 (14) |
+
+   That is about our TF32 kernels' practical ceiling (15 of ~20 TFLOP/s,
+   item 8). Training, 40 steps interleaved, steps 20-40: 2348 -> 2205 ms
+   a step (-6.1%, 27.9k -> 29.7k tokens/s, the same 7004 MB); the
+   profile's attention 94 -> 50 ms forward, 293 -> 191 ms backward; step
+   40 losses 6.2743 and 6.2748 (old) against 6.2728 and 6.2743 (new).
+   The same kernels serve the ternary night model (`--fp-attn` or not).
+   Other head sizes (16-128) are 1.7-2.5x faster too; at 128 the
+   backward kernels spill a few registers.
+
+   Measured and left out: one backward kernel with dq added by atomics
+   (5 products instead of 7, but dq then needs a zeroed buffer, and its
+   shared-memory reduction cost more than it saved: 0.89 ms against
+   0.33 + 0.49 with written outputs); 8 warps and 128 rows a block
+   (slower: fewer blocks, the same tensor-core work); the heaviest blocks
+   of every head first (slower forward: blocks of one head running
+   together share K and V in L2, and qkv, 37.7 MB, does not fit there).
+   Next for attention: bf16 operands (twice the tensor-core rate; a
+   numerics change, the owner's call), which the memory traffic would
+   cap at roughly another 40 ms a step.
+
    Next, by measured size: the bf16 copies of products' inputs (138 ms,
    1249 calls a step), RoPE (64 ms, into attention's loads), the fused
    output layer and loss, then FP8.

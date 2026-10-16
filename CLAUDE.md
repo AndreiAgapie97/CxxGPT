@@ -105,7 +105,12 @@ Math problem-solving accuracy is the first evaluation focus.
   (`src/attention_tc.cuh`, tested on the GPU only; 1.18x the cuBLAS
   attention's tokens/s on the night-1 model, at 8 x 16, which only fits
   with them), in exact fp32 otherwise (`src/attention.cuh`, also tested on
-  a CPU emulator, `tests/cuda_emu.h`).
+  a CPU emulator, `tests/cuda_emu.h`). Since 2026-10-16 the tensor-core
+  kernels use mma.sync with scores and softmax in registers
+  (FlashAttention-2 layout, the same TF32 rounding), and the backward
+  writes dqkv instead of adding to a zeroed one: attention 94 + 293 ->
+  50 + 191 ms a step, 2348 -> 2205 ms on the night model (-6.1%, 27.9k ->
+  29.7k tokens/s; docs/research-plan.md "Speed", item 9).
   `--profile` times each part of a step. Since 2026-10-16 the step's
   sums (loss, gradient norm, clip, the skip of a non-finite step, router
   balancing) stay on the GPU, MoE experts in bf16 run as one grouped

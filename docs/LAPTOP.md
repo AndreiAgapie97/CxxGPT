@@ -377,7 +377,9 @@ both against the model in double precision on the GPU (`src/gpu_ref.cu`):
   default) or TF32 matmuls they multiply on the tensor cores
   (`src/attention_tc.cuh`): on the night-1 model, attention takes 380 ms
   of a step instead of 930 ms, and training runs at 16,900 tokens/s at
-  4 x 32 (cuBLAS: 15,000) and 17,800 at 8 x 16, which only fits with them.
+  4 x 32 (cuBLAS: 15,000) and 17,800 at 8 x 16, which only fits with them
+  (2026-10-14; since 2026-10-16, with everything else since then, the
+  night model's attention takes 240 ms of a 2.2 s step).
   With `--matmul fp32` they run the exact fp32 kernels
   (`src/attention.cuh`). Heads larger than 128 use the cuBLAS attention;
 - `--matmul bf16`, the default since 2026-10-14 (`--matmul tf32` goes

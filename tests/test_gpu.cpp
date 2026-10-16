@@ -417,11 +417,17 @@ void fused_kernels() {
             const std::vector<double> qkv(k.qkv.begin(), k.qkv.end()), dout(k.dout.begin(), k.dout.end());
             reference_attention(qkv, dout, k.out, k.lse, k.dqkv, s.B, s.Tn, s.NH, s.HS);
         }
+        // The tensor-core kernels write dqkv rather than add to it: they get
+        // NaNs, so any element left unwritten fails, and are checked against
+        // the gradients alone.
+        attention_ref::Case written = k;
+        for (size_t i = 0; i < written.dqkv.size(); ++i) written.dqkv[i] -= k.dqkv0[i];
         for (bool tc : {false, true}) {
-            std::vector<float> out(k.out.size()), lse(k.lse.size()), dqkv = k.dqkv0;
+            std::vector<float> out(k.out.size()), lse(k.lse.size());
+            std::vector<float> dqkv = tc ? std::vector<float>(k.dqkv0.size(), NAN) : k.dqkv0;
             gpu_fused_attention(k.qkv.data(), k.dout.data(), out.data(), lse.data(), dqkv.data(), s.B, s.Tn, s.NH,
                                 s.HS, tc);
-            const auto e = attention_ref::errors(k, out, lse, dqkv);
+            const auto e = attention_ref::errors(tc ? written : k, out, lse, dqkv);
             std::printf("  fused %s, %d x %d heads of %d, %d tokens: out %.1e, lse %.1e, dq %.1e, dk %.1e, dv %.1e\n",
                         tc ? "tensor-core" : "fp32", s.B, s.NH, s.HS, s.Tn, e.out, e.lse, e.dq, e.dk, e.dv);
             const double tol_out = tc ? 3e-3 : 1e-5, tol_grad = tc ? 3e-3 : 1e-4;

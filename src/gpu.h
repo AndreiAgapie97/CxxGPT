@@ -245,8 +245,8 @@ void gpu_grouped_swiglu_grad(const std::vector<float>& A, const std::vector<floa
                              std::vector<float>& unfused);
 
 // The fused attention kernels on their own, on host arrays (for tests):
-// out and lse from qkv [B·Tn, 3·NH·HS], then dqkv += the backward pass of
-// dout, as GpuTrainer runs them. tensor_cores picks attention_tc.cuh's
-// kernels over attention.cuh's.
+// out and lse from qkv [B·Tn, 3·NH·HS], then the backward pass of dout into
+// dqkv, as GpuTrainer runs them. tensor_cores picks attention_tc.cuh's
+// kernels, which write dqkv, over attention.cuh's, which add to it.
 void gpu_fused_attention(const float* qkv, const float* dout, float* out, float* lse, float* dqkv, int B, int Tn,
                          int NH, int HS, bool tensor_cores);

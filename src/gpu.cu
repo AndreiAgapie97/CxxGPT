@@ -1139,7 +1139,8 @@ void fused_attention_forward(bool tc, const float* qkv, float* out, float* lse, 
     LAUNCH_CHECK();
 }
 
-// dqkv += the backward of out (given dout); dsum is scratch, B·NH·Tn floats.
+// The backward of out (given dout) into dqkv: the tensor-core kernels write
+// it, the fp32 ones add to it. dsum is scratch, B·NH·Tn floats.
 void fused_attention_backward(bool tc, const float* qkv, const float* out, const float* dout, const float* lse,
                               float* dsum, float* dqkv, int B, int Tn, int C, int NH, int HS) {
     const float scale = 1.0f / std::sqrt(float(HS));
@@ -1546,6 +1547,8 @@ struct GpuTrainer::Impl {
     // Weights as the products use them: their ternary copy when q.
     const float* W(size_t o, bool q) const { return q ? qparams.p + o : params.p + o; }
     bool attn_ternary() const { return cfg.ternary && !cfg.fp_attention; }
+    // The tensor-core attention backward writes all of dqkv (no zeroing first).
+    bool attention_writes_dqkv() const { return fused_attn && tc_attn; }
 
     // Row-major C[M, N] = op(A)[M, K] · op(B)[K, N] + beta * C. With ta, A is
     // stored as [K, M] (row stride lda); likewise B with tb. cuBLAS is
@@ -1779,7 +1782,8 @@ struct GpuTrainer::Impl {
         }
     }
 
-    // attention_forward's backward: accumulates into dqkv_, given dout = d(a.atty).
+    // attention_forward's backward, given dout = d(a.atty): writes dqkv_ with
+    // the tensor-core kernels (attention_writes_dqkv), adds to it otherwise.
     void attention_backward(float* dqkv_, const float* dout, const LayerActs& a, int B, int Tn) {
         Region r(*this, "attention bwd");
         const int C = cfg.d_model, NH = cfg.n_heads, HS = cfg.head_size();
@@ -2419,7 +2423,8 @@ struct GpuTrainer::Impl {
         // Buffers whose first writer is a product or the experts' scatter
         // are written (beta 0), not zeroed first and added to; so is dresid
         // by the final norm's backward, and the other norms add into it.
-        // dqkv is zeroed, since the attention backward adds into it.
+        // dqkv is zeroed only for the attention backward paths that add into
+        // it (fp32 fused kernels, cuBLAS); the tensor-core kernels write it.
         const float* xL = acts.back().resid2.p;
         {
             Region r(*this, "output layer and loss");
@@ -2444,7 +2449,7 @@ struct GpuTrainer::Impl {
             rmsnorm_backward(dresid.p, G(o.ln2), dC.p, a.resid1.p, P(o.ln2), a.rstd2.p, N, C);
             proj_backward(datty.p, dresid.p, pick(a.atty, a.attyh, attn_ternary()), o.wo, N, C, C, attn_ternary(),
                           0.0f);
-            dqkv.zero(size_t(N) * 3 * C);
+            if (!attention_writes_dqkv()) dqkv.zero(size_t(N) * 3 * C);
             attention_backward(dqkv.p, datty.p, a, B, Tn);
             if (cfg.rope_layer(l)) rope_apply(dqkv.p, B, Tn, true);
             proj_backward(dC.p, dqkv.p, pick(a.ln1, a.ln1h, attn_ternary()), o.wqkv, N, C, 3 * C, attn_ternary(),
