@@ -955,6 +955,40 @@ What this says:
    and 107 ms of backward ones, all limited by memory bandwidth.
 6. The review's smaller items: the attention softmax per sequence, no
    memsets in front of accumulations.
+7. **Fusions with the same numbers** (2026-10-16, after an nsys trace of
+   the night model at 2652 ms a step; the cuBLAS bf16 ceiling on this GPU
+   is 40-43 TFLOP/s with random inputs, 45 with constant ones, and the
+   products run at 25-32). Each step measured without `--profile`,
+   interleaved:
+
+   | change | ms a step |
+   |---|---|
+   | buffers written by their first writer, not zeroed and added to; the experts' combine writes the residual sum | -73 |
+   | RMSNorm's backward in one pass | -17 (nsys), inside the noise end to end |
+   | SwiGLU's backward in the bf16 eproj product's epilogue | -27 (nsys -53) |
+   | Muon's norm in the momentum pass, 64 blocks per matrix | -34 |
+   | all four, start against end (interleaved) | 2665 -> 2489 (-6.6%) |
+
+   That is 24,600 -> 26,300 tokens/s, with the same 7.0 GB of GPU memory.
+   The 200-step curve gives 2655 -> 2480 ms a step, with the training
+   loss within 0.002 at every logged step. The validation loss at step
+   200 is 3.034, against 3.040; earlier baseline curves span 3.039-3.047.
+
+   What did not pay: the residual add and RMSNorm in one kernel (243 us
+   a call against 181 for the two). The sum the norm reads back (12.6 MB)
+   stays in the 32 MB L2 cache, so the second read was already cheap,
+   and a warp per row moves less data at once than an elementwise kernel.
+   The same holds for any fusion whose saved tensor fits in L2. Batching
+   Muon's shapes across layers: its products already run at about the
+   ceiling. Lesson from the SwiGLU epilogue: extra code in a shared
+   epilogue must be a compile-time choice (it slowed every grouped kernel
+   by raising registers), and an epilogue that reads memory must read in
+   pairs or wider.
+
+   Next, by measured size: the experts' grouped products (25-32 TFLOP/s
+   against 40; up to ~200 ms, #49), the bf16 copies of products' inputs
+   (138 ms, 1249 calls a step), RoPE (64 ms, into attention's loads), the
+   fused output layer and loss, then FP8.
 
 **Size nights by the real speed.** `night.sh` sizes a night from the probe's
 tokens/s with a 10% margin, but night 1 lost about 30 minutes to the exams,

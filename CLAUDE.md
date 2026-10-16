@@ -98,7 +98,14 @@ Math problem-solving accuracy is the first evaluation focus.
   `--moe-cublas` is the old path), tokens for decoding are chosen there
   (only ids come back), and new models are initialized there
   (`GpuTrainer::init_params`, other weights than the CPU's `Model::init`
-  for the same seed).
+  for the same seed). The speed plan's fusions (2026-10-16,
+  docs/research-plan.md "Speed", item 7): buffers written instead of
+  zeroed, a one-pass RMSNorm backward, SwiGLU's backward in the bf16
+  `eproj` product (`launch<..., Fused>`), Muon's norm over many blocks:
+  2665 -> 2489 ms a step on the night model (-6.6%, 24.6k -> 26.3k
+  tokens/s, the same 7.0 GB). Training is not bitwise
+  reproducible (atomic adds in the gradients), so "same numbers" means
+  within the spread of repeated runs.
   `tests/test_gpu.cpp` checks it against `src/gpu_ref.cu`, the model in
   double precision on the GPU (plain kernels, one output per thread,
   sharing no code with `gpu.cu`): losses, gradients by finite differences
