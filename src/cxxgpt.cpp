@@ -51,6 +51,7 @@
 #include "train_control.h"
 #include "wordgen.h"
 #include "mathgen.h"
+#include "mathgen_fractions.h"
 
 namespace {
 
@@ -547,7 +548,8 @@ int cmd_gen_word(Args& a) {
 }
 
 // Math problems built from a chosen answer, each solved again by a second
-// solver before it is written (src/mathgen.h). The same two files as gen-word.
+// solver before it is written (src/mathgen.h, src/mathgen_fractions.h). The
+// same two files as gen-word.
 int cmd_gen_math(Args& a) {
     const std::string topic = a.str("topic", "equations");
     const std::string out = a.str("out", "data/math/" + topic);
@@ -557,7 +559,7 @@ int cmd_gen_math(Args& a) {
     // Questions not to repeat, such as GSM8K test and dev (README, gen-math).
     const std::string exclude = a.str("exclude", "");
     a.done();
-    CHECK(topic == "equations", "--topic must be equations (the only topic so far)");
+    CHECK(topic == "equations" || topic == "fractions", "--topic must be equations or fractions");
     CHECK(!out.empty(), "--out must be a nonempty prefix");
     CHECK(count >= 0 && seed >= 0, "--count and --seed must be nonnegative");
     CHECK(split == "train" || split == "test", "--split must be train or test");
@@ -566,7 +568,8 @@ int cmd_gen_math(Args& a) {
     std::unique_ptr<Exclusions> exclusions;
     if (!exclude.empty()) exclusions = std::make_unique<Exclusions>(exclude);
     const MathOptions options{distractors == "on", notes == "on", split == "test", exclusions.get()};
-    const auto problems = make_equation_problems(uint64_t(seed), count, options);
+    const auto problems = topic == "equations" ? make_equation_problems(uint64_t(seed), count, options)
+                                               : make_fraction_problems(uint64_t(seed), count, options);
     write_problem_files(out, problems);
     std::printf("%s.txt and %s.text: %zu %s %s problems, each solved again by the checker\n", out.c_str(),
                 out.c_str(), problems.size(), split.c_str(), topic.c_str());
@@ -1881,7 +1884,7 @@ int main(int argc, char** argv) {
         {"sample", cmd_sample, "generates text from a prompt"},
         {"gen-reasoning", cmd_gen_reasoning, "writes the synthetic reasoning curriculum"},
         {"gen-word", cmd_gen_word, "writes exact word problems with held-out sentence patterns"},
-        {"gen-math", cmd_gen_math, "writes math problems (equations) that a second solver checks"},
+        {"gen-math", cmd_gen_math, "writes math problems (equations, fractions) that a second solver checks"},
         {"prep-qa", cmd_prep_qa, "turns question/answer JSON Lines into problems and token files"},
         {"eval-reasoning", cmd_eval_reasoning, "exact-answer accuracy on a problems file"},
         {"eval-loss", cmd_eval_loss, "a checkpoint's loss on held-out token files"},

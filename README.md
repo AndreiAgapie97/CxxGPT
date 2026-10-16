@@ -340,7 +340,7 @@ Ruby will be 3 times as old as Sam.", or a farm of only sheep and geese
 with 20 heads and 70 legs). A problem is drawn again when its question shares a 13-word run
 with an excluded question (`leak-check`'s rule), or has the same numbers and
 the same answer, which also catches the same problem in other words. Of
-300,000 problems, about 520 are drawn again this way; afterwards none of
+300,000 problems, about 700 are drawn again this way; afterwards none of
 GSM8K test or dev shares a 13-word run, or its numbers and answer, with the
 output. Without `--exclude` the command says so. The two files above come
 with the RunPod data (docs/PREPARED_DATA.md); from a fresh clone, make the
@@ -353,10 +353,57 @@ train|test` (four of six wordings per sentence for train, the other two for
 test), `--distractors on|off` and `--notes on|off`; none of the last two
 changes a random draw. Kinds with few different problems are drawn less
 often. In 1M problems: puzzles 176k different, mixtures 131k, shares 107k,
-rectangles 54k, consecutive numbers 7.2k, ages adding up 6.0k, ages in some
-years only 592 (realistic ages leave few), so those repeat with other names
+rectangles 46k (at real sizes: a rug of a few meters, a field of up to 150),
+consecutive numbers 7.2k, ages adding up 6.0k, ages in some years only 564
+(realistic ages leave few), so those repeat with other names
 and wordings. The output is not part of the training mix; whether to train
 on it is a separate decision.
+
+### Generated math problems: fractions, percentages, ratios and units
+
+```sh
+./cxxgpt gen-math --topic fractions --out data/math/frac-train --split train --seed 1 --count 100000 \
+    --exclude data/licensed-10b/gsm8k-test.txt,data/licensed-10b/gsm8k-dev.txt
+```
+
+`--topic fractions` (`src/mathgen_fractions.h`) has the same files,
+options, splits and checks as the equations, with the task `fractions`.
+Its stories:
+
+- parts of an amount, one to three steps, as fractions or percentages:
+  "has 240 apples, sells 25% of the apples, then gives 1/3 of the remaining
+  apples to Leo";
+- a price cut or raised by a percentage, once or twice, in exact cents;
+- what percent: "18 of the 24 questions right", or a price that went from
+  $40 to $50;
+- an amount shared in a ratio (3:5, or 2:3:4 among three people), or a
+  class of boys and girls, asking for a share or a difference;
+- a ratio and one count ("cats to dogs is 2:3, and there are 18 dogs"),
+  asking for the other count or the total;
+- the same rate for another amount: prices for more or fewer items, a
+  recipe for more or fewer cookies;
+- units: minutes to hours, grams to kilograms, kilometers to meters, cents
+  to dollars.
+
+The numbers are drawn so that every step comes out exact (a part of an
+amount is always whole, a price change always whole cents); every answer is
+a whole number or a decimal with at most two places, as in GSM8K, and
+nothing is rounded. Money and measurements are kept in hundredths inside
+the program. The checker (`fraction_check`) shares no code with the
+generator: it works each story out again from its numbers (the parts as one
+product, prices in cents, every whole percent or ratio part size tried in
+turn), and calc.h checks every note.
+
+No generated question shares a 13-word run with GSM8K test or dev, but
+simple stories land on the same numbers as some of GSM8K's easiest
+questions (a $100 ticket down 20%; 20 cookies, 2/5 given away), so use
+`--exclude` here too: of 300,000 problems it draws about 260 again, after
+which none has a GSM8K test or dev question's numbers and answer. In 1M
+problems: price changes 98k different, proportions 73k, parts 62k, ratio
+splits 61k, units 16k, ratio-and-count 13k, what-percent 6.6k (drawn
+least often). Prices, weights, distances and counts stay in ranges a real
+thing has (a sofa $300-1,500, a lamp $20-150; a jar of honey 100-400 g; a
+walk or a drive of up to 8 km a day).
 
 ### Real data and GPU training
 

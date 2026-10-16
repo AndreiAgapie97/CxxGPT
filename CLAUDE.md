@@ -164,11 +164,17 @@ Math problem-solving accuracy is the first evaluation focus.
   84 sentence patterns, 28 held out for test. `--exclude
   data/licensed-10b/gsm8k-test.txt,data/licensed-10b/gsm8k-dev.txt` is
   needed for any training use: without it a large file repeats a few GSM8K
-  test questions almost word for word. With it, 0 of GSM8K test and dev share a 13-word run, or
-  their numbers and answer, with 300k problems. Not in the training mix
-  (the owner decides). Next topics, in order: fractions/percentages/ratios/
-  units, number theory, counting (the answer format of probability needs a
-  decision first).
+  test questions almost word for word. With it, 0 of GSM8K test and dev
+  share a 13-word run, or their numbers and answer, with 300k problems.
+  `src/mathgen_fractions.h` (`--topic fractions`): parts of an amount
+  (fractions and percentages, 1-3 steps), price changes in exact cents,
+  what percent, ratio splits, a ratio and one count, proportions, unit
+  conversions; answers whole or with at most two decimals;
+  `fraction_check` works each story out again its own way. 120 patterns,
+  40 held out. Both topics share `math_detail` (the story, distractor and
+  text) and `math_check` (notes and the stated answer). Not in the
+  training mix (the owner decides). Next topics, in order: number theory,
+  counting (the answer format of probability needs a decision first).
 - GSM8K dev set: `scripts/get_data.py` holds out 500 GSM8K train problems
   (the 500 questions with the smallest sha256); `DEV=1 scripts/night.sh`
   validates on it instead of the test set. `cxxgpt leak-check` finds

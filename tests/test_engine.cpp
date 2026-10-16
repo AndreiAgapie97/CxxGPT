@@ -16,6 +16,7 @@
 #include "test_reasoning.h"
 #include "test_wordgen.h"
 #include "test_mathgen.h"
+#include "test_mathgen_fractions.h"
 #include "test_reasoning_metrics.h"
 #include "test_tokenizer.h"
 #include "test_data.h"
@@ -51,6 +52,7 @@ int main(int argc, char** argv) {
         {"reasoning", test_reasoning},
         {"word problems", test_wordgen},
         {"math problems", test_mathgen},
+        {"fractions problems", test_mathgen_fractions},
         {"reasoning metrics", test_reasoning_metrics},
         {"tokenizer", test_tokenizer},
         {"data", test_data},

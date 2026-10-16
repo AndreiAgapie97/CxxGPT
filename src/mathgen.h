@@ -1,6 +1,10 @@
 // mathgen.h — math word problems built backward from a chosen answer, each
 // one solved again by an independent checker before it is kept.
 //
+// This file holds what every topic shares (exclusions, the story builder,
+// the note and answer checks) and the first topic; fractions, percentages,
+// ratios and units are in mathgen_fractions.h.
+//
 // The first topic, equations (cxxgpt gen-math --topic equations), has seven
 // kinds of story that GSM8K solves with one unknown, x:
 //   puzzle       "Maya thinks of a number, multiplies it by 3, adds 7 and
@@ -146,13 +150,14 @@ struct MathOptions {
     Exclusions* exclude = nullptr;  // questions not to repeat, or none
 };
 
-struct EquationProblem {
+// What every topic's problem records: the text, and the story's own numbers,
+// which the topic's checker solves again. Each topic adds its kinds.
+struct MathRecord {
     Problem problem;
-    enum Kind { puzzle, ages_sum, ages_future, mixture, consecutive, rectangle, shares, kind_count } kind = puzzle;
-    // The story's numbers; what each one means is in equation_check's table.
+    // The story's numbers; what each one means is in the topic checker's table.
     std::vector<int64_t> inputs;
-    std::string ops;  // puzzle only: the operations in story order (+ - * /)
-    int context = 0;  // mixture only: 0 tickets (prices), 1 animals (legs), 2 packs (items)
+    std::string ops;  // the kinds of steps, in story order, where a kind has several
+    int context = 0;  // which setting a kind's story uses (tickets, animals, ...)
     int asked = 0;    // which of the story's quantities the question asks for
     std::vector<int> patterns;  // sentence IDs (family * 6 + wording), for split tests
     int distractor = -1;
@@ -160,7 +165,208 @@ struct EquationProblem {
     std::string name, other, third;
 };
 
+struct EquationProblem : MathRecord {
+    enum Kind { puzzle, ages_sum, ages_future, mixture, consecutive, rectangle, shares, kind_count } kind = puzzle;
+};
+
+// What all topics share: building a story's sentences and solution, the
+// distractor, and the final text.
+namespace math_detail {
+
+// A list of (placeholder, text) pairs to fill into a sentence pattern.
+using Fills = std::vector<std::pair<std::string, std::string>>;
+
+inline std::string str(int64_t v) { return std::to_string(v); }
+
+// "1 year", "6 years": a number and its unit, singular for exactly one.
+inline std::string count_of(const std::string& n, const std::string& one, const std::string& many) {
+    return n + " " + (n == "1" ? one : many);
+}
+inline std::string years(int64_t n) { return count_of(str(n), "year", "years"); }
+
+// Everything one story attempt shares: the random source, the people, the
+// sentences and question being built, and the worked solution.
+struct Story {
+    Rng& rng;
+    const MathOptions& options;
+    MathRecord& out;
+    const std::array<const char*, 6>* patterns;  // the topic's sentence families
+    std::vector<std::string> sentences, lines;
+    std::string question;
+    std::vector<int64_t> results;  // one per calculator step
+
+    Story(Rng& random, const MathOptions& opts, MathRecord& problem, const std::array<const char*, 6>* families)
+        : rng(random), options(opts), out(problem), patterns(families) {
+        static const std::array<const char*, 12> names = {
+            "Alex", "Maya", "Noah", "Lina", "Sam", "Nora", "Leo", "Asha", "Ben", "Zoe", "Omar", "Iris"};
+        out.name = names[rng.below(names.size())];
+        do out.other = names[rng.below(names.size())]; while (out.other == out.name);
+        do out.third = names[rng.below(names.size())]; while (out.third == out.name || out.third == out.other);
+    }
+
+    int64_t draw(int64_t lo, int64_t hi) { return lo + int64_t(rng.below(uint64_t(hi - lo + 1))); }
+
+    // Fills one of the split's wordings of `family`.
+    void sentence(int family, const Fills& fills) {
+        const int variant = options.test ? 4 + int(rng.below(2)) : int(rng.below(4));
+        sentences.push_back(fill(patterns[family][variant], fills));
+        out.patterns.push_back(family * 6 + variant);
+    }
+
+    std::string fill(std::string s, const Fills& fills) const {
+        for (const auto& [key, value] : fills) word_detail::replace(s, key, value);
+        word_detail::replace(s, "{name}", out.name);
+        word_detail::replace(s, "{other}", out.other);
+        word_detail::replace(s, "{third}", out.third);
+        return s;
+    }
+
+    // One number step of the solution: "41-5 = <<41-5=36>>36". Notes are
+    // always written here; they are checked, then removed when --notes off.
+    std::string calc(const std::string& expression, const std::string& value) {
+        results.push_back(0);
+        return expression + " = <<" + expression + "=" + value + ">>" + value;
+    }
+    std::string calc(const std::string& expression, int64_t value) { return calc(expression, str(value)); }
+
+    void line(const std::string& text) { lines.push_back(text); }
+};
+
+// Where a distractor may go among the story's sentences.
+enum class Place {
+    anywhere,
+    ends_only,  // first or last: the sentences say "it" for one another's numbers
+    not_last,   // not just before the question, which says "that" about the story
+};
+
+// One irrelevant sentence, as in gen-word, from the split's own distractor
+// wordings. Drawn even when disabled, so toggling distractors changes no
+// other draw. Its number is never one the story or solution uses.
+inline void add_distractor(Story& s, const std::string& answer, Place place) {
+    MathRecord& out = s.out;
+    const int extra = int(s.rng.below(12)) + (s.options.test ? 12 : 0);
+    // Every whole number in the story, the solution and the answer, down to an "x + 4".
+    std::set<int64_t> used(out.inputs.begin(), out.inputs.end());
+    std::string texts = answer;
+    for (const auto& text : s.lines) texts += " " + text;
+    for (const auto& text : s.sentences) texts += " " + text;
+    for (size_t at = 0; at < texts.size(); ++at) {
+        if (texts[at] < '0' || texts[at] > '9') continue;
+        int64_t v = 0;
+        while (at < texts.size() && texts[at] >= '0' && texts[at] <= '9') v = v * 10 + (texts[at++] - '0');
+        used.insert(v);
+    }
+    int64_t irrelevant = s.draw(2, 30);
+    while (used.count(irrelevant)) ++irrelevant;
+    size_t position = s.rng.below(s.sentences.size() + 1);
+    if (place == Place::ends_only && position != 0) position = s.sentences.size();
+    if (place == Place::not_last && position == s.sentences.size()) position = 0;
+    if (!s.options.distractors) return;
+    std::string text = word_detail::distractors[size_t(extra)];
+    out.distractor = extra;
+    if (text.find("{a}") != std::string::npos) out.distractor_number = irrelevant;
+    word_detail::replace(text, "{a}", str(irrelevant));
+    s.sentences.insert(s.sentences.begin() + std::ptrdiff_t(position), text);
+}
+
+// The finished problem's text: question, solution, answer and difficulty
+// (the number of calculator steps).
+inline void finish(Story& s, const std::string& answer, const std::string& task) {
+    Problem& p = s.out.problem;
+    for (const auto& sentence : s.sentences) p.question += sentence + ' ';
+    p.question += s.question;
+    for (const auto& text : s.lines) p.steps += (p.steps.empty() ? "" : "\n") + text;
+    p.task = task;
+    p.difficulty = int(s.results.size());
+    p.answer = answer;
+}
+
+// Removes every calculator note: "41-5 = <<41-5=36>>36" -> "41-5 = 36".
+inline std::string without_notes(std::string steps) {
+    for (size_t at; (at = steps.find("<<")) != std::string::npos;) {
+        const size_t end = steps.find(">>", at);
+        CHECK(end != std::string::npos, "unclosed calculator note");
+        steps.erase(at, end + 2 - at);
+    }
+    return steps;
+}
+
+}  // namespace math_detail
+
+// The checks every topic's checker makes once it has its own answer.
+namespace math_check {
+
+// Every calculator note "<<e=v>>" must be written "e = <<e=v>>v", and calc.h
+// must find e worth exactly v. Returns what is wrong (empty if nothing).
+inline std::string check_notes(const std::string& steps) {
+    for (size_t at = 0; (at = steps.find("<<", at)) != std::string::npos;) {
+        const size_t equals = steps.find('=', at), end = steps.find(">>", at);
+        if (equals == std::string::npos || end == std::string::npos || equals > end) return "a malformed note";
+        const std::string expression = steps.substr(at + 2, equals - at - 2);
+        const std::string value = steps.substr(equals + 1, end - equals - 1);
+        const auto exact = calc::evaluate(expression);
+        if (!exact || *exact != value) return "the note " + expression + "=" + value + " is wrong";
+        if (at < expression.size() + 3 ||
+            steps.compare(at - expression.size() - 3, expression.size() + 3, expression + " = ") != 0)
+            return "the note " + expression + " is not written after its own expression";
+        if (steps.compare(end + 2, value.size(), value) != 0)
+            return "the note " + expression + " is not followed by its value";
+        at = end + 2;
+    }
+    return "";
+}
+
+// The problem's answer must be `expected` (the checker's own), every note
+// right, and the solution's last line must state the answer: as a number
+// of its own ("is 12." or ">>12 dollars."), not part of another number.
+inline std::string answer_and_notes(const MathRecord& p, const std::string& expected) {
+    if (p.problem.answer != expected)
+        return "the answer is " + p.problem.answer + ", but the story's numbers give " + expected;
+    const std::string notes = check_notes(p.problem.steps);
+    if (!notes.empty()) return notes;
+    const size_t last = p.problem.steps.rfind('\n');
+    const std::string line = p.problem.steps.substr(last == std::string::npos ? 0 : last + 1);
+    const std::string& a = p.problem.answer;
+    bool stated = false;
+    for (size_t at = 0; (at = line.find(a, at)) != std::string::npos; ++at) {
+        const size_t end = at + a.size();
+        stated = stated || (at > 0 && (line[at - 1] == ' ' || line[at - 1] == '>') && end < line.size() &&
+                            (line[end] == ' ' || (line[end] == '.' && end + 1 == line.size())));
+    }
+    if (!stated) return "the last solution line does not state the answer";
+    return "";
+}
+
+}  // namespace math_check
+
+// `count` different problems from `make_one(rng)`, which returns a record.
+template <class MakeOne>
+std::vector<Problem> make_unique_problems(uint64_t seed, int64_t count, MakeOne make_one) {
+    CHECK(count >= 0, "problem count must be nonnegative");
+    Rng rng(seed);
+    std::vector<Problem> problems;
+    std::set<std::string> questions;
+    int duplicates = 0;
+    while (problems.size() < uint64_t(count)) {
+        Problem p = make_one(rng).problem;
+        if (!questions.insert(p.question).second) {
+            CHECK(++duplicates < 10000, "too many duplicate problems; request fewer problems");
+            continue;
+        }
+        duplicates = 0;
+        problems.push_back(std::move(p));
+    }
+    return problems;
+}
+
 namespace equation_detail {
+
+using math_detail::Fills;
+using math_detail::Story;
+using math_detail::count_of;
+using math_detail::str;
+using math_detail::years;
+using math_detail::without_notes;
 
 enum Family { think, add, subtract, multiply, divide, result, ages_sum_text, ages_future_text, tickets,
               legs, packs, consecutive_text, rectangle_text, shares_text, family_count };
@@ -178,7 +384,7 @@ inline constexpr std::array<std::array<const char*, 6>, family_count> patterns =
     {{"{name} adds {a} to it.",
       "Then {name} adds {a}.",
       "Next, {name} increases the number by {a}.",
-      "{name} puts {a} more on top of it.",
+      "{name} makes the number {a} bigger.",
       "After that, {a} is added to the number.",
       "{name} raises the current value by {a}."}},
     {{"{name} subtracts {a} from it.",
@@ -188,17 +394,17 @@ inline constexpr std::array<std::array<const char*, 6>, family_count> patterns =
       "After that, {a} is subtracted from the number.",
       "{name} lowers the current value by {a}."}},
     {{"{name} multiplies it by {a}.",
-      "Then {name} multiplies the result by {a}.",
+      "Then {name} multiplies the number by {a}.",
       "Next, {name} makes the number {a} times as large.",
       "{name} multiplies the current value by {a}.",
       "After that, the number is multiplied by {a}.",
       "{name} scales the current value up by a factor of {a}."}},
     {{"{name} divides it by {a}.",
-      "Then {name} divides the result by {a}.",
-      "Next, {name} splits the number into {a} equal parts and keeps one part.",
+      "Then {name} divides the number by {a}.",
+      "Next, {name} divides that number by {a}.",
       "{name} divides the current value by {a}.",
       "After that, the number is divided by {a}.",
-      "{name} cuts the current value down to one part in {a}."}},
+      "{name} takes the current value and divides it by {a}."}},
     {{"The result is {a}.",
       "{name} ends up with {a}.",
       "The final number is {a}.",
@@ -246,7 +452,7 @@ inline constexpr std::array<std::array<const char*, 6>, family_count> patterns =
       "A rectangular {thing} has a perimeter of {p} {unit}, and its length is {relation}.",
       "{name} measures a rectangular {thing}: the perimeter is {p} {unit} and the length is {relation}.",
       "Going once around a rectangular {thing} covers {p} {unit}; the {thing}'s length is {relation}.",
-      "{name} puts a fence of {p} {unit} all the way around a rectangular {thing} whose length is {relation}."}},
+      "{name} puts a border of {p} {unit} all the way around a rectangular {thing} whose length is {relation}."}},
     {{"{name}, {other} and {third} share ${t}. {other} gets ${d} more than {name}, and {third} gets {k} times as much as {other}.",
       "{name}, {other} and {third} split ${t} between them. {other}'s share is ${d} more than {name}'s, and {third}'s share is {k} times {other}'s.",
       "A prize of ${t} goes to {name}, {other} and {third}. {other} receives ${d} more than {name}, while {third} receives {k} times what {other} receives.",
@@ -254,9 +460,6 @@ inline constexpr std::array<std::array<const char*, 6>, family_count> patterns =
       "Out of ${t} shared by three friends, {other} gets ${d} more than {name} and {third} gets {k} times {other}'s amount; {name} gets the rest.",
       "{third} ends up with {k} times as much money as {other}, who has ${d} more than {name}; the three of them have ${t} in total."}},
 }};
-
-// A list of (placeholder, text) pairs to fill into a sentence pattern.
-using Fills = std::vector<std::pair<std::string, std::string>>;
 
 // "3x + 5", "x - 4", "2x", "x", "7": a x + b as a person would write it.
 inline std::string linear(int64_t a, int64_t b) {
@@ -268,55 +471,6 @@ inline std::string linear(int64_t a, int64_t b) {
     if (b < 0) s += " - " + std::to_string(-b);
     return s;
 }
-
-// Everything one story attempt shares: the random source, the people, the
-// sentences and question being built, and the worked solution.
-struct Story {
-    Rng& rng;
-    const MathOptions& options;
-    EquationProblem& out;
-    std::vector<std::string> sentences, lines;
-    std::string question;
-    std::vector<int64_t> results;  // every calculator result, so a distractor avoids them
-
-    Story(Rng& random, const MathOptions& opts, EquationProblem& problem) : rng(random), options(opts), out(problem) {
-        static const std::array<const char*, 12> names = {
-            "Alex", "Maya", "Noah", "Lina", "Sam", "Nora", "Leo", "Asha", "Ben", "Zoe", "Omar", "Iris"};
-        out.name = names[rng.below(names.size())];
-        do out.other = names[rng.below(names.size())]; while (out.other == out.name);
-        do out.third = names[rng.below(names.size())]; while (out.third == out.name || out.third == out.other);
-    }
-
-    int64_t draw(int64_t lo, int64_t hi) { return lo + int64_t(rng.below(uint64_t(hi - lo + 1))); }
-
-    // Fills one of the split's wordings of `family`.
-    void sentence(int family, const Fills& fills) {
-        const int variant = options.test ? 4 + int(rng.below(2)) : int(rng.below(4));
-        sentences.push_back(fill(patterns[family][variant], fills));
-        out.patterns.push_back(family * 6 + variant);
-    }
-
-    std::string fill(std::string s, const Fills& fills) const {
-        for (const auto& [key, value] : fills) word_detail::replace(s, key, value);
-        word_detail::replace(s, "{name}", out.name);
-        word_detail::replace(s, "{other}", out.other);
-        word_detail::replace(s, "{third}", out.third);
-        return s;
-    }
-
-    // One number step of the solution: "41-5 = <<41-5=36>>36". Notes are
-    // always written here; make_equation_problem checks them, then removes
-    // them when --notes off.
-    std::string calc(const std::string& expression, int64_t value) {
-        results.push_back(value);
-        const std::string v = std::to_string(value);
-        return expression + " = <<" + expression + "=" + v + ">>" + v;
-    }
-
-    void line(const std::string& text) { lines.push_back(text); }
-};
-
-inline std::string str(int64_t v) { return std::to_string(v); }
 
 // "3*9+5", "9+5", "3*9", "3*9-4": the value of a x + b at x, as a calculation.
 inline std::string at(int64_t a, int64_t x, int64_t b) {
@@ -409,10 +563,10 @@ inline bool ages_sum_story(Story& s, int64_t& answer) {
     if (m < 1 || m > 100) return false;
     const std::string& other = s.out.other;
     std::string relation;
-    if (k == 1) relation = str(d) + " years older than " + other;
+    if (k == 1) relation = years(d) + " older than " + other;
     else if (d == 0) relation = str(k) + " times as old as " + other;
-    else if (d > 0) relation = str(d) + " years older than " + str(k) + " times " + other + "'s age";
-    else relation = str(-d) + " years younger than " + str(k) + " times " + other + "'s age";
+    else if (d > 0) relation = years(d) + " older than " + str(k) + " times " + other + "'s age";
+    else relation = years(-d) + " younger than " + str(k) + " times " + other + "'s age";
     s.out.inputs = {k, d, total};
     s.out.asked = int(s.rng.below(2));
     s.sentence(ages_sum_text, {{"{relation}", relation}, {"{s}", str(total)}});
@@ -422,10 +576,10 @@ inline bool ages_sum_story(Story& s, int64_t& answer) {
     s.line("Counting the x's: " + s.calc("1+" + str(k), k + 1) + ", so " + linear(k + 1, d) + " = " + str(total) + ".");
     const int64_t x = solve_linear(s, k + 1, d, 0, total);
     if (s.out.asked == 0) {
-        s.line("So " + other + " is " + str(x) + " years old.");
+        s.line("So " + other + " is " + years(x) + " old.");
         answer = x;
     } else {
-        s.line("So " + s.out.name + " is " + s.calc(at(k, x, d), m) + " years old.");
+        s.line("So " + s.out.name + " is " + s.calc(at(k, x, d), m) + (m == 1 ? " year old." : " years old."));
         answer = m;
     }
     return true;
@@ -434,7 +588,7 @@ inline bool ages_sum_story(Story& s, int64_t& answer) {
 // "Maya is 4 times as old as Leo; in 6 years she will be twice as old."
 // x is Leo's age now; Maya is k1 x now, and k1 x + n = k2 (x + n).
 inline bool ages_future_story(Story& s, int64_t& answer) {
-    const int64_t l = s.draw(1, 40), k1 = s.draw(2, 10), n = s.draw(1, 60);
+    const int64_t l = s.draw(1, 40), k1 = s.draw(2, 10), n = s.draw(2, 60);
     if ((k1 * l + n) % (l + n) != 0) return false;
     const int64_t k2 = (k1 * l + n) / (l + n), m = k1 * l;
     if (k2 < 2 || m > 100) return false;
@@ -450,7 +604,7 @@ inline bool ages_future_story(Story& s, int64_t& answer) {
            linear(k2, k2 * n) + ".");
     const int64_t x = solve_linear(s, k1, n, k2, k2 * n);
     if (s.out.asked == 0) {
-        s.line("So " + other + " is " + str(x) + " years old now.");
+        s.line("So " + other + " is " + years(x) + " old now.");
         answer = x;
     } else {
         s.line("So " + s.out.name + " is " + s.calc(at(k1, x, 0), m) + " years old now.");
@@ -549,15 +703,28 @@ inline bool consecutive_story(Story& s, int64_t& answer) {
 // "The length is 3 meters more than twice the width; the perimeter is 54
 // meters." x is the width; the length is k x + d.
 inline bool rectangle_story(Story& s, int64_t& answer) {
-    static const std::array<const char*, 5> things = {"garden", "room", "field", "rug", "pool"};
-    const int64_t w = s.draw(2, 120), k = s.draw(1, 4), d = s.draw(0, 40);
+    // Sizes a real one could have, in meters: the width's range, the most
+    // times the width the length may be, and the most meters added on top.
+    // In feet, the ranges are three times as large.
+    struct Thing { const char* name; int64_t width_min, width_max, times_max, add_max; };
+    static const std::array<Thing, 5> things = {{{"garden", 3, 30, 3, 15},
+                                                 {"room", 2, 8, 2, 4},
+                                                 {"field", 20, 150, 3, 50},
+                                                 {"rug", 1, 3, 2, 2},
+                                                 {"pool", 3, 15, 3, 10}}};
+    const Thing& thing_size = things[s.rng.below(things.size())];
+    const bool feet = s.rng.below(2);
+    const int64_t scale = feet ? 3 : 1;
+    const std::string thing = thing_size.name, unit = feet ? "feet" : "meters";
+    const int64_t w = s.draw(thing_size.width_min * scale, thing_size.width_max * scale);
+    const int64_t k = s.draw(1, thing_size.times_max), d = s.draw(0, thing_size.add_max * scale);
     if (k == 1 && d == 0) return false;
     const int64_t length = k * w + d, perimeter = 2 * (w + length), half = perimeter / 2;
-    const std::string thing = things[s.rng.below(things.size())], unit = s.rng.below(2) ? "feet" : "meters";
+    const auto measure = [&](int64_t n) { return count_of(str(n), feet ? "foot" : "meter", unit); };
     std::string relation;
-    if (k == 1) relation = str(d) + " " + unit + " longer than its width";
+    if (k == 1) relation = measure(d) + " longer than its width";
     else if (d == 0) relation = str(k) + " times its width";
-    else relation = str(d) + " " + unit + " more than " + str(k) + " times its width";
+    else relation = measure(d) + " more than " + str(k) + " times its width";
     s.out.inputs = {k, d, perimeter};
     s.out.asked = int(s.rng.below(3));
     s.sentence(rectangle_text, {{"{thing}", thing}, {"{relation}", relation}, {"{p}", str(perimeter)},
@@ -572,7 +739,7 @@ inline bool rectangle_story(Story& s, int64_t& answer) {
     s.line("Counting the x's: " + s.calc("1+" + str(k), k + 1) + ", so " + linear(k + 1, d) + " = " + str(half) + ".");
     const int64_t x = solve_linear(s, k + 1, d, 0, half);
     if (s.out.asked == 0) {
-        s.line("So the width is " + str(x) + " " + unit + ".");
+        s.line("So the width is " + measure(x) + ".");
         answer = x;
         return true;
     }
@@ -616,38 +783,9 @@ inline bool shares_story(Story& s, int64_t& answer) {
     return true;
 }
 
-// One irrelevant sentence, as in gen-word, from the split's own distractor
-// wordings. Drawn even when disabled, so toggling distractors changes no
-// other draw. Its number is never one the story or solution uses.
-inline void add_distractor(Story& s, int64_t answer) {
-    EquationProblem& out = s.out;
-    const int extra = int(s.rng.below(12)) + (s.options.test ? 12 : 0);
-    // Every number in the story or the solution, down to an "x + 4".
-    std::set<int64_t> used(out.inputs.begin(), out.inputs.end());
-    used.insert(answer);
-    for (const auto& text : s.lines)
-        for (size_t at = 0; at < text.size(); ++at) {
-            if (text[at] < '0' || text[at] > '9') continue;
-            int64_t v = 0;
-            while (at < text.size() && text[at] >= '0' && text[at] <= '9') v = v * 10 + (text[at++] - '0');
-            used.insert(v);
-        }
-    int64_t irrelevant = s.draw(2, 30);
-    while (used.count(irrelevant)) ++irrelevant;
-    size_t position = s.rng.below(s.sentences.size() + 1);
-    // The puzzle's sentences say "it": keep a distractor before or after them.
-    if (out.kind == EquationProblem::puzzle && position != 0) position = s.sentences.size();
-    if (!s.options.distractors) return;
-    std::string text = word_detail::distractors[size_t(extra)];
-    out.distractor = extra;
-    if (text.find("{a}") != std::string::npos) out.distractor_number = irrelevant;
-    word_detail::replace(text, "{a}", str(irrelevant));
-    s.sentences.insert(s.sentences.begin() + std::ptrdiff_t(position), text);
-}
-
 // One attempt at a story of the given kind; false means draw again.
 inline bool candidate(Rng& rng, const MathOptions& options, EquationProblem& out, int64_t& answer) {
-    Story s(rng, options, out);
+    Story s(rng, options, out, patterns.data());
     bool made = false;
     switch (out.kind) {
         case EquationProblem::puzzle: made = puzzle_story(s, answer); break;
@@ -660,24 +798,11 @@ inline bool candidate(Rng& rng, const MathOptions& options, EquationProblem& out
         case EquationProblem::kind_count: break;
     }
     if (!made) return false;
-    add_distractor(s, answer);
-    for (const auto& sentence : s.sentences) out.problem.question += sentence + ' ';
-    out.problem.question += s.question;
-    for (const auto& text : s.lines) out.problem.steps += (out.problem.steps.empty() ? "" : "\n") + text;
-    out.problem.task = "equations";
-    out.problem.difficulty = int(s.results.size());  // the number of calculator steps
-    out.problem.answer = str(answer);
+    math_detail::add_distractor(s, str(answer), out.kind == EquationProblem::puzzle
+                                                     ? math_detail::Place::ends_only
+                                                     : math_detail::Place::anywhere);
+    math_detail::finish(s, str(answer), "equations");
     return true;
-}
-
-// Removes every calculator note: "41-5 = <<41-5=36>>36" -> "41-5 = 36".
-inline std::string without_notes(std::string steps) {
-    for (size_t at; (at = steps.find("<<")) != std::string::npos;) {
-        const size_t end = steps.find(">>", at);
-        CHECK(end != std::string::npos, "unclosed calculator note");
-        steps.erase(at, end + 2 - at);
-    }
-    return steps;
 }
 
 }  // namespace equation_detail
@@ -799,49 +924,13 @@ inline std::string solve(const EquationProblem& p, int64_t& answer) {
     return "";
 }
 
-// Every calculator note "<<e=v>>" must be written "e = <<e=v>>v", and calc.h
-// must find e worth exactly v. Returns what is wrong (empty if nothing).
-inline std::string check_notes(const std::string& steps) {
-    for (size_t at = 0; (at = steps.find("<<", at)) != std::string::npos;) {
-        const size_t equals = steps.find('=', at), end = steps.find(">>", at);
-        if (equals == std::string::npos || end == std::string::npos || equals > end) return "a malformed note";
-        const std::string expression = steps.substr(at + 2, equals - at - 2);
-        const std::string value = steps.substr(equals + 1, end - equals - 1);
-        const auto exact = calc::evaluate(expression);
-        if (!exact || *exact != value) return "the note " + expression + "=" + value + " is wrong";
-        if (at < expression.size() + 3 ||
-            steps.compare(at - expression.size() - 3, expression.size() + 3, expression + " = ") != 0)
-            return "the note " + expression + " is not written after its own expression";
-        if (steps.compare(end + 2, value.size(), value) != 0)
-            return "the note " + expression + " is not followed by its value";
-        at = end + 2;
-    }
-    return "";
-}
-
 // Everything the second solver checks on a finished problem (with notes):
 // returns what is wrong, or an empty string.
 inline std::string problems_with(const EquationProblem& p) {
     int64_t answer = 0;
     const std::string unsolved = solve(p, answer);
     if (!unsolved.empty()) return unsolved;
-    if (p.problem.answer != std::to_string(answer))
-        return "the answer is " + p.problem.answer + ", but the story's numbers give " + std::to_string(answer);
-    const std::string notes = check_notes(p.problem.steps);
-    if (!notes.empty()) return notes;
-    // The solution's last line states the answer: as a whole number of its
-    // own ("is 12." or ">>12 dollars."), not as part of another number.
-    const size_t last = p.problem.steps.rfind('\n');
-    const std::string line = p.problem.steps.substr(last == std::string::npos ? 0 : last + 1);
-    const std::string& a = p.problem.answer;
-    bool stated = false;
-    for (size_t at = 0; (at = line.find(a, at)) != std::string::npos; ++at) {
-        const size_t end = at + a.size();
-        stated = stated || (at > 0 && (line[at - 1] == ' ' || line[at - 1] == '>') && end < line.size() &&
-                            (line[end] == ' ' || line[end] == '.'));
-    }
-    if (!stated) return "the last solution line does not state the answer";
-    return "";
+    return math_check::answer_and_notes(p, std::to_string(answer));
 }
 
 }  // namespace equation_check
@@ -866,7 +955,7 @@ inline EquationProblem make_equation_problem(Rng& rng, const MathOptions& option
         CHECK(wrong.empty(), "the checker rejects a generated problem (%s): %s\n%s", wrong.c_str(),
               result.problem.question.c_str(), result.problem.steps.c_str());
         if (options.exclude && options.exclude->excludes(result.problem, result.distractor_number)) continue;
-        if (!options.notes) result.problem.steps = equation_detail::without_notes(result.problem.steps);
+        if (!options.notes) result.problem.steps = math_detail::without_notes(result.problem.steps);
         return result;
     }
     CHECK(false, "could not generate an equation problem in 10000 attempts");
@@ -874,19 +963,5 @@ inline EquationProblem make_equation_problem(Rng& rng, const MathOptions& option
 }
 
 inline std::vector<Problem> make_equation_problems(uint64_t seed, int64_t count, const MathOptions& options = {}) {
-    CHECK(count >= 0, "problem count must be nonnegative");
-    Rng rng(seed);
-    std::vector<Problem> problems;
-    std::set<std::string> questions;
-    int duplicates = 0;
-    while (problems.size() < uint64_t(count)) {
-        Problem p = make_equation_problem(rng, options).problem;
-        if (!questions.insert(p.question).second) {
-            CHECK(++duplicates < 10000, "too many duplicate problems; request fewer problems");
-            continue;
-        }
-        duplicates = 0;
-        problems.push_back(std::move(p));
-    }
-    return problems;
+    return make_unique_problems(seed, count, [&](Rng& rng) { return make_equation_problem(rng, options); });
 }

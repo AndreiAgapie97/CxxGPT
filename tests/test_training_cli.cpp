@@ -136,7 +136,7 @@ int main(int argc, char** argv) {
         std::string expected_text;
         std::vector<uint16_t> expected_tokens;
         for (const auto& p : ps) {
-            EXPECT(math ? p.task == "equations" && p.difficulty >= 1
+            EXPECT(math ? (p.task == "equations" || p.task == "fractions") && p.difficulty >= 1
                         : p.task == "word" && p.difficulty >= 2 && p.difficulty <= 8, "bad problem metadata");
             const std::string document = p.prompt() + p.completion();
             expected_text += document + "<|endoftext|>\n";

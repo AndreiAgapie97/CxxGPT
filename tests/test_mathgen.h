@@ -11,7 +11,7 @@
 #include "../src/mathgen.h"
 #include "test_util.h"
 
-namespace math_check {
+namespace equation_test {
 
 // The whole numbers written in a question, in order.
 inline std::vector<int64_t> written_numbers(const std::string& text) {
@@ -118,7 +118,7 @@ inline void checker_catches_mistakes(const EquationProblem& good) {
         EXPECT(!equation_check::problems_with(p).empty(), "checker ignores which quantity is asked");
 }
 
-}  // namespace math_check
+}  // namespace equation_test
 
 inline void test_mathgen() {
     using equation_detail::family_count;
@@ -147,8 +147,8 @@ inline void test_mathgen() {
         Rng rng(77);  // deliberately the same seed for both splits
         for (int i = 0; i < 3000; ++i) {
             const auto p = make_equation_problem(rng, {true, true, test});
-            math_check::check_problem(p, true);
-            if (i < 300) math_check::checker_catches_mistakes(p);
+            equation_test::check_problem(p, true);
+            if (i < 300) equation_test::checker_catches_mistakes(p);
             questions[test].insert(p.problem.question);
             for (int id : p.patterns) {
                 EXPECT((id % 6 >= 4) == test, "pattern %d leaked across splits", id);
@@ -183,8 +183,8 @@ inline void test_mathgen() {
             const auto noted = make_equation_problem(noted_rng, {true, true, test});
             const auto plain = make_equation_problem(plain_rng, {true, false, test});
             const auto quiet = make_equation_problem(quiet_rng, {false, false, test});
-            math_check::check_problem(plain, false);
-            math_check::check_problem(quiet, false);
+            equation_test::check_problem(plain, false);
+            equation_test::check_problem(quiet, false);
             EXPECT(noted.problem.question == plain.problem.question && noted.problem.answer == plain.problem.answer &&
                        equation_detail::without_notes(noted.problem.steps) == plain.problem.steps &&
                        plain.problem.difficulty == noted.problem.difficulty,
