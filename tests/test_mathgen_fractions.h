@@ -7,6 +7,7 @@
 #include <sstream>
 
 #include "../src/mathgen_fractions.h"
+#include "test_mathgen.h"
 #include "test_util.h"
 
 namespace fraction_test {
@@ -65,6 +66,7 @@ inline void check_inputs_written(const FractionProblem& p) {
 inline void check_problem(const FractionProblem& p, bool notes) {
     const Problem& q = p.problem;
     EXPECT(q.task == "fractions", "wrong task %s", q.task.c_str());
+    equation_test::check_singular_after_one(q.question + " " + q.steps);
     EXPECT(q.question.find('{') == std::string::npos && q.question.find('}') == std::string::npos,
            "unfilled placeholder: %s", q.question.c_str());
     EXPECT(extract_answer(q.completion()) == q.answer, "not a GSM8K completion");

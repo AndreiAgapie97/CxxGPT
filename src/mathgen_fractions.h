@@ -369,7 +369,8 @@ inline bool ratio_split_story(Story& s, std::string& answer, Place& place) {
         const int64_t gap = parts[big] - parts[small];
         s.question = context == 2 ? "How many more " + groups[big] + " than " + groups[small] + " are there?"
                                   : "How many more dollars does " + people[big] + " get than " + people[small] + "?";
-        s.line("The difference is " + s.calc(str(parts[big]) + "-" + str(parts[small]), gap) + " parts, which is " +
+        s.line("The difference is " + s.calc(str(parts[big]) + "-" + str(parts[small]), gap) +
+               (gap == 1 ? " part" : " parts") + ", which is " +
                s.calc(str(gap) + "*" + str(unit), gap * unit) + thing + ".");
         answer = str(gap * unit);
     } else {
@@ -410,8 +411,8 @@ inline bool ratio_known_story(Story& s, std::string& answer, Place& place) {
                                   {"{known}", kinds[known]}});
     s.question = s.out.asked == 0 ? "How many " + kinds[unknown] + " are there?"
                                   : "How many " + first + " and " + second + " are there in all?";
-    s.line("The " + kinds[known] + " are " + str(parts[known]) + " parts, so one part is " +
-           s.calc(str(count) + "/" + str(parts[known]), unit) + ".");
+    s.line("The " + kinds[known] + " are " + str(parts[known]) + (parts[known] == 1 ? " part" : " parts") +
+           ", so one part is " + s.calc(str(count) + "/" + str(parts[known]), unit) + ".");
     s.line("There are " + s.calc(str(parts[unknown]) + "*" + str(unit), other) + " " + kinds[unknown] + ".");
     if (s.out.asked == 0) {
         answer = str(other);
@@ -455,7 +456,7 @@ inline bool proportion_story(Story& s, std::string& answer, Place& place) {
     if (n1 == n2 || cups * n2 % n1 != 0) return false;  // the answer needs more than two decimals
     const int64_t needed = cups * n2 / n1;
     s.out.inputs = {n1, cups, n2};
-    s.sentence(proportion_recipe, {{"{c}", number(cups)}, {"{n}", str(n1)}});
+    s.sentence(proportion_recipe, {{"{c} cups", number(cups) + unit(number(cups), "cup")}, {"{n}", str(n1)}});
     s.question = "How many cups of flour are needed for " + str(n2) + " cookies?";
     s.line("The flour grows with the number of cookies, so " + str(n2) + " cookies need " +
            s.calc(number(cups) + "*" + str(n2) + "/" + str(n1), number(needed)) + unit(number(needed), "cup") + ".");
@@ -501,9 +502,11 @@ inline bool units_story(Story& s, std::string& answer, Place& place) {
     if (context == 2) {
         const int64_t km = 25 * s.draw(2, 32), days = s.draw(2, 30), total = km * days;  // km in hundredths
         s.out.inputs = {km, days, 0};
-        s.sentence(units_distance, {{"{k}", number(km)}, {"{d}", str(days)}});
+        s.sentence(units_distance,
+                   {{"{k} kilometers", number(km) + unit(number(km), "kilometer")}, {"{d}", str(days)}});
         s.question = "How many meters does " + s.out.name + " cover in all?";
-        s.line("In all that is " + s.calc(number(km) + "*" + str(days), number(total)) + " kilometers, which is " +
+        s.line("In all that is " + s.calc(number(km) + "*" + str(days), number(total)) +
+               unit(number(total), "kilometer") + ", which is " +
                s.calc(number(total) + "*1000", total * 10) + " meters.");
         answer = str(total * 10);
         return true;

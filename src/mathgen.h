@@ -770,7 +770,7 @@ inline bool shares_story(Story& s, int64_t& answer) {
            s.calc(str(d) + "+" + str(k * d), d + k * d) + ", so " + linear(k + 2, d + k * d) + " = " + str(total) + ".");
     const int64_t solved = solve_linear(s, k + 2, d + k * d, 0, total);
     if (s.out.asked == 0) {
-        s.line("So " + name + " gets " + str(solved) + " dollars.");
+        s.line("So " + name + " gets " + count_of(str(solved), "dollar", "dollars") + ".");
         answer = solved;
         return true;
     }
