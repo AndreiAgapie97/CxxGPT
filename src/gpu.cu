@@ -588,13 +588,101 @@ __global__ void ul_fwd(const float* probs, const int* off, const int* tok, float
     }
 }
 
+// ---------------------------------------------------------------------------
+// Unlikelihood negatives on the GPU (unlikelihood.h's find_repeat_negatives)
+// ---------------------------------------------------------------------------
+
+// Whether position s of a training window joins the written text: not a
+// BOS, not the window's first token (whether it is trained is not known),
+// and trained (s - 1 has a target).
+__device__ __forceinline__ bool ul_written(const int* x, const int* y, int s) {
+    return s > 0 && x[s] != kBos && y[s - 1] >= 0;
+}
+
+// find_repeat_negatives at position t of one window (x tokens, y targets):
+// the tokens that would repeat a run of N written tokens earlier in the same
+// document (the NoRepeat definition), never the target, each once, in the
+// order their runs first appear. Writes them (and the row) when tok_out is
+// given; returns how many there are.
+__device__ int ul_negatives_at(const int* x, const int* y, int t, int N, int* tok_out, int* row_out, int row) {
+    if (y[t] < 0) return 0;
+    for (int j = t - N + 2; j <= t; ++j)
+        if (j < 0 || !ul_written(x, y, j)) return 0;  // fewer than N - 1 tokens of text before the next
+    int d = t;
+    while (d >= 0 && x[d] != kBos) --d;  // the document's BOS (-1: before the window)
+    const int first = max(d + N, N - 1);  // the earliest end of a run inside the document
+    // A run of N written tokens ends at e, its first N - 1 the last N - 1 at t.
+    auto matches = [&](int e) {
+        for (int j = e - N + 1; j <= e; ++j)
+            if (!ul_written(x, y, j)) return false;
+        for (int j = 0; j < N - 1; ++j)
+            if (x[e - N + 1 + j] != x[t - N + 2 + j]) return false;
+        return true;
+    };
+    int n = 0;
+    for (int e = first; e <= t; ++e) {
+        if (!matches(e) || x[e] == y[t]) continue;
+        bool before = false;  // listed already, from an earlier run
+        for (int e2 = first; e2 < e && !before; ++e2) before = x[e2] == x[e] && matches(e2);
+        if (before) continue;
+        if (tok_out) tok_out[n] = x[e], row_out[n] = row;
+        ++n;
+    }
+    return n;
+}
+
+// Pass 1: how many negatives each of the B·Tn positions has.
+__global__ void ul_count(int* cnt, const int* x, const int* y, int B, int Tn, int N) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= B * Tn) return;
+    const int b = i / Tn, t = i % Tn;
+    cnt[i] = ul_negatives_at(x + size_t(b) * Tn, y + size_t(b) * Tn, t, N, nullptr, nullptr, i);
+}
+
+// The rows' offsets (off[0] = 0, off[i + 1] = off[i] + cnt[i]) and their
+// total K; counts[0] += positions with a negative, counts[1] += K. One block.
+__global__ void ul_offsets(int* off, int* K, unsigned long long* counts, const int* cnt, int n) {
+    __shared__ int part[1024];
+    __shared__ int fired[1024];
+    const int per = (n + blockDim.x - 1) / blockDim.x, lo = threadIdx.x * per, hi = min(n, lo + per);
+    int s = 0, f = 0;
+    for (int i = lo; i < hi; ++i) s += cnt[i], f += cnt[i] > 0;
+    part[threadIdx.x] = s;
+    fired[threadIdx.x] = f;
+    __syncthreads();
+    if (threadIdx.x == 0) {
+        int run = 0, nf = 0;
+        for (int j = 0; j < int(blockDim.x); ++j) {
+            const int v = part[j];
+            part[j] = run;  // this slice's start
+            run += v;
+            nf += fired[j];
+        }
+        off[0] = 0;
+        *K = run;
+        counts[0] += (unsigned long long)nf;
+        counts[1] += (unsigned long long)run;
+    }
+    __syncthreads();
+    int run = part[threadIdx.x];
+    for (int i = lo; i < hi; ++i) off[i + 1] = run += cnt[i];
+}
+
+// Pass 2: each position writes its negatives (and their row) at its offset.
+__global__ void ul_write(int* tok, int* row, const int* off, const int* x, const int* y, int B, int Tn, int N) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= B * Tn) return;
+    const int b = i / Tn, t = i % Tn;
+    ul_negatives_at(x + size_t(b) * Tn, y + size_t(b) * Tn, t, N, tok + off[i], row + off[i], i);
+}
+
 // The negatives' own gradient entries, after xent_bwd, one thread per
 // negative (cross_entropy_backward in ops.h): p_c (1 - alpha (W - w_c)) +
 // alpha p_c, the second term only where 1 - p_c > 0.
 __global__ void ul_fix(float* d, __nv_bfloat16* dh, const int* tok, const int* row, const float* neg_p,
-                       const double* neg_w, const double* row_w, int K, int V, double alpha, float dloss) {
-    const int k = blockIdx.x * blockDim.x + threadIdx.x;
-    if (k >= K) return;
+                       const double* neg_w, const double* row_w, const int* Kp, int V, double alpha, float dloss) {
+    const int K = *Kp;  // the negatives' count, on the GPU (ul_offsets)
+    for (int k = blockIdx.x * blockDim.x + threadIdx.x; k < K; k += gridDim.x * blockDim.x) {
     const int n = row[k];
     const double pc = neg_p[k], wc = neg_w[k];
     const double self = wc > 0 ? alpha * pc : 0.0;
@@ -602,6 +690,7 @@ __global__ void ul_fix(float* d, __nv_bfloat16* dh, const int* tok, const int* r
     const size_t i = size_t(n) * V + tok[k];
     if (dh) dh[i] = __float2bfloat16(g);
     else d[i] = g;
+    }
 }
 
 // ternary_quantize, stage 2: gamma[y] = mean |w| + 1e-8 from the partials.
@@ -659,6 +748,7 @@ struct StepState {
     float scale = 1.0f;     // what clipping multiplies the gradient by (1: no clipping)
     int ok = 0;             // norm and loss finite: the update runs
     double load_ratio = 1.0;  // the busiest expert's share against an even split, worst layer (max_load_ratio)
+    unsigned long long ul_counts[2] = {0, 0};  // unlikelihood: positions with a negative, negatives
 };
 
 // *sum += Σ losses[n] over the rows with a target (targets[n] >= 0), in
@@ -723,6 +813,29 @@ __global__ void balance_router(StepState* s, float* bias, unsigned long long* st
 __global__ void expert_starts(int* starts, const int* counts, int E) {
     starts[0] = 0;
     for (int e = 0; e < E; ++e) starts[e + 1] = starts[e] + counts[e];
+}
+
+// Model initialization on the GPU (GpuTrainer::init_params): x[i] for
+// i < n is N(0, sd), from (seed, first + i) alone: two splitmix64 hashes give
+// two uniforms, Box-Muller one normal. Every weight is its own draw, so the
+// tensors fill in parallel and the same seed always gives the same weights.
+__device__ __forceinline__ uint64_t splitmix64(uint64_t z) {
+    z += 0x9E3779B97F4A7C15ull;
+    z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ull;
+    z = (z ^ (z >> 27)) * 0x94D049BB133111EBull;
+    return z ^ (z >> 31);
+}
+__global__ void init_normal(float* x, size_t n, uint64_t seed, size_t first, float sd) {
+    for (size_t i = size_t(blockIdx.x) * blockDim.x + threadIdx.x; i < n; i += size_t(gridDim.x) * blockDim.x) {
+        const uint64_t h1 = splitmix64(seed ^ splitmix64(2 * (first + i))),
+                       h2 = splitmix64(seed ^ splitmix64(2 * (first + i) + 1));
+        const double u1 = (double(h1 >> 11) + 1.0) * 0x1.0p-53, u2 = double(h2 >> 11) * 0x1.0p-53;  // (0, 1], [0, 1)
+        x[i] = float(sqrt(-2.0 * log(u1)) * cos(6.283185307179586 * u2) * sd);
+    }
+}
+__global__ void fill_value(float* x, size_t n, float v) {
+    for (size_t i = size_t(blockIdx.x) * blockDim.x + threadIdx.x; i < n; i += size_t(gridDim.x) * blockDim.x)
+        x[i] = v;
 }
 
 // counts[e] tokens went to expert e in this layer: add them to the step's.
@@ -1167,21 +1280,22 @@ struct GpuTrainer::Impl {
     // host (grouped_gemm.cuh; set_grouped_experts), or cuBLAS per expert,
     // sized by the router's counts copied to the host (pinned memory, so
     // the copy runs behind other work) once counts_ready has passed. The
-    // default stays cuBLAS until the grouped kernels are as fast (#49).
-    bool grouped_experts = false;
+    // grouped products are the default (owner's decision, 2026-10-16: the
+    // GPU alone, about 3% slower for now); cuBLAS stays for comparisons.
+    bool grouped_experts = true;
     bool decoding = false;  // decode_forward runs: always the grouped products
     int* counts_h = nullptr;
     cudaEvent_t counts_ready = nullptr;
     int B_ = 0, T_ = 0, B_cur = 0, T_cur = 0, n_valid = 0;
     bool has_targets = false;
-    // Unlikelihood (#34), as Model::unlikelihood: the negatives are found on
-    // the host (unlikelihood.h) in each training forward, the term computed
-    // here (ul_fwd, ul_fix). ul_active: the last forward had negatives.
+    // Unlikelihood (#34), as Model::unlikelihood: the negatives found
+    // (ul_count, ul_offsets, ul_write: unlikelihood.h's definition) and the
+    // term computed (ul_fwd, ul_fix) on the GPU, in each training forward.
+    // ul_active: the last forward computed the term.
     double ul_alpha = 0;
     int ul_ngram = 8;
-    RepeatNegatives negatives_h;
-    std::vector<int> neg_row_h;
-    DevBuf<int> neg_off, neg_tok, neg_row;
+    DevBuf<int> neg_off, neg_tok, neg_row, neg_cnt, neg_K;
+    DevBuf<unsigned long long> fwd_counts;  // forward()'s own term counts
     DevBuf<float> neg_p, row_scale;
     DevBuf<double> neg_w, row_w, row_ul;
     bool ul_active = false;
@@ -1846,7 +1960,7 @@ struct GpuTrainer::Impl {
     // training the term's sum to *ul_sum (device addresses). The host only
     // counts the targets it sent (n_valid, for backward's scale).
     void forward_sums(const int* tokens_h, const int* targets_h, int B, int Tn, bool training, double* ce_sum,
-                      double* ul_sum) {
+                      double* ul_sum, unsigned long long* ul_counts) {
         CHECK(targets_h, "GpuTrainer::forward needs targets");
         CHECK(!training || !inference, "a training forward on an evaluating GpuTrainer (inference)");
         release_decode();  // training never runs with less memory than without decoding
@@ -1892,53 +2006,51 @@ struct GpuTrainer::Impl {
         parts = {};
         ul_active = false;
         if (!training || ul_alpha <= 0 || n_valid == 0) return;
-        unlikelihood_forward(tokens_h, targets_h, B, Tn, ul_sum);
+        unlikelihood_forward(B, Tn, ul_sum, ul_counts);
     }
 
     // forward_sums on forward()'s own sums, copied back: the mean
     // cross-entropy (+ alpha times the term in training), as Model::forward.
     double forward(const int* tokens_h, const int* targets_h, int B, int Tn, bool training) {
         fwd_sums.zero();
-        forward_sums(tokens_h, targets_h, B, Tn, training, fwd_sums.p, fwd_sums.p + 1);
+        fwd_counts.resize(2);
+        fwd_counts.zero();
+        forward_sums(tokens_h, targets_h, B, Tn, training, fwd_sums.p, fwd_sums.p + 1, fwd_counts.p);
         double sums[2];
         to_host(sums, fwd_sums.p, 2);
         parts.ce = n_valid ? sums[0] / n_valid : 0.0;
         if (!ul_active) return parts.ce;
+        unsigned long long counts[2];
+        to_host(counts, fwd_counts.p, 2);
         parts.ul = sums[1] / n_valid;
+        parts.fired = size_t(counts[0]);
+        parts.negatives = size_t(counts[1]);
         return parts.ce + ul_alpha * parts.ul;
     }
 
-    void unlikelihood_forward(const int* tokens_h, const int* targets_h, int B, int Tn, double* ul_sum) {
+    void unlikelihood_forward(int B, int Tn, double* ul_sum, unsigned long long* ul_counts) {
         const int N = B * Tn, V = cfg.vocab;
-        find_repeat_negatives(negatives_h, tokens_h, targets_h, B, Tn, ul_ngram);
-        const size_t K = negatives_h.tokens.size();
-        parts.fired = negatives_h.fired;
-        parts.negatives = K;
-        if (K == 0) return;  // the gradient is the cross-entropy's
-        check_negatives(negatives_h.rows(ul_alpha), targets_h, N, V);
-        neg_row_h.resize(K);
-        for (int n = 0; n < N; ++n)
-            for (int k = negatives_h.offsets[size_t(n)]; k < negatives_h.offsets[size_t(n) + 1]; ++k)
-                neg_row_h[size_t(k)] = n;
+        // At most one negative per earlier position of the window.
+        const size_t cap = size_t(B) * Tn * (Tn + 1) / 2;
+        neg_cnt.resize(N);
         neg_off.resize(size_t(N) + 1);
-        neg_tok.resize(K);
-        neg_row.resize(K);
-        neg_p.resize(K);
-        neg_w.resize(K);
+        neg_K.resize(1);
+        neg_tok.resize(cap);
+        neg_row.resize(cap);
+        neg_p.resize(cap);
+        neg_w.resize(cap);
         row_w.resize(N);
         row_scale.resize(N);
         row_ul.resize(N);
-        to_device(neg_off.p, negatives_h.offsets.data(), size_t(N) + 1);
-        to_device(neg_tok.p, negatives_h.tokens.data(), K);
-        to_device(neg_row.p, neg_row_h.data(), K);
-        {
-            Region r(*this, "output layer and loss");
-            ul_fwd<<<N, kBlock>>>(logits.p, neg_off.p, neg_tok.p, neg_p.p, neg_w.p, row_w.p, row_scale.p,
-                                  row_ul.p, ul_alpha, V);
-            LAUNCH_CHECK();
-            sum_all<<<1, 1024>>>(ul_sum, row_ul.p, N);
-            LAUNCH_CHECK();
-        }
+        Region r(*this, "output layer and loss");
+        ul_count<<<blocks_for(N), kBlock>>>(neg_cnt.p, tokens.p, targets.p, B, Tn, ul_ngram);
+        ul_offsets<<<1, 1024>>>(neg_off.p, neg_K.p, ul_counts, neg_cnt.p, N);
+        ul_write<<<blocks_for(N), kBlock>>>(neg_tok.p, neg_row.p, neg_off.p, tokens.p, targets.p, B, Tn, ul_ngram);
+        ul_fwd<<<N, kBlock>>>(logits.p, neg_off.p, neg_tok.p, neg_p.p, neg_w.p, row_w.p, row_scale.p, row_ul.p,
+                              ul_alpha, V);
+        LAUNCH_CHECK();
+        sum_all<<<1, 1024>>>(ul_sum, row_ul.p, N);
+        LAUNCH_CHECK();
         ul_active = true;
     }
 
@@ -2142,9 +2254,8 @@ struct GpuTrainer::Impl {
                                                             ul_active ? row_scale.p : nullptr);
             LAUNCH_CHECK();
             if (ul_active) {
-                const int K = int(negatives_h.tokens.size());
-                ul_fix<<<blocks_for(size_t(K)), kBlock>>>(logits.p, dlogitsh.p, neg_tok.p, neg_row.p, neg_p.p,
-                                                          neg_w.p, row_w.p, K, V, ul_alpha, dloss);
+                ul_fix<<<1024, kBlock>>>(logits.p, dlogitsh.p, neg_tok.p, neg_row.p, neg_p.p, neg_w.p, row_w.p,
+                                         neg_K.p, V, ul_alpha, dloss);
                 LAUNCH_CHECK();
                 ul_active = false;
             }
@@ -2193,6 +2304,8 @@ struct GpuTrainer::Impl {
     void begin_step() {
         static_assert(offsetof(StepState, ul) == offsetof(StepState, ce) + sizeof(double), "ce and ul adjacent");
         CUDA_CHECK(cudaMemsetAsync(state_field<double>(offsetof(StepState, ce)), 0, 2 * sizeof(double)));
+        CUDA_CHECK(cudaMemsetAsync(state_field<unsigned long long>(offsetof(StepState, ul_counts)), 0,
+                                   sizeof(StepState::ul_counts)));
     }
 
     // The step's end, as GpuBackend::step and Backend::balance did it on the
@@ -2209,6 +2322,8 @@ struct GpuTrainer::Impl {
         out.ul_sum = state_h->ul;
         out.norm = state_h->norm;
         out.ok = state_h->ok != 0;
+        out.ul_fired = size_t(state_h->ul_counts[0]);
+        out.ul_negatives = size_t(state_h->ul_counts[1]);
         const int E = std::max(1, cfg.n_experts);
         if (!out.ok) {
             step_load.zero();
@@ -2354,6 +2469,24 @@ void GpuTrainer::set_params(const float* p) {
     impl_->weights_dirty = true;
 }
 void GpuTrainer::get_params(float* p) const { to_host(p, impl_->params.p, impl_->n_params); }
+void GpuTrainer::init_params(uint64_t seed) {
+    Impl& m = *impl_;
+    // Model::init's layout: norms at 1, matrices N(0, 0.02), the projections
+    // that write into the residual stream scaled down by sqrt(2 n_layers).
+    const double resid_scale = 1.0 / std::sqrt(2.0 * m.cfg.n_layers);
+    for (const ParamInfo& info : m.infos) {
+        float* w = m.params.p + info.offset;
+        const int grid = std::min(blocks_for(info.size), 4096);
+        if (info.rows == 1) {
+            fill_value<<<grid, kBlock>>>(w, info.size, 1.0f);
+        } else {
+            const bool resid = info.name.ends_with("wo") || info.name.ends_with("proj");
+            init_normal<<<grid, kBlock>>>(w, info.size, seed, info.offset, float(0.02 * (resid ? resid_scale : 1.0)));
+        }
+        LAUNCH_CHECK();
+    }
+    m.weights_dirty = true;
+}
 void GpuTrainer::get_grads(float* g) const {
     impl_->check_grads("get_grads()");
     to_host(g, impl_->grads.p, impl_->n_params);
@@ -2416,7 +2549,8 @@ void GpuTrainer::zero_grad() {
 void GpuTrainer::forward_train(const int* tokens, const int* targets, int B, int Tn) {
     Impl& m = *impl_;
     m.forward_sums(tokens, targets, B, Tn, true, m.state_field<double>(offsetof(StepState, ce)),
-                   m.state_field<double>(offsetof(StepState, ul)));
+                   m.state_field<double>(offsetof(StepState, ul)),
+                   m.state_field<unsigned long long>(offsetof(StepState, ul_counts)));
 }
 GpuTrainer::StepStats GpuTrainer::finish_step(double lr, double beta1, double beta2, double eps,
                                               double weight_decay, double max_norm, double bias_rate) {

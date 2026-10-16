@@ -6,9 +6,10 @@
 // sampling and ternary inference engine all work on GPU-trained weights.
 //
 // The weights, the optimizer state and the gradients are fp32. Matrix
-// products go through cuBLAS with fp32 outputs and sums (the MoE experts'
-// optionally through our own grouped kernels, set_grouped_experts); Matmul
-// says how their inputs are multiplied:
+// products go through cuBLAS with fp32 outputs and sums, except the MoE
+// experts': all experts in one launch of our own grouped kernels
+// (grouped_gemm.cuh, set_grouped_experts); Matmul says how their inputs are
+// multiplied:
 // - fp32: exactly, which the tests use to compare against the CPU engine;
 // - tf32 (GpuTrainer's default; train --gpu's for ternary models): on the
 //   tensor cores, each input rounded to 11 significant bits;
@@ -57,6 +58,11 @@ public:
 
     // Copies between host and device. Arrays have num_params() floats.
     void set_params(const float* params);
+    // Fresh weights, made on the GPU: Model::init's layout (norms 1,
+    // matrices N(0, 0.02), residual projections scaled down by sqrt(2
+    // n_layers)), each weight drawn from (seed, its place) alone. Not
+    // Model::init's numbers: its generator runs in sequence on the CPU.
+    void init_params(uint64_t seed);
     void get_params(float* params) const;
     void get_grads(float* grads) const;
     // A ternary model's weights as the products use them (the GPU's
@@ -114,6 +120,7 @@ public:
         double ce_sum = 0, ul_sum = 0;  // summed over the step's trained targets
         double norm = 0;
         bool ok = false;
+        size_t ul_fired = 0, ul_negatives = 0;  // unlikelihood: positions with a negative, negatives
     };
     StepStats finish_step(double lr, double beta1, double beta2, double eps, double weight_decay, double max_norm,
                           double bias_rate);
@@ -166,11 +173,11 @@ public:
     // call.
     void set_profile(bool on);
     // The MoE experts' products as one grouped launch per projection that
-    // never waits for the host (grouped_gemm.cuh, #49), instead of cuBLAS
-    // per expert, sized by counts the host waits for in each layer. Off by
-    // default until it is as fast: on the RTX 4070 the nights' model trains
-    // about 3% slower with it (2678 vs 2595 ms a step, 2026-10-16): level in
-    // the forward pass, behind in the backward pass's products.
+    // never waits for the host (grouped_gemm.cuh, #49): on by default. Off:
+    // cuBLAS per expert, sized by counts the host waits for in each layer
+    // (train --moe-cublas), about 3% faster on the RTX 4070 for now (2595 vs
+    // 2678 ms a step on the nights' model, 2026-10-16: the grouped kernels
+    // are level in the forward pass, behind in the backward pass).
     void set_grouped_experts(bool on);
     std::vector<std::pair<std::string, double>> take_profile();
 

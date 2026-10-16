@@ -68,7 +68,9 @@ struct Run {
     double clip = 0;
     bool fused = true;  // the GPU's fused attention kernels
     Matmul matmul = Matmul::fp32;
-    bool grouped = false;  // the experts' grouped products (set_grouped_experts, #49)
+    // The experts' grouped products (set_grouped_experts, #49; the default),
+    // or cuBLAS per expert: the runs without ", grouped" in their name.
+    bool grouped = false;
     // > 0: unlikelihood training (#34) on both sides, on batches whose
     // tokens come from 4 values, so runs repeat and the term fires.
     double ul_alpha = 0;
@@ -699,6 +701,60 @@ void eval_on_gpu() {
 
 }  // namespace
 
+// GpuTrainer::init_params: Model::init's layout made on the GPU. The same
+// seed gives the same weights, another seed others; norms are exactly 1;
+// every matrix has mean about 0 and the intended spread (0.02, or 0.02 /
+// sqrt(2 layers) for the projections into the residual stream).
+void init_on_gpu() {
+    Config cfg;
+    cfg.vocab = 300;
+    cfg.seq_len = 16;
+    cfg.d_model = 128;
+    cfg.n_layers = 3;
+    cfg.n_heads = 4;
+    cfg.n_experts = 4;
+    cfg.top_k = 2;
+    cfg.expert_hidden = 96;
+    Model<float> host(cfg);
+    GpuTrainer gpu(cfg, host.infos, Matmul::fp32, true, /*inference=*/true);
+    std::vector<float> a(host.num_params()), b(a.size()), c(a.size());
+    gpu.init_params(42);
+    gpu.get_params(a.data());
+    gpu.init_params(42);
+    gpu.get_params(b.data());
+    gpu.init_params(43);
+    gpu.get_params(c.data());
+    EXPECT(a == b, "init_params: the same seed gave different weights");
+    size_t same = 0;
+    for (size_t i = 0; i < a.size(); ++i) same += a[i] == c[i];
+    double worst_mean = 0, worst_sd = 0;
+    bool norms = true;
+    const double resid = 1.0 / std::sqrt(2.0 * cfg.n_layers);
+    for (const auto& info : host.infos) {
+        const float* w = &a[info.offset];
+        if (info.rows == 1) {
+            for (size_t i = 0; i < info.size; ++i) norms &= w[i] == 1.0f;
+            continue;
+        }
+        const bool r = info.name.ends_with("wo") || info.name.ends_with("proj");
+        const double sd = 0.02 * (r ? resid : 1.0);
+        double s = 0, s2 = 0;
+        for (size_t i = 0; i < info.size; ++i) s += w[i], s2 += double(w[i]) * w[i];
+        const double mean = s / double(info.size), got = std::sqrt(s2 / double(info.size) - mean * mean);
+        // In units of the sampling error: 1/sqrt(n) of sd for the mean, 1/sqrt(2n) for the spread.
+        worst_mean = std::max(worst_mean, std::abs(mean) / (sd / std::sqrt(double(info.size))));
+        worst_sd = std::max(worst_sd, std::abs(got - sd) / (sd / std::sqrt(2.0 * double(info.size))));
+    }
+    std::printf("  init on the GPU: means within %.1f, spreads within %.1f standard errors; %zu of %zu weights "
+                "equal across seeds\n", worst_mean, worst_sd, same, a.size());
+    EXPECT(norms, "init_params: a norm weight is not 1");
+    EXPECT(worst_mean < 5 && worst_sd < 5, "init_params: a matrix's mean or spread is off");
+    // Only the norms (all 1) are the same under another seed.
+    size_t ones = 0;
+    for (const auto& info : host.infos) ones += info.rows == 1 ? info.size : 0;
+    EXPECT(same == ones, "init_params: %zu weights the same under another seed, %zu norms", same, ones);
+}
+
 // x rounded to bf16 (to nearest, ties to even), as __float2bfloat16 does.
 double to_bf16(float x) {
     uint32_t u;
@@ -906,6 +962,7 @@ int main() {
     masked_accumulation();
     fused_kernels();
     grouped_products();
+    init_on_gpu();
 
     Config dense;
     dense.vocab = 61;
