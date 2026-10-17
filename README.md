@@ -159,6 +159,7 @@ patterns for inspection and do not establish the cause of a wrong answer.
 | `train` | trains or resumes a model (CPU, or GPU with `cxxgpt-gpu --gpu`); `--val-sources NAME=FILE,...` scores each held-out file on its own at every validation, Q&A files also on their final answers (`--val-log FILE.csv`) |
 | `eval-reasoning` | exact-answer accuracy per task and difficulty; greedy by default, or a vote over several sampled tries (below); `--tools calc-notes` or `calc-plain` also scores the same problems with an exact calculator filling in the model's arithmetic ([docs/calculator.md](docs/calculator.md)); `--gpu` (with `cxxgpt-gpu`) decodes on the GPU, with exact fp32 products by default, so the scores are the CPU's (`--matmul tf32` or `bf16` scores the model as training computes it) |
 | `eval-loss` | a checkpoint's loss on held-out token files, one line per file: by default on the same random windows as `train --val` (`--batch 8 --batches 20`, `night.sh`'s 160 windows; with training's `--batch` and `--eval-batches` it repeats training's last validation number), `--all` on every token once; `--gpu` (with `cxxgpt-gpu`), exact fp32 products by default |
+| `self-train` | samples a model's own solutions to training problems and keeps only the ones with the right answer and right arithmetic, as a masked token file (below) |
 | `sample` | generates text from a prompt (`--tools` as for `eval-reasoning`); `--gpu` (with `cxxgpt-gpu`) chooses every token on the GPU, the same text as the CPU's |
 | `bench-infer` | times the ternary inference engine against an fp32 baseline |
 | `leak-check` | finds questions (such as the GSM8K dev set) that share a run of 13 words with training files |
@@ -203,8 +204,8 @@ patterns for inspection and do not establish the cause of a wrong answer.
   - `unfinished`: no `#### ` line before `--max-new` ran out;
   - `format`: the right number, written another way (`$18`);
   - `arithmetic`: a written calculation that is wrong, checked by the
-    exact calculator (`480 * 480 = 112,400`), before any sign of the
-    right number;
+    exact calculator (`480 * 480 = 112,400`; a chain `a = b = c` link by
+    link), before any sign of the right number;
   - `passed_gold`: the right number appears in the work, then another
     answer is given (18 dollars a day, then "in a week, 18 * 7 = 126");
   - `other`: wrong with no wrong calculation in sight: a wrong plan or
@@ -217,6 +218,218 @@ patterns for inspection and do not establish the cause of a wrong answer.
   they fire on right answers too, so the summary reports them for right
   and wrong answers apart. Labels describe the run without the
   calculator.
+
+### The model's own checked solutions (self-train)
+
+```sh
+build/cxxgpt-gpu self-train --gpu --ckpt runs/rp1.ckpt --bpe data/licensed-10b/tok.bpe \
+    --problems data/math/fresh.txt --out data/self/rp1-fresh \
+    --tries 8 --temp 0.7 --seed 1 --keep 2 --audit data/self/rp1-fresh.audit.jsonl \
+    --exclude data/licensed-10b/gsm8k-test.txt,data/licensed-10b/gsm8k-dev.txt
+# The same tries checked again, with other settings or newer checks, without a model:
+build/cxxgpt self-train --bpe data/licensed-10b/tok.bpe --problems data/math/fresh.txt \
+    --recheck data/self/rp1-fresh.audit.jsonl --out data/self/rp1-fresh-text --same text
+```
+
+The model tries every problem `--tries` times (the same sampler and seeds
+as `eval-reasoning --tries`), and a try is kept only if (`src/self_train.h`):
+- it finished its `#### ` line with the right answer, and wrote some work
+  before it;
+- every calculation in the work is right by the exact calculator, both
+  `<<48/2=24>>` notes (and the number written after a note) and plain
+  `16 x 7 = 112`, found as `--labels` finds them, sign included (`30 - 35
+  = 5` is wrong here, though `--labels` compares numbers without their
+  sign). A chain such as `6 * 4 + 2 = 24 + 2 = 26` is checked link by
+  link (`6 * 4 + 2 = 24 + 2`, then `24 + 2 = 26`). A right answer through
+  a wrong step (`3 + 4 = 8, so 7`) is a lucky answer, and would teach the
+  mistake. A calculation the calculator cannot read (`10 / 3 = 3.33`) is
+  counted, not rejected;
+- no line of 12 or more characters is written twice (`--allow-loops` keeps
+  those);
+- it uses no number from outside the question: not in it (in digits or
+  words), not a result after `=`, and not one `+ - * /` away from numbers
+  already seen (the `--labels` outside flag), apart from 1, 2, 100 and a
+  few constants (7, 12, 24, 52, 60, 365, 1000: days a week, months,
+  hours, minutes, weeks and days a year, metric units). Numbers the work
+  writes in words (`Each box holds thirteen`) are checked too, against
+  the question's numbers, the work's own and one step from them. An invented
+  quantity is a wrong plan even when the answer comes out right
+  (`--allow-outside` keeps those);
+- it is not the problem file's own solution (`--keep-gold` keeps those):
+  a model that has learned its training problems, or a generator's
+  templates, writes them back, and they teach it nothing new;
+- it holds no `[[no-loss]]` marker and no BOS byte.
+
+Of those, a try that is the same solution as an earlier kept one is
+dropped, and at most `--keep K` per problem are kept (0, the default: every
+distinct one), in try order, so the same seed writes the same files. "The
+same solution", for the gold check too, means the same outline by default
+(`--same outline`): the same calculations' values in the same order, in
+whatever words (`12*4 = 48 pencils` and `The start is 12 x 4 = 48`). So
+`2 * 5 = 10` and `5 + 5 = 10` count as the same, which matters little
+past one step. Work without a readable calculation is compared as text,
+and `--same text` compares only text (spaces around it aside). The files:
+- `OUT.txt`: the kept solutions as a problems file (for a person,
+  `leak-check` or `eval-reasoning`);
+- `OUT.tok`: the same as `prep-qa` writes them, the question masked out
+  and the work and `#### ` answer trained on, the answer as the problem
+  file gives it (`1200`, where the model may have written `1,200`);
+- `OUT.json`: the settings (checkpoint, problems, tokenizer) and counts,
+  the record of where the data came from.
+
+The summary gives the problems tried, the first try's accuracy, the
+problems any try solved (pass@N) and those with a kept solution, and every
+try's verdict (`kept`, `unfinished`, `wrong`, `no_work`, `markers`,
+`arithmetic`, `loop`, `outside`, `gold_copy`, `ambiguous`, `unchecked`,
+`redraw`, `duplicate`, `over_cap`, `too_long`); `--audit FILE.jsonl` writes
+every try's text, verdict and outside numbers (and the re-draw check's
+record, below). `--recheck FILE.jsonl` (with the same `--problems`) checks
+an audit file's tries again without a model, for other settings or newer
+checks; options that decide the sampling are refused with it.
+`--tools calc-notes` lets the calculator finish the model's notes while
+it writes, as in `eval-reasoning`.
+
+The problems must be training problems: GSM8K train (as `prep-qa` writes
+it, without the dev problems), or the train split of a generator, never a
+dev or test set. Nothing in a problems file says which split it is, so
+pass the held-out sets to `--exclude` (`gen-math`'s rule: a 13-word run,
+or the same numbers and answer); excluded problems are counted. Whether
+self-generated files join a night's mix, and how much, is the owner's
+decision (docs/research-plan.md, "Learning from its own checked
+solutions"); keep the original data in the mix too.
+
+First runs (2026-10-17, `runs/rp1.ckpt`, step 58,784):
+
+| problems | tries | first try | pass@N | kept | gold copies | wrong | wrong step | duplicates |
+|---|---|---|---|---|---|---|---|---|
+| GSM8K train, 16 (CPU) | 4 | 81% | 94% | 3 | 45 | 11 | 5 | 0 |
+| `gen-word` train, new seed, 100 (GPU) | 8 | 100% | 100% | 752 | 10 | 2 | 0 | 36 |
+| `gen-math` equations, new seed, 100 (GPU) | 8 | 94% | 97% | 1 | 744 | 41 | 14 | 0 |
+| `gen-math` fractions, new seed, 100 (GPU) | 8 | 90% | 94% | 1 | 682 | 111 | 6 | 0 |
+
+(`--temp 0.7 --seed 1`; the GSM8K row counted from its audit file, the
+gold-copy check came after it, and one of its wrong steps was a right
+chain, `6 * 4 + 2 = 24 + 2 = 26`, misread then: chains are checked link
+by link since. GPU rows `--matmul bf16 --max-new 400`, about a minute
+each.)
+- rp1 has learned GSM8K train by heart (81% there, 3.9% on the test set),
+  so it writes the gold solutions back.
+- rp1's nights train on `gen-word`, `gen-math` equations and fractions, so
+  on new problems it writes the generators' own templated text: word for
+  word for `gen-math` (one fixed solution per story), in another of the
+  sentence patterns for `gen-word` (so these count as kept, though they
+  are generator text all the same).
+- So, for this model, every source tried gives back text we already have
+  or can generate for free, and pass@8 is only 3-4 points above the first
+  try on `gen-math`. `self-train` pays where the model solves problems
+  whose text is not already in its training: problems with an answer but
+  no worked solution, or kinds of problem it has not been taught.
+
+The same tries checked again (`--recheck`) with the outline and outside
+checks, the defaults since 2026-10-17 (kept with `--same text` in
+brackets, which reproduces the table above):
+
+| problems | kept | gold copies | outside | wrong step |
+|---|---|---|---|---|
+| GSM8K train, 16 | 0 (3) | 52 | 0 | 1 |
+| `gen-word`, 100 | 0 (752) | 798 | 0 | 0 |
+| `gen-math` equations, 100 | 0 (1) | 745 | 0 | 14 |
+| `gen-math` fractions, 100 | 0 (1) | 683 | 0 | 6 |
+
+- The 752 `gen-word` solutions were the generator's own, in another of its
+  sentence patterns: the same calculations in the same order.
+- GSM8K's wrong steps fell from 5 to 1 (`30 - 35 = 5`): the others were a
+  right chain, read link by link now.
+- No right try used an outside number: rp1 follows its templates here. On
+  GSM8K test answers of another model (`runs/night2.ckpt`, 15.3% greedy;
+  its `--labels` file), outside numbers (constants
+  aside) are in 1 of 202 right answers (a `0.10`) and 62 of 1,117 wrong
+  ones; without the constants, 6 right answers would be rejected (12, 7,
+  60).
+
+#### The re-draw check: right by method, not by luck
+
+The checks above do not see a wrong plan that lands on the right number:
+"6 / 2 = 3" (half) where the story needed "6 - 3". A right method stays
+right when the question's numbers change; a lucky one almost never does.
+So, for generated problems (`src/redraw.h`, docs/research-plan.md item 3):
+
+```sh
+build/cxxgpt gen-word --out data/self/word --seed 77 --count 100 --recipes data/self/word.recipes
+build/cxxgpt-gpu self-train --gpu --ckpt runs/rp1.ckpt --bpe data/licensed-10b/tok.bpe \
+    --problems data/self/word.txt --recipes data/self/word.recipes --out data/self/rp1-word --tries 8
+```
+
+1. `gen-word`/`gen-math --recipes FILE` also writes, per problem, how to
+   make it again: the generator, its options and the random state its story
+   was drawn from (the problems themselves do not change).
+2. `self-train` makes each story again with other numbers (`--redraws 3`
+   versions): the same people, sentences and steps, new numbers, and the
+   generator's own exact answer. The generators tell their two kinds of
+   random choices apart (`Choices`, `src/wordgen.h`): what the story is,
+   recorded and played back, and the numbers, drawn again. A version
+   counts only if its question and its worked solution are the original's
+   once every number is masked (`Maya has # boxes of # cards`), so the plan
+   is the same step for step, and, for `gen-math`, the topic's second solver
+   accepts it.
+3. The try's calculations become a formula over the question's numbers:
+   each number in a calculation is a number of the question (`q3`), an
+   earlier result (whose formula takes its place) or a constant (1, 2,
+   100, a number the question gives in words, or one from nowhere else).
+   For "40 * 25 / 100 = 10, 40 - 10 = 30" it is `q1 - (q1 * q2 / 100)`.
+4. The formula is worked out exactly with each version's numbers, and the
+   try is kept only if it gives every version's answer (`redraw` if not).
+
+Constants stay the same in every version: a real one (100 for a
+percentage) passes, and a number the model worked out without writing it
+down ("12" for 3 boxes of 4) fails. (The outside check runs first and
+already drops most invented numbers, `0.75` for 25% off; the re-draw check
+also catches the ones it allows, such as a 12 or a 7 that only happens to
+be right.) A number with two possible sources (two
+question numbers alike, a question number equal to an earlier result, a
+question number that is also 1, 2 or 100, or two calculations giving the
+answer) leaves the try **ambiguous**: each choice of sources is a
+reading, and the try passes if one reading gives every version's answer
+(the default since 2026-10-17, the owner's decision: with one reading only,
+a third to two thirds of right tries would be dropped).
+`--strict-readings` drops every ambiguous try instead; the summary counts
+the ambiguous tries that one reading passes either way. A try with no formula for
+its answer (an answer stated in prose) or a problem that could not be drawn
+again is `unchecked`: dropped, or kept with `--keep-unchecked`. A problem
+without a recipe (GSM8K train) is not checked, and its kept tries are
+counted. The audit file records, per try, the formula, its constants, each
+version's question and answer and what the formula gave.
+
+On the generators' own solutions (300 problems per topic,
+`tests/test_redraw.h`): with one reading, 108 of 300 word problems, 167 of
+296 equations and 202 of 300 fractions pass, the rest being ambiguous
+(their questions repeat small numbers); with every reading tried, all
+word problems and equations pass, and 299 of 300 fractions (one with more
+combinations than are followed). Without their `<<...>>` notes (as `--notes
+off` writes them, and as rp1 writes) they pass as often.
+
+On rp1 (2026-10-17, `runs/rp1.night1.ckpt`, 100 new problems per topic, 8
+tries, `--temp 0.7 --seed 1`, then `--recheck` with `--keep-gold`, so that
+every right try reaches the check):
+
+| problems | right tries | redraw | ambiguous, `--strict-readings` | ambiguous (default) | unchecked |
+|---|---|---|---|---|---|
+| `gen-word` | 793 | 0 | 534 | 6 | 0 |
+| `gen-math` equations | 741 | 0 | 336 | 8 | 32 |
+| `gen-math` fractions | 629 | 0 | 218 | 0 | 0 |
+
+- No lucky try: rp1 writes the generators' own solutions (by default they
+  are all `gold_copy`), so the run shows what the check costs on right
+  work, not what it catches; the tests show what it catches.
+- What it cost on the first run, all fixed since: 195 fraction tries
+  failed because "30% of 270 is 270*30/100 = 81" was not read as a
+  calculation (the labels read it now: `labels::detail::after_word`), and
+  6 word tries because a result with too many readings was taken for a
+  constant (it makes the try ambiguous now).
+- With one reading (`--strict-readings`), 35-67% of the right tries are
+  ambiguous; with every reading tried (the default), 0-1%. The 32 unchecked tries are 4 age problems whose
+  plan ("3 - 2 = 1, so x + 16 = 32") holds for few other numbers: no 3
+  versions in 200 draws each.
 
 ### Generated word problems
 
@@ -493,8 +706,12 @@ on dev, from about step 45,000, weights only: 20/500 dev, 47/1319 test).
 
 **Data provenance (2026-10-16).** What the models learn from, and why: a
 model meant to be published should depend only on openly licensed text,
-human-written problems and our own programs, never on text another
-company's AI model wrote.
+human-written problems, our own programs and our own models, never on text
+another company's AI model (or any model under a restrictive licence)
+wrote. Our own models' output is allowed (owner's decision, 2026-10-16)
+when the model that wrote it trained only on clean data itself, such as
+`self-train` files from the RunPod model or the nights that continue it;
+each such file's `OUT.json` names the checkpoint that wrote it.
 
 What trains the models now (`night.sh`'s default mix, above):
 - **Common Pile:** openly licensed text (open textbooks, DOAB books, arXiv
@@ -503,6 +720,9 @@ What trains the models now (`night.sh`'s default mix, above):
 - **`gen-word` word problems:** written by our own C++ program from
   templates and seeds, with exact answers. No AI model writes them.
 - **GSM8K:** human-written problems and solutions, MIT licence.
+
+Not in the mix yet: `self-train` solutions (the model's own, checked; the
+owner decides when and how much).
 
 Which checkpoints are clean to publish: **the RunPod model** (2026-10-16)
 and the nights that continue it. They trained on the data above only, from

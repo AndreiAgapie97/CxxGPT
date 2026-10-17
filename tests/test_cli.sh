@@ -628,6 +628,78 @@ grep -q '^effort: tries 32, temperature 0.5, seed 1$' "$TEST_DIR/vote-effort-hig
 require_absent -q 'effort:' "$TEST_DIR/vote-effort-low.log"
 grep -q '^overall .* (greedy)$' "$TEST_DIR/vote-effort-low.log"
 grep -q '^unfinished answers (no "#### " line, first tries): [0-9]* / 1$' "$TEST_DIR/vote-effort-low.log"
+# self-train: the random model never finishes an answer, so nothing is
+# kept, but every file is written (empty), the summary and the audit count
+# every try, and the same seed repeats the same tries.
+self_train_run() {  # self_train_run SEED PREFIX
+    "$CXXGPT" self-train --ckpt "$TEST_DIR/audit.ckpt" --problems "$TEST_DIR/audit.txt" --out "$2"         --tries 3 --temp 0.9 --seed "$1" --max-new 6 --keep 2 --threads 2 --audit "$2.audit.jsonl" > "$2.log"
+}
+self_train_run 3 "$TEST_DIR/self-a"
+self_train_run 3 "$TEST_DIR/self-b"
+cmp "$TEST_DIR/self-a.audit.jsonl" "$TEST_DIR/self-b.audit.jsonl"
+cmp "$TEST_DIR/self-a.tok" "$TEST_DIR/self-b.tok"
+[[ $(wc -l < "$TEST_DIR/self-a.audit.jsonl") == 3 ]]
+grep -q '"verdict":"unfinished"' "$TEST_DIR/self-a.audit.jsonl"
+grep -q '^1 problems (0 excluded), 3 tries each (temp 0.9, seed 3), 3 tries$' "$TEST_DIR/self-a.log"
+grep -q '^tries by verdict: kept 0 too_long 0 unfinished 3 ' "$TEST_DIR/self-a.log"
+grep -q '^kept 0 solutions -> ' "$TEST_DIR/self-a.log"
+[[ ! -s "$TEST_DIR/self-a.txt" ]]
+grep -q '"kept":0,' "$TEST_DIR/self-a.json"
+grep -q '"keep":2,' "$TEST_DIR/self-a.json"
+# --recheck checks an audit file's tries again without a model: the same
+# verdicts, and the sampling options are refused with it.
+"$CXXGPT" self-train --problems "$TEST_DIR/audit.txt" --recheck "$TEST_DIR/self-a.audit.jsonl" \
+    --out "$TEST_DIR/self-re" --audit "$TEST_DIR/self-re.audit.jsonl" --threads 2 > "$TEST_DIR/self-re.log"
+grep -q '^1 problems, 3 tries each, 3 tries, checked again from ' "$TEST_DIR/self-re.log"
+cmp "$TEST_DIR/self-a.audit.jsonl" "$TEST_DIR/self-re.audit.jsonl"
+grep -q '"recheck":"' "$TEST_DIR/self-re.json"
+status=0
+"$CXXGPT" self-train --problems "$TEST_DIR/audit.txt" --recheck "$TEST_DIR/self-a.audit.jsonl" \
+    --out "$TEST_DIR/self-re" --tries 2 --threads 2 > "$TEST_DIR/self-bad.log" 2>&1 || status=$?
+[[ "$status" == 1 ]]
+grep -q -- '--tries does nothing with --recheck' "$TEST_DIR/self-bad.log"
+# --exclude drops a problem that repeats an excluded question.
+"$CXXGPT" self-train --ckpt "$TEST_DIR/audit.ckpt" --problems "$TEST_DIR/audit.txt" --out "$TEST_DIR/self-x"     --exclude "$TEST_DIR/audit.txt" --tries 2 --max-new 4 --threads 2 > "$TEST_DIR/self-x.log"
+grep -q '^0 problems (1 excluded), ' "$TEST_DIR/self-x.log"
+# The re-draw check: gen-word/gen-math --recipes writes one recipe per
+# problem and leaves the problems as they are; self-train draws each one
+# again (3 versions by default), records it in the summary and the JSON,
+# and refuses a recipe file of another length or for other problems.
+"$CXXGPT" gen-word --out "$TEST_DIR/redraw-word" --seed 5 --count 6 > /dev/null
+"$CXXGPT" gen-word --out "$TEST_DIR/redraw-word-r" --seed 5 --count 6 --recipes "$TEST_DIR/redraw-word.recipes" > /dev/null
+cmp "$TEST_DIR/redraw-word.txt" "$TEST_DIR/redraw-word-r.txt"
+[[ $(wc -l < "$TEST_DIR/redraw-word.recipes") == 6 ]]
+grep -q '^word distractors=1 test=0 steps=[2-8] shape=[0-5] state=' "$TEST_DIR/redraw-word.recipes"
+"$CXXGPT" gen-math --topic fractions --out "$TEST_DIR/redraw-frac" --seed 5 --count 6 \
+    --recipes "$TEST_DIR/redraw-frac.recipes" > /dev/null
+grep -q '^fractions distractors=1 test=0 steps=0 shape=[0-6] state=' "$TEST_DIR/redraw-frac.recipes"
+"$CXXGPT" self-train --ckpt "$TEST_DIR/audit.ckpt" --problems "$TEST_DIR/redraw-word.txt" --out "$TEST_DIR/self-r" \
+    --recipes "$TEST_DIR/redraw-word.recipes" --tries 2 --max-new 4 --threads 2 > "$TEST_DIR/self-r.log"
+grep -q '^re-draw check: 6 of 6 problems drawn again 3 times' "$TEST_DIR/self-r.log"
+grep -q '"redraws":3,' "$TEST_DIR/self-r.json"
+grep -q '"redrawn":6,' "$TEST_DIR/self-r.json"
+head -n 4 "$TEST_DIR/redraw-word.recipes" > "$TEST_DIR/redraw-short.recipes"
+for case in 'redraw-short:has 4 recipes for 6 problems' 'redraw-frac:the recipe does not make this problem'; do
+    status=0
+    "$CXXGPT" self-train --ckpt "$TEST_DIR/audit.ckpt" --problems "$TEST_DIR/redraw-word.txt" \
+        --out "$TEST_DIR/self-bad" --recipes "$TEST_DIR/${case%%:*}.recipes" --tries 2 --max-new 4 --threads 2 \
+        > "$TEST_DIR/self-bad.log" 2>&1 || status=$?
+    [[ "$status" == 1 ]]
+    grep -q "${case#*:}" "$TEST_DIR/self-bad.log"
+done
+# Refused: greedy tries (all the same), a negative cap, an unknown tool,
+# --gpu on the CPU build, a missing --out.
+for options in '--temp 0' '--keep -1' '--tools bogus' '--gpu' '--matmul bf16' '--tries 0' '--same words' \
+    '--redraws 3'; do
+    status=0
+    "$CXXGPT" self-train --ckpt "$TEST_DIR/audit.ckpt" --problems "$TEST_DIR/audit.txt" --out "$TEST_DIR/self-bad"         $options --threads 2 > "$TEST_DIR/self-bad.log" 2>&1 || status=$?
+    [[ "$status" == 1 ]]
+    grep -q 'check failed' "$TEST_DIR/self-bad.log"
+done
+status=0
+"$CXXGPT" self-train --ckpt "$TEST_DIR/audit.ckpt" --problems "$TEST_DIR/audit.txt" --threads 2     > "$TEST_DIR/self-bad.log" 2>&1 || status=$?
+[[ "$status" == 1 ]]
+grep -q 'usage: cxxgpt self-train' "$TEST_DIR/self-bad.log"
 # The no-repeat block names itself in the headline; N = 1 would forbid
 # every token already written, so it is refused.
 "$CXXGPT" eval-reasoning --ckpt "$TEST_DIR/audit.ckpt" --test "$TEST_DIR/audit.txt" \

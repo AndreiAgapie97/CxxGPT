@@ -31,6 +31,12 @@ it, so the new training set is filtered against the same dev set:
       --old data/targeted-math --out data/word-fresh-1 --tok data/licensed-10b/tok.bpe \\
       --dev-from data/targeted-math --seed 202610170 --count 2500000
 
+With --notes on, the solutions keep GSM8K-style calculator notes ("18*12 =
+<<18*12=216>>216") in the tokens, for eval-reasoning --tools calc-notes. The
+problems are the same as without (gen-word draws the same ones, and the
+filters read each solution without its notes), so night 2's word-notes-1 is
+word-fresh-1 with notes (--seed 202610190 --count 2500000 --notes on).
+
 The cxxgpt given must be built from the checkout: the manifest records the
 source's hash, and a program built before the last change to src/wordgen.h
 writes other problems. One check: with --seed 202610160, the first problems
@@ -70,6 +76,11 @@ def numbers(text):
     return sorted(n.replace(',', '') for n in re.findall(r'\d(?:[\d,]*\d)?(?:\.\d+)?', text))
 
 
+def strip_notes(text):
+    """A solution without its calculator notes: "48/2 = <<48/2=24>>24" is "48/2 = 24", as prep-qa writes it."""
+    return re.sub(r'<<[^<>]*>>', '', text)
+
+
 def grams(s):
     words = re.findall(r'[a-z0-9]+', s.lower())
     return {' '.join(words[i:i + 13]) for i in range(len(words) - 12)}
@@ -84,6 +95,8 @@ def main():
     ap.add_argument('--seed', type=int, default=202610160, help="the training problems' seed")
     ap.add_argument('--count', type=int, default=1000000, help='training problems to generate')
     ap.add_argument('--dev-from', help='copy word-dev from this folder instead of generating it')
+    ap.add_argument('--notes', choices=['off', 'on'], default='off',
+                    help='calculator notes in the solutions (48/2 = <<48/2=24>>24), kept in the tokens')
     args = ap.parse_args()
     old, out = pathlib.Path(args.old), pathlib.Path(args.out)
     args.cxxgpt = str(pathlib.Path(args.cxxgpt).resolve())  # Windows does not search relative paths
@@ -120,14 +133,15 @@ def main():
     for split, seed, count, style in splits + [('train', args.seed, args.count, 'train')]:
         prefix, raw = out / ('word-' + split), out / ('generated-' + split)
         subprocess.run([args.cxxgpt, 'gen-word', '--out', str(raw), '--count', str(count), '--seed', str(seed),
-                        '--split', style, '--notes', 'off'], check=True)
+                        '--split', style, '--notes', args.notes], check=True)
         kept = dropped = dropped_numbers = 0
         with open(raw.with_suffix('.txt'), encoding='utf-8', newline='') as f, \
                 open(prefix.with_suffix('.jsonl'), 'w', encoding='utf-8', newline='\n') as dest:
             for line in f:
                 _, _, q, steps, answer = line.rstrip('\n').split('\t')
                 q, steps, answer = unescape(q), unescape(steps), unescape(answer)
-                if split == 'train' and grams(q + ' ' + steps) & held:
+                # The filters read the solution without its notes, so --notes on keeps the same problems.
+                if split == 'train' and grams(q + ' ' + strip_notes(steps)) & held:
                     dropped += 1
                     continue
                 if split == 'train' and same_numbers(q, answer):
@@ -139,7 +153,8 @@ def main():
         raw.with_suffix('.text').unlink(missing_ok=True)
         raw.with_suffix('.txt').unlink(missing_ok=True)
         subprocess.run([args.cxxgpt, 'prep-qa', '--in', str(prefix.with_suffix('.jsonl')), '--out', str(prefix),
-                        '--bpe', args.tok, '--task', 'word'], check=True)
+                        '--bpe', args.tok, '--task', 'word'] + (['--keep-calc'] if args.notes == 'on' else []),
+                       check=True)
         if split == 'dev':  # keep the generated dev set out of training too
             for line in prefix.with_suffix('.jsonl').read_text(encoding='utf-8').splitlines():
                 held.update(grams(json.loads(line)['question']))
@@ -156,7 +171,8 @@ def main():
     commit = subprocess.run(['git', 'rev-parse', 'HEAD'], capture_output=True, text=True, check=True).stdout.strip()
     manifest = {
         'created_utc': datetime.datetime.now(datetime.timezone.utc).isoformat(),
-        'generator': 'CxxGPT gen-word after the 2026-10-16 audit; exact arithmetic; no calculator notes',
+        'generator': 'CxxGPT gen-word after the 2026-10-16 audit; exact arithmetic; ' +
+                     ('calculator notes kept' if args.notes == 'on' else 'no calculator notes'),
         'source': 'locally generated from repository templates, not an externally downloaded dataset',
         'generator_source_sha256': hashlib.sha256(source).hexdigest(),
         'generator_commit': commit,

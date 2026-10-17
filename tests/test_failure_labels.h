@@ -85,6 +85,67 @@ inline void test_failure_labels() {
         EXPECT(l.label == Label::correct && l.calcs.size() == 3 && l.wrong_calcs() == 0,
                "plain: %s, %zu calcs, %zu wrong", labels::label_name(l.label), l.calcs.size(), l.wrong_calcs());
     }
+    // A chain, link by link: "6 * 4 + 2 = 24 + 2" and "24 + 2 = 26" (rp1
+    // wrote this one; it was read as "6 * 4 + 2 = 24", wrong, and the second
+    // link was unreadable).
+    {
+        const Problem bags = problem("Tom has 6 bags of 4 apples and 2 more apples. How many apples?", "26");
+        const auto l = label_answer(bags, "He has 6 * 4 + 2 = 24 + 2 = 26 apples.\n#### 26\n");
+        EXPECT(l.label == Label::correct && l.calcs.size() == 2 && l.wrong_calcs() == 0 && l.unreadable == 0,
+               "a right chain: %s, %zu calcs, %zu wrong, %zu unreadable", labels::label_name(l.label),
+               l.calcs.size(), l.wrong_calcs(), l.unreadable);
+        EXPECT(l.calcs.size() == 2 && l.calcs[0].wrote == "24 + 2" && l.calcs[0].exact == "26" &&
+                   l.calcs[1].wrote == "26" && l.calcs[1].exact == "26" &&
+                   l.calcs[1].text == "He has 6 * 4 + 2 = 24 + 2 = 26",
+               "a right chain's links");
+        // A wrong first link: 6 * 4 + 2 is not 25 + 2; 25 + 2 is 27.
+        const auto first = label_answer(bags, "6 * 4 + 2 = 25 + 2 = 27\n#### 27\n");
+        EXPECT(first.label == Label::arithmetic && first.calcs.size() == 2 && !first.calcs[0].ok &&
+                   first.calcs[0].exact == "26" && first.calcs[1].ok,
+               "a wrong first link: %s", labels::label_name(first.label));
+        // A wrong second link: 24 + 2 is not 28.
+        const auto second = label_answer(bags, "6 * 4 + 2 = 24 + 2 = 28\n#### 28\n");
+        EXPECT(second.label == Label::arithmetic && second.calcs.size() == 2 && second.calcs[0].ok &&
+                   !second.calcs[1].ok && second.calcs[1].exact == "26",
+               "a wrong second link: %s", labels::label_name(second.label));
+        // Three links, with "x" for times.
+        const auto three = label_answer(bags, "2 x 3 x 4 + 2 = 6 x 4 + 2 = 24 + 2 = 26\n#### 26\n");
+        EXPECT(three.label == Label::correct && three.calcs.size() == 3 && three.wrong_calcs() == 0 &&
+                   three.unreadable == 0,
+               "three links: %zu calcs, %zu wrong, %zu unreadable", three.calcs.size(), three.wrong_calcs(),
+               three.unreadable);
+        // After words, the first link is not a calculation, the second is.
+        const auto words = label_answer(bags, "The total = 24 + 2 = 26\n#### 26\n");
+        EXPECT(words.calcs.size() == 1 && words.calcs[0].ok && words.calcs[0].exact == "26" && words.unreadable == 0,
+               "the total = 24 + 2 = 26: %zu calcs, %zu unreadable", words.calcs.size(), words.unreadable);
+        // Text that is not all arithmetic is no link: the first number is read.
+        const auto prose = label_answer(bags, "6 * 4 + 2 = 26 apples, so 26 = 26\n#### 26\n");
+        EXPECT(prose.calcs.size() == 1 && prose.calcs[0].ok && prose.calcs[0].wrote == "26",
+               "26 apples, so ...: %zu calcs", prose.calcs.size());
+    }
+    // A calculation after a word that comes right after a number (gen-math's
+    // fractions without notes, and rp1, write "30% of 270 is 270*30/100 =
+    // 81"): read and checked, as the calculator would read it at a clause's
+    // start; not after a one-letter or operator word, where the word may
+    // join two numbers.
+    {
+        const Problem marbles = problem("There are 270 marbles; 30% are given away. How many are left?", "189");
+        const auto right = label_answer(marbles, "30% of 270 is 270*30/100 = 81, so 270-81 = 189 are left.\n#### 189\n");
+        EXPECT(right.calcs.size() == 2 && right.wrong_calcs() == 0 && right.unreadable == 0 &&
+                   right.calcs[0].expression == "270*30/100" && right.calcs[0].exact == "81",
+               "after 'is': %zu calcs, %zu wrong, %zu unreadable", right.calcs.size(), right.wrong_calcs(),
+               right.unreadable);
+        const auto wrong = label_answer(marbles, "30% of 270 is 270*30/100 = 80, so 270-80 = 190.\n#### 190\n");
+        EXPECT(wrong.calcs.size() == 2 && wrong.wrong_calcs() == 1 && wrong.label == Label::arithmetic,
+               "a wrong one after 'is': %zu calcs, %zu wrong, %s", wrong.calcs.size(), wrong.wrong_calcs(),
+               labels::label_name(wrong.label));
+        for (const char* text : {"2 X 3 + 4 = 10\n#### 10\n", "2 times 3 + 4 = 10\n#### 10\n",
+                                 "1/2 of 8 + 2 = 6\n#### 6\n"}) {
+            const auto l = label_answer(marbles, text);
+            EXPECT(l.calcs.empty() && l.unreadable == 1, "'%s': %zu calcs, %zu unreadable", text, l.calcs.size(),
+                   l.unreadable);
+        }
+    }
     // Not calculations: an "=" after a bare number, or after words.
     {
         const auto l = label_answer(ducks, "Half of 10 = 5 and the total = 9.\n#### 9\n");

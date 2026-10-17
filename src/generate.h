@@ -397,22 +397,24 @@ inline std::vector<int> prompt_tokens(const Problem& p, const Tokenizer& tok) {
     return t;
 }
 
-// Decodes every problem from "A: " and checks the answer exactly. With
-// vote.tries == 1 (the default) this is the plain greedy evaluation. With
-// tries > 1, each problem is sampled `tries` times at vote.temperature, each
-// try from its own seeded generator (VoteOpts), and the reported answer is
-// the most common one among the tries that finished an answer line, ties
-// going to the answer that appeared first (score_tries). A try's text does
-// not depend on the batching as long as the context leaves every batch room
-// for max_new tokens (as for greedy decoding). With a calculator `tool`,
-// every try may call it (generate), and r.tool_calls counts the calls.
-// vote.no_repeat turns on the no-repeat block for every try (NoRepeat).
-// The default Tokenizer (no merges) is byte-level.
+// The text a problem's prompt gets when it does not fit in the context: it
+// is never answered, so it counts as wrong.
+inline constexpr const char* kPromptTooLong = "(the prompt does not fit in the context)";
+
+// Decodes every problem from "A: " vote.tries times and returns each try's
+// text: texts[problem][try]. With one try at temperature 0 this is the plain
+// greedy decode. Otherwise each try samples at vote.temperature from its own
+// seeded generator (VoteOpts), so a try's text does not depend on the
+// batching as long as the context leaves every batch room for max_new tokens
+// (as for greedy decoding). With a calculator `tool`, every try may call it
+// (generate), counted in *tool_calls. vote.no_repeat turns on the no-repeat
+// block for every try (NoRepeat). eval_reasoning scores these texts;
+// self-train (self_train.h) keeps the checked ones.
 template <class M>
-EvalResult eval_reasoning(M& model, const std::vector<Problem>& problems, const Tokenizer& tok = {},
-                          int batch = 64, int max_new = 200, size_t keep_failures = 8,
-                          bool keep_completions = false, const VoteOpts& vote = {},
-                          calc::Mode tool = calc::Mode::none) {
+std::vector<std::vector<std::string>> sample_tries(M& model, const std::vector<Problem>& problems,
+                                                   const Tokenizer& tok, int batch, int max_new,
+                                                   const VoteOpts& vote, calc::Mode tool,
+                                                   calc::Counts* tool_calls) {
     CHECK(batch > 0 && max_new > 0, "evaluation batch and max_new must be positive");
     CHECK(vote.tries > 0, "--tries must be positive");
     CHECK(vote.tries <= batch, "--tries %d is more than --batch %d: one problem's tries are generated together",
@@ -445,9 +447,7 @@ EvalResult eval_reasoning(M& model, const std::vector<Problem>& problems, const 
     }
     std::stable_sort(order.begin(), order.end(),
                      [&](size_t x, size_t y) { return prompts[x].size() < prompts[y].size(); });
-    std::vector<std::vector<std::string>> texts(n, std::vector<std::string>(size_t(vote.tries),
-                                                                            "(the prompt does not fit in the context)"));
-    EvalResult r;
+    std::vector<std::vector<std::string>> texts(n, std::vector<std::string>(size_t(vote.tries), kPromptTooLong));
     for (size_t k0 = 0; k0 < order.size(); k0 += group_problems) {
         const size_t k1 = std::min(order.size(), k0 + group_problems);
         std::vector<std::vector<int>> group;
@@ -461,12 +461,31 @@ EvalResult eval_reasoning(M& model, const std::vector<Problem>& problems, const 
         }
         const auto outs = generate(model, group, max_new,
                                    [&](const std::vector<int>& gen) { return completion_done(text_of(gen)); },
-                                   vote.temperature, nullptr, &rngs, tool, &tok, &r.tool_calls, vote.no_repeat);
+                                   vote.temperature, nullptr, &rngs, tool, &tok, tool_calls, vote.no_repeat);
         // Problem order[k]'s tries sit together in the group, in try order.
         for (size_t k = k0; k < k1; ++k)
             for (int t = 0; t < vote.tries; ++t)
                 texts[order[k]][size_t(t)] = text_of(outs[(k - k0) * size_t(vote.tries) + size_t(t)]);
     }
+    return texts;
+}
+
+// Decodes every problem from "A: " and checks the answer exactly. With
+// vote.tries == 1 (the default) this is the plain greedy evaluation. With
+// tries > 1, each problem is sampled `tries` times (sample_tries), and the
+// reported answer is the most common one among the tries that finished an
+// answer line, ties going to the answer that appeared first (score_tries).
+// With a calculator `tool`, r.tool_calls counts the calls. The default
+// Tokenizer (no merges) is byte-level.
+template <class M>
+EvalResult eval_reasoning(M& model, const std::vector<Problem>& problems, const Tokenizer& tok = {},
+                          int batch = 64, int max_new = 200, size_t keep_failures = 8,
+                          bool keep_completions = false, const VoteOpts& vote = {},
+                          calc::Mode tool = calc::Mode::none) {
+    EvalResult r;
+    const std::vector<std::vector<std::string>> texts =
+        sample_tries(model, problems, tok, batch, max_new, vote, tool, &r.tool_calls);
+    const size_t n = problems.size();
     r.max_new = max_new;
     r.tries = vote.tries;
     r.effort = effort_label(vote);
