@@ -200,8 +200,149 @@ inline void test_self_train_files() {
 
 }  // namespace
 
+// The re-draw check (self_train.h), on problems with hand-made versions:
+// what a right method passes, and what a lucky one fails.
+inline void test_self_train_redraw() {
+    using self_train::Verdict;
+    const self_train::Options o;
+    auto with_versions = [](const char* question, const char* answer,
+                            std::vector<std::pair<const char*, const char*>> versions) {
+        std::pair<Problem, std::vector<Problem>> out{self_train_problem(question, answer), {}};
+        for (const auto& [q, a] : versions) out.second.push_back(self_train_problem(q, a));
+        return out;
+    };
+    struct Case {
+        const char* text;
+        Verdict want;
+        const char* why;
+    };
+    auto run = [&](const std::pair<Problem, std::vector<Problem>>& pv, std::initializer_list<Case> cases,
+                   const self_train::Options& opts) {
+        for (const Case& c : cases) {
+            self_train::Trace t;
+            const Verdict got = self_train::check_try(pv.first, c.text, opts, nullptr, nullptr, &pv.second, &t);
+            EXPECT(got == c.want, "%s: '%s' is %s (formula '%s'), expected %s", c.why, c.text,
+                   self_train::verdict_name(got), t.formula.c_str(), self_train::verdict_name(c.want));
+        }
+    };
+    // 6 - 3 = 3, and half of 6 is 3 by luck: new numbers tell them apart.
+    const auto eats = with_versions("Maya has 6 apples and eats 3. How many are left?", "3",
+                                    {{"Maya has 10 apples and eats 4. How many are left?", "6"},
+                                     {"Maya has 9 apples and eats 6. How many are left?", "3"}});
+    run(eats,
+        {{"6 - 3 = 3\n#### 3\n", Verdict::kept, "the right method"},
+         {"She has 6-3 = <<6-3=3>>3 apples left.\n#### 3\n", Verdict::kept, "the right method, in a note"},
+         {"6 / 2 = 3\n#### 3\n", Verdict::redraw, "a wrong plan (half) that lands on the answer"},
+         {"Three are left.\n#### 3\n", Verdict::redraw, "an answer copied from the question (the 3 eaten)"},
+         {"6 - 3 = 3\n#### 3\n", Verdict::kept, "the same try again"}},
+        o);
+    // 4 / 2 where 4 - 2 was meant: 2 is a question number and also the
+    // usual constant 2 (half of 4), so the try is ambiguous; with every
+    // reading tried, neither works on new numbers.
+    const auto four = with_versions("Maya has 4 apples and eats 2. How many are left?", "2",
+                                    {{"Maya has 9 apples and eats 3. How many are left?", "6"},
+                                     {"Maya has 7 apples and eats 5. How many are left?", "2"}});
+    run(four,
+        {{"4 / 2 = 2\n#### 2\n", Verdict::ambiguous, "q2, or half"},
+         {"4 - 2 = 2\n#### 2\n", Verdict::ambiguous, "q2, or the constant 2"}},
+        o);
+    // Earlier results, chains and "x"; a step done in the head ("12" from
+    // 3 boxes of 4, never written) is a constant, which the first version
+    // happens to match (6 boxes of 2 are 12 too) and the second does not.
+    const auto pens = with_versions("Leo has 3 boxes of 4 pens and buys 5 more. He sees 9 birds. How many pens?", "17",
+                                    {{"Leo has 6 boxes of 2 pens and buys 8 more. He sees 21 birds. How many pens?", "20"},
+                                     {"Leo has 5 boxes of 7 pens and buys 3 more. He sees 11 birds. How many pens?", "38"}});
+    run(pens,
+        {{"3 * 4 = 12\n12 + 5 = 17\n#### 17\n", Verdict::kept, "an earlier result used again"},
+         {"3 * 4 + 5 = 12 + 5 = 17\n#### 17\n", Verdict::kept, "a chain"},
+         {"3 x 4 = 12 pens, and 12 + 5 = 17 pens.\n#### 17\n", Verdict::kept, "plain arithmetic with x"},
+         {"12 + 5 = 17\n#### 17\n", Verdict::redraw, "a step done in the head"},
+         {"Leo has seventeen pens.\n#### 17\n", Verdict::unchecked, "an answer reached in prose"}},
+        o);
+    // The distractor's number as the answer; a result equal to a question
+    // number (12 pens, 12 birds): which one the model used is unknown.
+    const auto birds = with_versions("Leo has 3 boxes of 4 pens and buys 5 more. He sees 17 birds. How many pens?", "17",
+                                     {{"Leo has 6 boxes of 2 pens and buys 8 more. He sees 21 birds. How many pens?", "20"},
+                                      {"Leo has 5 boxes of 7 pens and buys 3 more. He sees 12 birds. How many pens?", "38"}});
+    run(birds,
+        {{"He sees 17 birds, so 17 pens.\n#### 17\n", Verdict::redraw, "the distractor's number as the answer"},
+         {"3 * 4 = 12\n12 + 5 = 17\n#### 17\n", Verdict::kept, "the right method"}},
+        o);
+    const auto twelve = with_versions("Leo has 3 boxes of 4 pens and buys 5 more. He sees 12 birds. How many pens?",
+                                      "17", {{"Leo has 6 boxes of 2 pens and buys 8 more. He sees 21 birds. How many pens?", "20"}});
+    run(twelve, {{"3 * 4 = 12\n12 + 5 = 17\n#### 17\n", Verdict::ambiguous, "12: the pens, or the birds"}}, o);
+    // A real constant (100 for a percentage) survives new numbers.
+    const auto sale = with_versions("A shirt costs $40 and is 25% off. What does it cost now?", "30",
+                                    {{"A shirt costs $80 and is 50% off. What does it cost now?", "40"},
+                                     {"A shirt costs $60 and is 15% off. What does it cost now?", "51"}});
+    run(sale,
+        {{"40 * 25 / 100 = 10\n40 - 10 = 30\n#### 30\n", Verdict::kept, "a percentage with the constant 100"},
+         {"40 * 0.75 = 30\n#### 30\n", Verdict::redraw, "0.75 is 25% off only here"}},
+        o);
+    self_train::Trace t;
+    self_train::check_try(sale.first, "40 * 25 / 100 = 10\n40 - 10 = 30\n#### 30\n", o, nullptr, nullptr, &sale.second,
+                          &t);
+    EXPECT(t.formula == "q1 - (q1 * q2 / 100)" && t.constants == std::vector<std::string>{"100"} &&
+               t.values == (std::vector<std::string>{"40", "51"}) && t.passed,
+           "the trace: formula '%s', %zu constants, values %s %s", t.formula.c_str(), t.constants.size(),
+           t.values.empty() ? "" : t.values[0].c_str(), t.values.size() < 2 ? "" : t.values[1].c_str());
+    // Two numbers alike in the question: which one the model used is unknown.
+    const auto pears = with_versions("Sam has 2 bags of 2 pears. How many pears?", "4",
+                                     {{"Sam has 3 bags of 5 pears. How many pears?", "15"}});
+    run(pears, {{"2 * 2 = 4\n#### 4\n", Verdict::ambiguous, "two question numbers alike"},
+                {"2 + 2 = 4\n#### 4\n", Verdict::ambiguous, "two question numbers alike, either way"}},
+        o);
+    // With every reading tried, an ambiguous try passes if one reading
+    // works on every version, and fails if none does.
+    self_train::Options every;
+    every.every_reading = true;
+    run(pears, {{"2 * 2 = 4\n#### 4\n", Verdict::kept, "bags times pears is one reading"},
+                {"2 + 2 = 4\n#### 4\n", Verdict::redraw, "no reading of 2 + 2 is 3 bags of 5"}},
+        every);
+    run(four, {{"4 - 2 = 2\n#### 2\n", Verdict::kept, "4 - q2 is one reading"},
+               {"4 / 2 = 2\n#### 2\n", Verdict::redraw, "neither 4 / q2 nor half of 4"}},
+        every);
+    run(twelve, {{"3 * 4 = 12\n12 + 5 = 17\n#### 17\n", Verdict::kept, "the pens' 12 is one reading"}}, every);
+    run(eats, {{"6 / 2 = 3\n#### 3\n", Verdict::redraw, "every reading changes nothing here"}}, every);
+    // No versions (the story could not be drawn again): unchecked, or kept
+    // with --keep-unchecked, as is an answer reached in prose.
+    const std::pair<Problem, std::vector<Problem>> none{eats.first, {}};
+    run(none, {{"6 - 3 = 3\n#### 3\n", Verdict::unchecked, "no versions"}}, o);
+    self_train::Options keep;
+    keep.keep_unchecked = true;
+    run(none, {{"6 - 3 = 3\n#### 3\n", Verdict::kept, "no versions, --keep-unchecked"}}, keep);
+    run(pens, {{"Leo has seventeen pens.\n#### 17\n", Verdict::kept, "prose, --keep-unchecked"},
+               {"12 + 5 = 17\n#### 17\n", Verdict::redraw, "--keep-unchecked keeps no lucky try"}},
+        keep);
+
+    // keep_checked: a problem without a recipe keeps its tries unchecked
+    // (counted), the others are checked; the counters.
+    const std::vector<Problem> ps = {eats.first, sale.first, eats.first};
+    const std::vector<std::vector<std::string>> texts = {
+        {"6 - 3 = 3\n#### 3\n", "6 / 2 = 3\n#### 3\n"},
+        {"40 * 25 / 100 = 10\n40 - 10 = 30\n#### 30\n", "40 * 0.75 = 30\n#### 30\n"},
+        {"6 / 2 = 3\n#### 3\n", "Three are left.\n#### 3\n"},
+    };
+    const std::vector<std::optional<std::vector<Problem>>> versions = {eats.second, sale.second, std::nullopt};
+    const self_train::Result r = self_train::keep_checked(ps, texts, o, &versions);
+    const std::vector<std::vector<Verdict>> want = {{Verdict::kept, Verdict::redraw},
+                                                    {Verdict::kept, Verdict::redraw},
+                                                    {Verdict::kept, Verdict::kept}};
+    for (size_t i = 0; i < want.size(); ++i)
+        for (size_t k = 0; k < want[i].size(); ++k)
+            EXPECT(r.verdicts[i][k] == want[i][k], "problem %zu try %zu: %s, expected %s", i, k,
+                   self_train::verdict_name(r.verdicts[i][k]), self_train::verdict_name(want[i][k]));
+    // With constants: the sale's two tries (100, 0.75) and half of 6 (2).
+    EXPECT(r.kept.size() == 4 && r.count(Verdict::redraw) == 2 && r.no_recipe == 2 && r.with_constants == 3 &&
+               r.with_constants_passed == 1 && r.kept_unchecked == 0 && !r.traces[0][1].passed &&
+               r.traces[0][1].ran && !r.traces[2][0].ran,
+           "kept %zu, redraw %zu, no recipe %zu, with constants %zu (passed %zu), kept unchecked %zu", r.kept.size(),
+           r.count(Verdict::redraw), r.no_recipe, r.with_constants, r.with_constants_passed, r.kept_unchecked);
+}
+
 inline void test_self_train() {
     test_self_train_check();
     test_self_train_keep();
     test_self_train_files();
+    test_self_train_redraw();
 }

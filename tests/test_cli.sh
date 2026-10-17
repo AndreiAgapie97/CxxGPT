@@ -649,9 +649,35 @@ grep -q '"keep":2,' "$TEST_DIR/self-a.json"
 # --exclude drops a problem that repeats an excluded question.
 "$CXXGPT" self-train --ckpt "$TEST_DIR/audit.ckpt" --problems "$TEST_DIR/audit.txt" --out "$TEST_DIR/self-x"     --exclude "$TEST_DIR/audit.txt" --tries 2 --max-new 4 --threads 2 > "$TEST_DIR/self-x.log"
 grep -q '^0 problems (1 excluded), ' "$TEST_DIR/self-x.log"
+# The re-draw check: gen-word/gen-math --recipes writes one recipe per
+# problem and leaves the problems as they are; self-train draws each one
+# again (3 versions by default), records it in the summary and the JSON,
+# and refuses a recipe file of another length or for other problems.
+"$CXXGPT" gen-word --out "$TEST_DIR/redraw-word" --seed 5 --count 6 > /dev/null
+"$CXXGPT" gen-word --out "$TEST_DIR/redraw-word-r" --seed 5 --count 6 --recipes "$TEST_DIR/redraw-word.recipes" > /dev/null
+cmp "$TEST_DIR/redraw-word.txt" "$TEST_DIR/redraw-word-r.txt"
+[[ $(wc -l < "$TEST_DIR/redraw-word.recipes") == 6 ]]
+grep -q '^word distractors=1 test=0 steps=[2-8] shape=[0-5] state=' "$TEST_DIR/redraw-word.recipes"
+"$CXXGPT" gen-math --topic fractions --out "$TEST_DIR/redraw-frac" --seed 5 --count 6 \
+    --recipes "$TEST_DIR/redraw-frac.recipes" > /dev/null
+grep -q '^fractions distractors=1 test=0 steps=0 shape=[0-6] state=' "$TEST_DIR/redraw-frac.recipes"
+"$CXXGPT" self-train --ckpt "$TEST_DIR/audit.ckpt" --problems "$TEST_DIR/redraw-word.txt" --out "$TEST_DIR/self-r" \
+    --recipes "$TEST_DIR/redraw-word.recipes" --tries 2 --max-new 4 --threads 2 > "$TEST_DIR/self-r.log"
+grep -q '^re-draw check: 6 of 6 problems drawn again 3 times' "$TEST_DIR/self-r.log"
+grep -q '"redraws":3,' "$TEST_DIR/self-r.json"
+grep -q '"redrawn":6,' "$TEST_DIR/self-r.json"
+head -n 4 "$TEST_DIR/redraw-word.recipes" > "$TEST_DIR/redraw-short.recipes"
+for case in 'redraw-short:has 4 recipes for 6 problems' 'redraw-frac:the recipe does not make this problem'; do
+    status=0
+    "$CXXGPT" self-train --ckpt "$TEST_DIR/audit.ckpt" --problems "$TEST_DIR/redraw-word.txt" \
+        --out "$TEST_DIR/self-bad" --recipes "$TEST_DIR/${case%%:*}.recipes" --tries 2 --max-new 4 --threads 2 \
+        > "$TEST_DIR/self-bad.log" 2>&1 || status=$?
+    [[ "$status" == 1 ]]
+    grep -q "${case#*:}" "$TEST_DIR/self-bad.log"
+done
 # Refused: greedy tries (all the same), a negative cap, an unknown tool,
 # --gpu on the CPU build, a missing --out.
-for options in '--temp 0' '--keep -1' '--tools bogus' '--gpu' '--matmul bf16' '--tries 0'; do
+for options in '--temp 0' '--keep -1' '--tools bogus' '--gpu' '--matmul bf16' '--tries 0' '--redraws 3'; do
     status=0
     "$CXXGPT" self-train --ckpt "$TEST_DIR/audit.ckpt" --problems "$TEST_DIR/audit.txt" --out "$TEST_DIR/self-bad"         $options --threads 2 > "$TEST_DIR/self-bad.log" 2>&1 || status=$?
     [[ "$status" == 1 ]]

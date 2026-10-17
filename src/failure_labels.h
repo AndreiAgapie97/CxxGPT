@@ -75,11 +75,14 @@ inline const char* label_name(Label l) {
 // One written calculation the calculator could read: where its "=" is, the
 // text it sits in, what the model wrote after the "=" (a number, or the
 // next link of a chain: "24 + 2") and the exact value. `negative`: what was
-// written is below zero ("-3", or "-5 + 2"); ok ignores signs.
+// written is below zero ("-3", or "-5 + 2"); ok ignores signs. `expression`:
+// the left side as the calculator read it ("84+4", "16 * 7" for "16 x 7"),
+// for the re-draw check (self_train.h).
 struct Calculation {
     size_t at = 0;
     std::string text, wrote, exact;
     bool ok = false, negative = false;
+    std::string expression;
 };
 
 struct AnswerLabel {
@@ -247,7 +250,8 @@ inline void check_calculations(std::string_view work, AnswerLabel& out) {
     for (size_t i = 0; i < work.size(); ++i) {
         if (work[i] != '=') continue;
         // Notes: the prefix ends at the "=".
-        if (const auto r = calc::response(work.substr(0, i + 1), calc::Mode::notes)) {
+        std::string expression;
+        if (const auto r = calc::response(work.substr(0, i + 1), calc::Mode::notes, &expression)) {
             const size_t close = work.find(">>", i);
             const std::string_view wrote =
                 work.substr(i + 1, close == std::string_view::npos ? 0 : close - i - 1);
@@ -256,7 +260,7 @@ inline void check_calculations(std::string_view work, AnswerLabel& out) {
             const auto exact = result.empty() ? std::nullopt : value_of(result);
             if (got && exact && close != std::string_view::npos) {
                 out.calcs.push_back({i, around(work, i, close + 2), std::string(wrote), result,
-                                     same(magnitude(*got), *exact), got->num < 0});
+                                     same(magnitude(*got), *exact), got->num < 0, expression});
             } else {
                 ++out.unreadable;
             }
@@ -270,12 +274,14 @@ inline void check_calculations(std::string_view work, AnswerLabel& out) {
         // The left side: what the calculator reads before " = ", or else, in
         // a chain, the link before this one ("24 + 2" in "... = 24 + 2 = 26";
         // the calculator stops at the earlier "=" and finds nothing to read).
-        auto r = calc::response(work.substr(0, after), calc::Mode::plain);
+        auto r = calc::response(work.substr(0, after), calc::Mode::plain, &expression);
         if (!r || r->empty()) {
             const size_t prev = i >= 4 ? work.rfind(" = ", i - 4) : std::string_view::npos;
             if (prev != std::string_view::npos && prev >= line_begin)
-                if (const auto link = whole_calculation(work.substr(prev + 3, i - 1 - (prev + 3))))
+                if (const auto link = whole_calculation(work.substr(prev + 3, i - 1 - (prev + 3)))) {
                     r = calc::evaluate(*link).value_or("");
+                    expression = *link;
+                }
         }
         if (!r) continue;  // not a calculation: "x = 5", "The total = ..."
         // The left side's value (a plain Rational and a flag, not an optional:
@@ -297,7 +303,8 @@ inline void check_calculations(std::string_view work, AnswerLabel& out) {
                 }
                 const calc::Rational v = calc::Parser(*link).parse().value_or(calc::Rational{});
                 const std::string wrote(trim_blanks(work.substr(after, next - after)));
-                out.calcs.push_back({i, around(work, i, next), wrote, *r, same(magnitude(v), exact), v.num < 0});
+                out.calcs.push_back(
+                    {i, around(work, i, next), wrote, *r, same(magnitude(v), exact), v.num < 0, expression});
                 continue;
             }
         }
@@ -309,7 +316,7 @@ inline void check_calculations(std::string_view work, AnswerLabel& out) {
         }
         const Number& n = nums[0];
         out.calcs.push_back({i, around(work, i, after + n.end), std::string(work.substr(after, n.end)), *r,
-                             same(n.value, exact), false});
+                             same(n.value, exact), false, expression});
     }
 }
 

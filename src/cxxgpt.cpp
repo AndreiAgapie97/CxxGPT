@@ -48,6 +48,7 @@
 #include "qa_context.h"
 #include "reasoning.h"
 #include "reason_report.h"
+#include "redraw.h"
 #include "self_train.h"
 #include "tokenizer.h"
 #include "train.h"
@@ -528,6 +529,8 @@ int cmd_gen_word(Args& a) {
     const int64_t min_steps = a.integer("min-steps", 2), max_steps = a.integer("max-steps", 8);
     const std::string split = a.str("split", "train");
     const std::string distractors = a.str("distractors", "on"), notes = a.str("notes", "on");
+    // How to make each problem again, for self-train's re-draw check (redraw.h).
+    const std::string recipes_path = a.str("recipes", "");
     a.done();
     CHECK(!out.empty(), "--out must be a nonempty prefix");
     CHECK(count >= 0 && seed >= 0, "--count and --seed must be nonnegative");
@@ -537,8 +540,10 @@ int cmd_gen_word(Args& a) {
     CHECK(distractors == "on" || distractors == "off", "--distractors must be on or off");
     CHECK(notes == "on" || notes == "off", "--notes must be on or off");
     const WordOptions options{int(min_steps), int(max_steps), distractors == "on", notes == "on", split == "test"};
-    const auto problems = make_word_problems(uint64_t(seed), count, options);
+    std::vector<Recipe> recipes;
+    const auto problems = make_word_problems(uint64_t(seed), count, options, &recipes);
     write_problem_files(out, problems);
+    if (!recipes_path.empty()) redraw::save_recipes(recipes_path, recipes);
     std::printf("%s.txt and %s.text: %zu %s word problems, %lld..%lld steps\n", out.c_str(), out.c_str(),
                 problems.size(), split.c_str(), (long long)min_steps, (long long)max_steps);
     return 0;
@@ -555,6 +560,8 @@ int cmd_gen_math(Args& a) {
     const std::string distractors = a.str("distractors", "on"), notes = a.str("notes", "on");
     // Questions not to repeat, such as GSM8K test and dev (README, gen-math).
     const std::string exclude = a.str("exclude", "");
+    // How to make each problem again, for self-train's re-draw check (redraw.h).
+    const std::string recipes_path = a.str("recipes", "");
     a.done();
     CHECK(topic == "equations" || topic == "fractions", "--topic must be equations or fractions");
     CHECK(!out.empty(), "--out must be a nonempty prefix");
@@ -565,9 +572,11 @@ int cmd_gen_math(Args& a) {
     std::unique_ptr<Exclusions> exclusions;
     if (!exclude.empty()) exclusions = std::make_unique<Exclusions>(exclude);
     const MathOptions options{distractors == "on", notes == "on", split == "test", exclusions.get()};
-    const auto problems = topic == "equations" ? make_equation_problems(uint64_t(seed), count, options)
-                                               : make_fraction_problems(uint64_t(seed), count, options);
+    std::vector<Recipe> recipes;
+    const auto problems = topic == "equations" ? make_equation_problems(uint64_t(seed), count, options, &recipes)
+                                               : make_fraction_problems(uint64_t(seed), count, options, &recipes);
     write_problem_files(out, problems);
+    if (!recipes_path.empty()) redraw::save_recipes(recipes_path, recipes);
     std::printf("%s.txt and %s.text: %zu %s %s problems, each solved again by the checker\n", out.c_str(),
                 out.c_str(), problems.size(), split.c_str(), topic.c_str());
     if (exclusions)
@@ -943,6 +952,20 @@ int cmd_self_train(Args& a) {
     opts.allow_loops = a.flag("allow-loops");
     // Keep tries that copy the problem file's own solution word for word.
     opts.keep_gold = a.flag("keep-gold");
+    // The re-draw check (redraw.h): each generated problem's story written
+    // again with other numbers, --redraws times, from gen-word/gen-math
+    // --recipes; a try is kept only if its calculations give every
+    // version's answer. 0: no check.
+    const std::string recipes_path = a.str("recipes", "");
+    const int redraws = a.integer_int("redraws", recipes_path.empty() ? 0 : 3);
+    CHECK(redraws >= 0, "--redraws must not be negative");
+    CHECK(redraws == 0 || !recipes_path.empty(), "--redraws needs --recipes FILE (gen-word/gen-math --recipes)");
+    // Keep the tries the re-draw check cannot check (no formula for the
+    // answer, or a story that could not be drawn again).
+    opts.keep_unchecked = a.flag("keep-unchecked");
+    // A try whose numbers could come from two places passes if one choice
+    // gives every version's answer (by default it is dropped as ambiguous).
+    opts.every_reading = a.flag("every-reading");
     // Questions not to train on, such as GSM8K test and dev (gen-math's rule).
     const std::string exclude = a.str("exclude", "");
     // Every try's text and verdict, one JSON line per try, for audits.
@@ -955,7 +978,8 @@ int cmd_self_train(Args& a) {
     CHECK(matmul == "fp32" || matmul == "tf32" || matmul == "bf16", "--matmul takes fp32, tf32 or bf16");
     a.done();
     CHECK(!problems_path.empty() && !out.empty(),
-          "usage: cxxgpt self-train --ckpt model.ckpt --problems FILE.txt --out PREFIX [--tries 8 --temp 0.7]");
+          "usage: cxxgpt self-train --ckpt model.ckpt --problems FILE.txt --out PREFIX [--tries 8 --temp 0.7] "
+          "[--recipes FILE --redraws 3]");
 #ifndef CXXGPT_CUDA
     CHECK(!use_gpu, "this cxxgpt was built without CUDA; use cxxgpt-gpu (make gpu) for --gpu");
 #endif
@@ -981,6 +1005,12 @@ int cmd_self_train(Args& a) {
     // Each problem keeps its place in the file as its number, so its tries
     // are seeded the same whatever --limit or --exclude leave out.
     const std::vector<Problem> all = load_problems(problems_path);
+    std::vector<Recipe> recipes;
+    if (redraws > 0) {
+        recipes = redraw::load_recipes(recipes_path);
+        CHECK(recipes.size() == all.size(), "%s has %zu recipes for %zu problems in %s", recipes_path.c_str(),
+              recipes.size(), all.size(), problems_path.c_str());
+    }
     std::vector<Problem> problems;
     std::unique_ptr<Exclusions> exclusions;
     if (!exclude.empty()) exclusions = std::make_unique<Exclusions>(exclude);
@@ -995,6 +1025,22 @@ int cmd_self_train(Args& a) {
         problems.push_back(all[place]);
         vote.problem_ids.push_back(place);
     }
+    // Each problem's versions, seeded from --seed and its place in the file.
+    std::vector<std::optional<std::vector<Problem>>> versions(problems.size());
+    size_t redrawn = 0, draws = 0;
+    if (redraws > 0)
+        for (size_t i = 0; i < problems.size(); ++i) {
+            const size_t place = vote.problem_ids[i];
+            const redraw::Versions v = redraw::versions_of(recipes[place], problems[i], redraws,
+                                                           uint64_t(seed) * 0x100000001B3ull + place);
+            draws += v.draws;
+            if (int(v.versions.size()) == redraws) {
+                versions[i] = v.versions;
+                ++redrawn;
+            } else {
+                versions[i] = std::vector<Problem>();  // could not be re-drawn: its tries are unchecked
+            }
+        }
     const double t0 = now_seconds();
     calc::Counts calls;
     std::vector<std::vector<std::string>> texts;
@@ -1005,7 +1051,7 @@ int cmd_self_train(Args& a) {
     }
 #endif
     if (texts.empty() && !problems.empty()) texts = sample_tries(model, problems, tok, batch, max_new, vote, tool, &calls);
-    const self_train::Result r = self_train::keep_checked(problems, texts, opts);
+    const self_train::Result r = self_train::keep_checked(problems, texts, opts, redraws > 0 ? &versions : nullptr);
     self_train::write(out, r.kept, tok);
 
     auto pct = [](size_t part, size_t whole) { return 100.0 * double(part) / double(std::max<size_t>(1, whole)); };
@@ -1023,6 +1069,12 @@ int cmd_self_train(Args& a) {
                 r.unreadable);
     if (tool != calc::Mode::none)
         std::printf("calculator calls: %zu fired, %zu malformed\n", calls.fired, calls.malformed);
+    if (redraws > 0)
+        std::printf("re-draw check: %zu of %zu problems drawn again %d times (%zu stories drawn); "
+                    "%zu tries with a constant on the answer's path, %zu of them passed; %zu kept unchecked "
+                    "(--keep-unchecked); %zu ambiguous tries passed through one reading (--every-reading)\n",
+                    redrawn, r.problems, redraws, draws, r.with_constants, r.with_constants_passed, r.kept_unchecked,
+                    r.ambiguous_passed);
     std::printf("kept %zu solutions -> %s.txt, %s.tok, %s.json (%.1f s)\n", r.kept.size(), out.c_str(),
                 out.c_str(), out.c_str(), now_seconds() - t0);
 
@@ -1037,7 +1089,15 @@ int cmd_self_train(Args& a) {
                        str(tool == calc::Mode::notes ? "calc-notes" : tool == calc::Mode::plain ? "calc-plain" : "none") +
                        ",\"keep\":" + std::to_string(opts.keep) + ",\"allow_loops\":" +
                        (opts.allow_loops ? "true" : "false") + ",\"keep_gold\":" +
-                       (opts.keep_gold ? "true" : "false") + ",\"gpu\":" + (use_gpu ? "true" : "false") +
+                       (opts.keep_gold ? "true" : "false") + ",\"recipes\":" + str(recipes_path) +
+                       ",\"redraws\":" + std::to_string(redraws) + ",\"keep_unchecked\":" +
+                       (opts.keep_unchecked ? "true" : "false") + ",\"every_reading\":" +
+                       (opts.every_reading ? "true" : "false") + ",\"ambiguous_passed\":" +
+                       std::to_string(r.ambiguous_passed) + ",\"redrawn\":" + std::to_string(redrawn) +
+                       ",\"redraw_draws\":" + std::to_string(draws) + ",\"with_constants\":" +
+                       std::to_string(r.with_constants) + ",\"with_constants_passed\":" +
+                       std::to_string(r.with_constants_passed) + ",\"kept_unchecked\":" +
+                       std::to_string(r.kept_unchecked) + ",\"gpu\":" + (use_gpu ? "true" : "false") +
                        ",\"matmul\":" + str(matmul) + ",\"problems_tried\":" + std::to_string(r.problems) +
                        ",\"excluded\":" + std::to_string(excluded) + ",\"first_right\":" +
                        std::to_string(r.first_right) + ",\"solved\":" + std::to_string(r.solved) +
@@ -1053,11 +1113,30 @@ int cmd_self_train(Args& a) {
         FILE* log = create_file(audit_path, "wb");
         CHECK(log, "cannot write %s", audit_path.c_str());
         for (size_t i = 0; i < problems.size(); ++i)
-            for (size_t t = 0; t < texts[i].size(); ++t)
-                CHECK(std::fprintf(log, "{\"problem\":%zu,\"try\":%zu,\"verdict\":%s,\"text\":%s}\n",
+            for (size_t t = 0; t < texts[i].size(); ++t) {
+                // The re-draw check's record, when it ran: the formula, its
+                // constants, and its value against each version's answer.
+                std::string check;
+                const self_train::Trace& tr = r.traces[i][t];
+                if (tr.ran) {
+                    check = ",\"redraw\":{\"formula\":" + str(tr.formula) + ",\"ambiguous\":" +
+                            (tr.ambiguous ? "true" : "false") + ",\"readings\":" + std::to_string(tr.readings) +
+                            ",\"passed\":" + (tr.passed ? "true" : "false") +
+                            ",\"constants\":[";
+                    for (size_t k = 0; k < tr.constants.size(); ++k) check += (k ? "," : "") + str(tr.constants[k]);
+                    check += "],\"versions\":[";
+                    const std::vector<Problem>& vs = *versions[i];
+                    for (size_t k = 0; k < vs.size(); ++k)
+                        check += std::string(k ? "," : "") + "{\"question\":" + str(vs[k].question) +
+                                 ",\"answer\":" + str(vs[k].answer) + ",\"formula_gives\":" +
+                                 str(k < tr.values.size() ? tr.values[k] : "") + "}";
+                    check += "]}";
+                }
+                CHECK(std::fprintf(log, "{\"problem\":%zu,\"try\":%zu,\"verdict\":%s%s,\"text\":%s}\n",
                                    vote.problem_ids[i], t, str(self_train::verdict_name(r.verdicts[i][t])).c_str(),
-                                   str(texts[i][t]).c_str()) >= 0,
+                                   check.c_str(), str(texts[i][t]).c_str()) >= 0,
                       "error writing %s", audit_path.c_str());
+            }
         CHECK(std::fclose(log) == 0, "error writing %s", audit_path.c_str());
         std::printf("every try: %s\n", audit_path.c_str());
     }

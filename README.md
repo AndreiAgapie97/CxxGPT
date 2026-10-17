@@ -259,8 +259,9 @@ try order, so the same seed writes the same files:
 The summary gives the problems tried, the first try's accuracy, the
 problems any try solved (pass@N) and those with a kept solution, and every
 try's verdict (`kept`, `unfinished`, `wrong`, `no_work`, `markers`,
-`arithmetic`, `loop`, `gold_copy`, `duplicate`, `over_cap`, `too_long`); `--audit
-FILE.jsonl` writes every try's text and verdict. `--tools calc-notes`
+`arithmetic`, `loop`, `gold_copy`, `ambiguous`, `unchecked`, `redraw`,
+`duplicate`, `over_cap`, `too_long`); `--audit FILE.jsonl` writes every
+try's text and verdict. `--tools calc-notes`
 lets the calculator finish the model's notes while it writes, as in
 `eval-reasoning`.
 
@@ -299,6 +300,60 @@ each.)
   try on `gen-math`. `self-train` pays where the model solves problems
   whose text is not already in its training: problems with an answer but
   no worked solution, or kinds of problem it has not been taught.
+
+#### The re-draw check: right by method, not by luck
+
+The checks above do not see a wrong plan that lands on the right number:
+"6 / 2 = 3" (half) where the story needed "6 - 3". A right method stays
+right when the question's numbers change; a lucky one almost never does.
+So, for generated problems (`src/redraw.h`, docs/research-plan.md item 3):
+
+```sh
+build/cxxgpt gen-word --out data/self/word --seed 77 --count 100 --recipes data/self/word.recipes
+build/cxxgpt-gpu self-train --gpu --ckpt runs/rp1.ckpt --bpe data/licensed-10b/tok.bpe \
+    --problems data/self/word.txt --recipes data/self/word.recipes --out data/self/rp1-word --tries 8
+```
+
+1. `gen-word`/`gen-math --recipes FILE` also writes, per problem, how to
+   make it again: the generator, its options and the random state its story
+   was drawn from (the problems themselves do not change).
+2. `self-train` makes each story again with other numbers (`--redraws 3`
+   versions): the same people, sentences and steps, new numbers, and the
+   generator's own exact answer. The generators tell their two kinds of
+   random choices apart (`Choices`, `src/wordgen.h`): what the story is,
+   recorded and played back, and the numbers, drawn again. A version
+   counts only if its question and its worked solution are the original's
+   once every number is masked (`Maya has # boxes of # cards`), so the plan
+   is the same step for step, and, for `gen-math`, the topic's second solver
+   accepts it.
+3. The try's calculations become a formula over the question's numbers:
+   each number in a calculation is a number of the question (`q3`), an
+   earlier result (whose formula takes its place) or a constant (1, 2,
+   100, a number the question gives in words, or one from nowhere else).
+   For "40 * 25 / 100 = 10, 40 - 10 = 30" it is `q1 - (q1 * q2 / 100)`.
+4. The formula is worked out exactly with each version's numbers, and the
+   try is kept only if it gives every version's answer (`redraw` if not).
+
+Constants stay the same in every version: a real one (100 for a
+percentage) passes, and a number the model worked out without writing it
+down ("12" for 3 boxes of 4) fails. A number with two possible sources (two
+question numbers alike, a question number equal to an earlier result, a
+question number that is also 1, 2 or 100, or two calculations giving the
+answer) leaves the try **ambiguous**: dropped by default, or, with
+`--every-reading`, kept if one choice of sources gives every version's
+answer (the summary counts those either way). A try with no formula for
+its answer (an answer stated in prose) or a problem that could not be drawn
+again is `unchecked`: dropped, or kept with `--keep-unchecked`. A problem
+without a recipe (GSM8K train) is not checked, and its kept tries are
+counted. The audit file records, per try, the formula, its constants, each
+version's question and answer and what the formula gave.
+
+On the generators' own solutions (300 problems per topic,
+`tests/test_redraw.h`): with one reading, 108 of 300 word problems, 167 of
+296 equations and 202 of 300 fractions pass, the rest being ambiguous
+(their questions repeat small numbers); with every reading tried, all
+word problems and equations pass, and 299 of 300 fractions (one with more
+combinations than are followed).
 
 ### Generated word problems
 
