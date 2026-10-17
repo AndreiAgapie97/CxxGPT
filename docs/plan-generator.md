@@ -230,9 +230,11 @@ Here:
   draws one graph in every solution order and every sentence order and
   checks it gets one hash;
 - a signature whose hash (mod 23) is 17 or more is a **test plan**
-  (about a quarter), the rest are training plans. iGSM uses the same rule;
+  (about a quarter), the rest are training plans; `--plans` picks which.
+  iGSM uses the same rule;
 - sentence wordings are split as in the other generators (some frames for
-  train, the others for test).
+  train, the others for test); `--wording` picks which, independently of
+  `--plans`.
 
 The two splits are chosen apart: `--plans train|test` and `--wording
 train|test` (`--split` sets both, so training data is `--split train`:
