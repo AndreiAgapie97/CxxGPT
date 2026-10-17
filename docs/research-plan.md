@@ -144,17 +144,18 @@ balancing fix along: more experts means more of them to keep alive.
 
 ## Data: teaching it better without code
 
-**What the models learn from.** Rough shares of the training mix (README,
-"The training data"), by tokens:
+**What the models learn from.** Shares of rp1's mix (2026-10-16, 1.63B
+tokens a pass; README, "The training data"), by tokens:
 
 | Source | Share | What it is |
 |---|---|---|
-| DOAB books | ~39% | open academic books |
-| arXiv | ~17% | openly licensed papers |
-| textbooks, ×2 | ~21% | open textbooks |
-| Wikimedia | ~15% | Wikipedia, Wikibooks, Wikisource, Wikinews articles |
-| word problems | ~8% | 1M exact `gen-word` problems |
-| GSM8K train, ×8 | ~0.4% | the 6,966 real problems left after the dev set |
+| word problems, ×3 | 36.8% | 973k audited `gen-word` problems |
+| DOAB books | 26.7% | open academic books |
+| arXiv | 18.4% | openly licensed papers |
+| equations, fractions | 10.7% | `gen-math --topic equations`, `--topic fractions` |
+| GSM8K train, ×64 | 4.9% | the 6,966 real problems left after the dev set |
+| reasoning curriculum | 1.6% | `gen-reasoning` |
+| textbooks | 0.9% | open textbooks |
 
 **1. A math cool-down at the end.**
 - What a model sees in the last stretch of training, while the learning rate
@@ -174,8 +175,12 @@ balancing fix along: more experts means more of them to keep alive.
   one did what.
 
 **2. A better everyday mix.**
-- Raise GSM8K's repeat factor (×8 now). Up to about 4 passes over the same
-  data cost little compared with fresh data (Muennighoff et al., 2023).
+- Up to about 4 passes over the same data cost little compared with fresh
+  data; beyond about 16, repeats stop helping (Muennighoff et al., 2023).
+  GSM8K train is far past that at ×64 a pass, and the word problems repeat
+  ×3, while the generators can write new problems for free. See "Steering
+  what the model practices" below for what rp1's first night showed and
+  the next mix.
 
 **3. Answers with their questions (issue #15).**
 - Random training windows often start inside a math problem, so the answer
@@ -218,6 +223,59 @@ balancing fix along: more experts means more of them to keep alive.
 - Night 1 trained on all of GSM8K train, so judge a continuation of it on the
   GSM8K test (sparingly, recorded per the measurement rules) or on a separate
   set such as SVAMP. A model trained from scratch can use the dev set.
+
+## Steering what the model practices (2026-10-17)
+
+**What rp1's first night showed** (steps 46,946 to about 58,000, flat
+`LR` 1.2e-4, `--val-sources`):
+- GSM8K dev's answer loss went 1.79 -> 1.62 in the first 54 steps, then
+  crept up to about 1.89, while the training loss fell (1.36 -> 1.31) and
+  the loss on GSM8K's final answers alone fell (0.090 -> 0.077). The new
+  generated problems (equations, fractions, reasoning) fell fast in the
+  first hour and then held; the general text stayed flat or improved a
+  little.
+- The exams (greedy, 250 dev problems, answers cut at 200 new tokens)
+  moved between 1.6% and 5.2%: with 250 problems, about one point either
+  way is chance, so one level of about 3% fits them all.
+- Two causes fit: GSM8K train memorized (it has been ×64 a pass for the
+  model's whole life), or the new problem types pulling the model away from
+  GSM8K's style. The check: the answer loss on GSM8K train against dev on
+  the same checkpoint (`eval-loss --all`). Far apart means memorization.
+
+**The order of the next steps.** An outside suggestion (a conversation with
+ChatGPT, 2026-10-17) was an adaptive "teacher": a controller that measures
+each skill during training and changes the data mix, difficulty and replay
+live. The idea is sound, but cheaper steps come first, and each tells us
+whether the next is worth building:
+1. **Fix the mix by hand.** GSM8K ×64 -> ×8-16; new `gen-word` problems in
+   place of the ×3 repeats (new seeds, the same audit); unused shards of
+   the 10B licensed set in place of repeated ones. No code.
+2. **Accuracy per skill.** The exams report per topic and difficulty
+   (operations, number size, equations, fractions, reasoning levels), not
+   only per source loss, on problems generated fresh for each exam. That is
+   the controller's input, and also catches forgetting a skill the overall
+   score hides.
+3. **Learning from its own checked solutions** (bet 3, `self-train`). First
+   measure the room for it: if maj@8 and pass@8 on the dev set are far
+   above greedy, there are right solutions the model can learn to give at
+   once; if not, there is little to keep yet.
+4. **The controller, once a night.** A script that reads step 2's per-skill
+   accuracy and writes the next night's mix and generator knobs (idea D,
+   "A generator at the edge of ability"). A restart costs about two
+   minutes, so changing the mix between runs tests "does adapting the mix
+   help?" without live machinery. A live mix (new weights between batches
+   without a restart) only if that test wins.
+
+**Rules for any controller.**
+- It decides on its own problems, generated fresh, never on the dev or test
+  sets: a controller tuned on the dev set makes the dev score meaningless.
+- Retention is measured, not assumed: the general-text sources, accuracy on
+  skills already learned, and, for the MoE model, each expert's share per
+  skill (an expert can keep its knowledge and stop being chosen).
+- Expectations: automatic mixes and curricula in published language-model
+  work (DoReMi, 2023, and later) mostly gain a little over a well-chosen
+  fixed mix. None of this adds capacity: 97.6M active parameters stay the
+  ceiling, and the steps above use them better.
 
 ## Loops: answers that repeat themselves (issues #33, #34)
 
