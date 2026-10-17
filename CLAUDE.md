@@ -230,8 +230,12 @@ Math problem-solving accuracy is the first evaluation focus.
   `data/libretexts-problems/`, with each page's licence and address
   (second build: `data/libretexts-problems-2/`, 475, 93 new, with "Answer:"
   layouts, fractions in questions and nursing dosage problems; the
-  LibreTexts file holds about 1,000 such problems at most). Kept
-  out: GSM8K dev/test overlaps, copies, unclear pairings
+  LibreTexts file holds about 1,000 such problems at most; third build,
+  the one to use: `data/libretexts-problems-3/`, 469, none new, without
+  four wrong keys and two two-answer questions that OpenStax's 2e books
+  exposed, PR #80). Kept
+  out: GSM8K dev/test overlaps, copies, unclear pairings, `EXCLUDED`
+  (matched in any punctuation or case)
   (`tests/test_libretexts_problems.py`). 100 checked by hand; the books'
   own keys are wrong a few percent of the time. For self-train and
   evaluation, not the mix; not held out (LibreTexts is in training)
