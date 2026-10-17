@@ -473,6 +473,14 @@ expert layout, so switching later means starting from scratch.
 - a new `self-train` step that writes the kept solutions as a token file for
   the next night's mix.
 
+**Status: built** (2026-10-17): `cxxgpt self-train` (README, "The model's
+own checked solutions"). It samples with `eval-reasoning --tries`'s
+sampler and seeds, and keeps a try only with the right answer and every
+calculation right by the exact calculator (notes and plain arithmetic, as
+`--labels` checks them), without loops; it writes prep-qa's masked token
+file and a record of the checkpoint and settings. Not yet in any mix: the
+first experiment below decides that, with the owner.
+
 **First experiment.** On the curriculum:
 - baseline: N steps;
 - the same budget: N/2 steps, then self-generated data for the rest.

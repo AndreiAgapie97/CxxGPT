@@ -628,6 +628,39 @@ grep -q '^effort: tries 32, temperature 0.5, seed 1$' "$TEST_DIR/vote-effort-hig
 require_absent -q 'effort:' "$TEST_DIR/vote-effort-low.log"
 grep -q '^overall .* (greedy)$' "$TEST_DIR/vote-effort-low.log"
 grep -q '^unfinished answers (no "#### " line, first tries): [0-9]* / 1$' "$TEST_DIR/vote-effort-low.log"
+# self-train: the random model never finishes an answer, so nothing is
+# kept, but every file is written (empty), the summary and the audit count
+# every try, and the same seed repeats the same tries.
+self_train_run() {  # self_train_run SEED PREFIX
+    "$CXXGPT" self-train --ckpt "$TEST_DIR/audit.ckpt" --problems "$TEST_DIR/audit.txt" --out "$2"         --tries 3 --temp 0.9 --seed "$1" --max-new 6 --keep 2 --threads 2 --audit "$2.audit.jsonl" > "$2.log"
+}
+self_train_run 3 "$TEST_DIR/self-a"
+self_train_run 3 "$TEST_DIR/self-b"
+cmp "$TEST_DIR/self-a.audit.jsonl" "$TEST_DIR/self-b.audit.jsonl"
+cmp "$TEST_DIR/self-a.tok" "$TEST_DIR/self-b.tok"
+[[ $(wc -l < "$TEST_DIR/self-a.audit.jsonl") == 3 ]]
+grep -q '"verdict":"unfinished"' "$TEST_DIR/self-a.audit.jsonl"
+grep -q '^1 problems (0 excluded), 3 tries each (temp 0.9, seed 3), 3 tries$' "$TEST_DIR/self-a.log"
+grep -q '^tries by verdict: kept 0 too_long 0 unfinished 3 ' "$TEST_DIR/self-a.log"
+grep -q '^kept 0 solutions -> ' "$TEST_DIR/self-a.log"
+[[ ! -s "$TEST_DIR/self-a.txt" ]]
+grep -q '"kept":0,' "$TEST_DIR/self-a.json"
+grep -q '"keep":2,' "$TEST_DIR/self-a.json"
+# --exclude drops a problem that repeats an excluded question.
+"$CXXGPT" self-train --ckpt "$TEST_DIR/audit.ckpt" --problems "$TEST_DIR/audit.txt" --out "$TEST_DIR/self-x"     --exclude "$TEST_DIR/audit.txt" --tries 2 --max-new 4 --threads 2 > "$TEST_DIR/self-x.log"
+grep -q '^0 problems (1 excluded), ' "$TEST_DIR/self-x.log"
+# Refused: greedy tries (all the same), a negative cap, an unknown tool,
+# --gpu on the CPU build, a missing --out.
+for options in '--temp 0' '--keep -1' '--tools bogus' '--gpu' '--matmul bf16' '--tries 0'; do
+    status=0
+    "$CXXGPT" self-train --ckpt "$TEST_DIR/audit.ckpt" --problems "$TEST_DIR/audit.txt" --out "$TEST_DIR/self-bad"         $options --threads 2 > "$TEST_DIR/self-bad.log" 2>&1 || status=$?
+    [[ "$status" == 1 ]]
+    grep -q 'check failed' "$TEST_DIR/self-bad.log"
+done
+status=0
+"$CXXGPT" self-train --ckpt "$TEST_DIR/audit.ckpt" --problems "$TEST_DIR/audit.txt" --threads 2     > "$TEST_DIR/self-bad.log" 2>&1 || status=$?
+[[ "$status" == 1 ]]
+grep -q 'usage: cxxgpt self-train' "$TEST_DIR/self-bad.log"
 # The no-repeat block names itself in the headline; N = 1 would forbid
 # every token already written, so it is refused.
 "$CXXGPT" eval-reasoning --ckpt "$TEST_DIR/audit.ckpt" --test "$TEST_DIR/audit.txt" \
