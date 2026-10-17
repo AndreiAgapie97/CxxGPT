@@ -360,6 +360,7 @@ inline void test_answer_matches() {
         {"57", "57.00"},        {"0", "0.0"},            {"-0", "0"},           {"0.05", "0.050"},
         {"698,201.57", "698201.57"}, {"123456789012345678901234567890", "123456789012345678901234567890.0"},
         {"(1, 2)", "(1, 2)"},   {"x = 4", "x = 4"},      {"", ""},
+        {"57 times", "57"},     {"57 of them", "57"},    {"57 more apples", "57"}, {"57 Dollars", "57"},
     };
     for (const auto& [answer, gold] : same)
         EXPECT(answer_matches(line(answer), gold), "'%s' must match gold '%s' (forms '%s', '%s')", answer.c_str(),
@@ -370,6 +371,10 @@ inline void test_answer_matches() {
         {"1/2", "0.5"},     {"50+7", "57"},    {"about 57", "57"},   {"057", "57"},        {".5", "0.5"},
         {"57th", "57"},     {"57 dollars and 50 cents", "57"},       {"57 (rounded)", "57"},
         {"$57 each, $114 total", "57"},       {"57..", "57"},       {"(1,2)", "(1, 2)"},  {"x = 5", "x = 4"},
+        // Words that change the number or join it to another (changes_number).
+        {"1 million", "1"}, {"5 dozen", "5"},  {"57 or", "57"},      {"57 and a half", "57"},
+        {"57 to 60", "57"}, {"3 Thousand", "3"}, {"57 point 5", "57"}, {"57 dollars or more", "57"},
+        {"3 tenths", "3"},  {"57 less than last year", "57"},
     };
     for (const auto& [answer, gold] : different)
         EXPECT(!answer_matches(line(answer), gold), "'%s' must not match gold '%s' (forms '%s', '%s')",

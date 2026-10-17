@@ -22,6 +22,7 @@
 #include <charconv>
 
 #include <algorithm>
+#include <cctype>
 #include <cstdio>
 #include <cstdlib>
 #include <functional>
@@ -620,12 +621,30 @@ inline std::string strip_digit_commas(const std::string& s) {
     return o;
 }
 
+// Words that, after a number, make it another number ("1 million", "5
+// dozen", "3 tenths", "57 point 5") or join it to something else ("57 or",
+// "57 to 60", "57 and a half", "57 less than"): canonical_answer() does not
+// drop them as unit words.
+inline bool changes_number(const std::string& word) {
+    static const char* const words[] = {
+        "hundred", "hundreds", "thousand", "thousands", "million", "millions", "billion", "billions",
+        "trillion", "trillions", "k", "bn", "dozen", "dozens", "half", "halves", "quarter", "quarters",
+        "third", "thirds", "fourth", "fourths", "fifth", "fifths", "tenth", "tenths", "hundredth",
+        "hundredths", "thousandth", "thousandths", "point", "or", "and", "to", "plus", "minus", "over",
+        "divided", "than", "not",
+    };
+    for (const char* w : words)
+        if (word == w) return true;
+    return false;
+}
+
 // The form answers are compared in. An answer that is one number, with only
 // these around it, becomes that number written the shortest way:
 //   - spaces at either end, and commas that group digits ("1,080");
 //   - a "$" before the number ("$57", "$ 57", "-$57", "$-57");
 //   - a "%" right after it ("57%");
-//   - words of letters after a space ("57 dollars", "57 square feet");
+//   - words of letters after a space ("57 dollars", "57 square feet"),
+//     but none of changes_number()'s words ("57 million", "57 or");
 //   - one "." at the very end ("57.").
 // The shortest way: no leading zeros ("0.5" keeps its 0), no trailing zeros
 // after the point, no point with nothing after it, and no "-0". So "57",
@@ -672,8 +691,14 @@ inline std::string canonical_answer(const std::string& answer) {
     }
     // What may follow: a "%", words, one final ".".
     if (i < s.size() && s[i] == '%') ++i;
-    if (i < s.size() && s[i] == ' ')  // words start after a space: "57th" is not 57
-        while (i < s.size() && (s[i] == ' ' || letter(i))) ++i;
+    if (i < s.size() && s[i] == ' ') {  // words start after a space: "57th" is not 57
+        while (i < s.size() && (s[i] == ' ' || letter(i))) {
+            std::string word;
+            while (i < s.size() && letter(i)) word += char(std::tolower((unsigned char)s[i++]));
+            if (changes_number(word)) return s;
+            while (i < s.size() && s[i] == ' ') ++i;
+        }
+    }
     if (i + 1 == s.size() && s[i] == '.') ++i;
     if (i != s.size()) return s;
     if (whole == "0" && fraction.empty()) minus = false;

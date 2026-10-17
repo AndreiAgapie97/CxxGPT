@@ -65,7 +65,7 @@ Math problem-solving accuracy is the first evaluation focus.
   the text after `#### ` is compared with the gold answer as a number,
   exactly, digit by digit (no rounding): "57", "57.00", "$57", "57%" and
   "57 dollars" all match "57", "0.8" matches "0.80"; "57 or 58", "5.7",
-  "570" and "-57" do not. Anything that is not one number (and its `$`,
+  "570", "-57", "1 million" and "57 or" do not. Anything that is not one number (and its `$`,
   `%`, unit words, grouping commas, a final ".") is compared as text.
   eval-reasoning, the vote (equal numbers are one answer), failure labels
   and self-train all go through it. The old text match changed no saved

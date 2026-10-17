@@ -173,7 +173,9 @@ compared with the problem's answer as a number, not as text
 - spaces, and commas that group digits (`1,080`);
 - a `$` before it (`$57`, `-$28.50`);
 - a `%` right after it (`57%`);
-- words after a space (`57 dollars`, `57 square feet`);
+- words after a space (`57 dollars`, `57 square feet`), but no word that
+  makes it another number or joins it to one (`1 million`, `5 dozen`,
+  `57 point 5`, `57 or`, `57 to 60`; the list is `changes_number`);
 - one `.` at the very end (`57.`).
 
 Two numbers are equal when they have the same digits once leading zeros,
