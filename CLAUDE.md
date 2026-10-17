@@ -60,7 +60,13 @@ Math problem-solving accuracy is the first evaluation focus.
   that finishes the arithmetic the model starts (`<<48/2=` or `16 x 7 = `);
   `eval-reasoning` then prints the score without and with it, and the call
   counts. Neither mode fires on the curriculum's `a*b=c` steps
-  (docs/calculator.md).
+  (docs/calculator.md). Until 2026-10-17 no training file had notes
+  (prep-qa strips them without `--keep-calc`; the generators ran with
+  `--notes off`), so calc-notes never fired. Night 2's math replay keeps
+  them (`operations/build_gsm8k_notes.py`, `build_targeted_math.py` and
+  `build_gen_math.py --notes on`): the same problems as before, checked
+  byte for byte with the notes removed, every note's result exact (docs/calculator.md,
+  "Notes in the training data").
 - `eval-reasoning --tries N --temp T --seed S` (or `--effort
   low|medium|high`: 1/8/32 tries): samples each problem N times and votes
   on the final answer (maj@N, also pass@N and the first try's score). Each
