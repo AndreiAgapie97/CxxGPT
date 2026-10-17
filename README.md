@@ -388,9 +388,12 @@ also catches the ones it allows, such as a 12 or a 7 that only happens to
 be right.) A number with two possible sources (two
 question numbers alike, a question number equal to an earlier result, a
 question number that is also 1, 2 or 100, or two calculations giving the
-answer) leaves the try **ambiguous**: dropped by default, or, with
-`--every-reading`, kept if one choice of sources gives every version's
-answer (the summary counts those either way). A try with no formula for
+answer) leaves the try **ambiguous**: each choice of sources is a
+reading, and the try passes if one reading gives every version's answer
+(the default since 2026-10-17, the owner's decision: with one reading only,
+a third to two thirds of right tries would be dropped).
+`--strict-readings` drops every ambiguous try instead; the summary counts
+the ambiguous tries that one reading passes either way. A try with no formula for
 its answer (an answer stated in prose) or a problem that could not be drawn
 again is `unchecked`: dropped, or kept with `--keep-unchecked`. A problem
 without a recipe (GSM8K train) is not checked, and its kept tries are
@@ -409,7 +412,7 @@ On rp1 (2026-10-17, `runs/rp1.night1.ckpt`, 100 new problems per topic, 8
 tries, `--temp 0.7 --seed 1`, then `--recheck` with `--keep-gold`, so that
 every right try reaches the check):
 
-| problems | right tries | redraw | ambiguous | ambiguous, `--every-reading` | unchecked |
+| problems | right tries | redraw | ambiguous, `--strict-readings` | ambiguous (default) | unchecked |
 |---|---|---|---|---|---|
 | `gen-word` | 793 | 0 | 534 | 6 | 0 |
 | `gen-math` equations | 741 | 0 | 336 | 8 | 32 |
@@ -423,8 +426,8 @@ every right try reaches the check):
   calculation (the labels read it now: `labels::detail::after_word`), and
   6 word tries because a result with too many readings was taken for a
   constant (it makes the try ambiguous now).
-- With one reading, 35-67% of the right tries are ambiguous; with every
-  reading tried, 0-1%. The 32 unchecked tries are 4 age problems whose
+- With one reading (`--strict-readings`), 35-67% of the right tries are
+  ambiguous; with every reading tried (the default), 0-1%. The 32 unchecked tries are 4 age problems whose
   plan ("3 - 2 = 1, so x + 16 = 32") holds for few other numbers: no 3
   versions in 200 draws each.
 

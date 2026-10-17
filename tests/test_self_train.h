@@ -295,7 +295,10 @@ inline void test_self_train_files() {
 // what a right method passes, and what a lucky one fails.
 inline void test_self_train_redraw() {
     using self_train::Verdict;
-    const self_train::Options o;
+    // Strict readings (--strict-readings) for most cases: they show what
+    // one reading gives; the default, every reading, is tested below.
+    self_train::Options o;
+    o.every_reading = false;
     auto with_versions = [](const char* question, const char* answer,
                             std::vector<std::pair<const char*, const char*>> versions) {
         std::pair<Problem, std::vector<Problem>> out{self_train_problem(question, answer), {}};
@@ -389,8 +392,8 @@ inline void test_self_train_redraw() {
         o);
     // With every reading tried, an ambiguous try passes if one reading
     // works on every version, and fails if none does.
-    self_train::Options every;
-    every.every_reading = true;
+    const self_train::Options every;
+    EXPECT(every.every_reading, "every reading is the default");
     run(pears, {{"2 * 2 = 4\n#### 4\n", Verdict::kept, "bags times pears is one reading"},
                 {"2 + 2 = 4\n#### 4\n", Verdict::redraw, "no reading of 2 + 2 is 3 bags of 5"}},
         every);
@@ -411,7 +414,7 @@ inline void test_self_train_redraw() {
     // with --keep-unchecked, as is an answer reached in prose.
     const std::pair<Problem, std::vector<Problem>> none{eats.first, {}};
     run(none, {{"6 - 3 = 3\n#### 3\n", Verdict::unchecked, "no versions"}}, o);
-    self_train::Options keep;
+    self_train::Options keep = o;
     keep.keep_unchecked = true;
     run(none, {{"6 - 3 = 3\n#### 3\n", Verdict::kept, "no versions, --keep-unchecked"}}, keep);
     run(more, {{"Leo has fourteen pens now.\n#### 14\n", Verdict::kept, "prose, --keep-unchecked"}}, keep);
@@ -440,6 +443,19 @@ inline void test_self_train_redraw() {
                r.traces[0][1].ran && !r.traces[2][0].ran,
            "kept %zu, redraw %zu, no recipe %zu, with constants %zu (passed %zu), kept unchecked %zu", r.kept.size(),
            r.count(Verdict::redraw), r.no_recipe, r.with_constants, r.with_constants_passed, r.kept_unchecked);
+    // The default (every reading): an ambiguous right try is kept and
+    // counted, an ambiguous lucky one is not; strict readings drop both.
+    const std::vector<Problem> two = {pears.first};
+    const std::vector<std::vector<std::string>> tries = {{"2 * 2 = 4\n#### 4\n", "2 + 2 = 4\n#### 4\n"}};
+    const std::vector<std::optional<std::vector<Problem>>> pear_versions = {pears.second};
+    const self_train::Result d = self_train::keep_checked(two, tries, {}, &pear_versions);
+    EXPECT(d.verdicts[0][0] == Verdict::kept && d.verdicts[0][1] == Verdict::redraw && d.ambiguous_passed == 1,
+           "every reading: %s, %s, %zu ambiguous passed", self_train::verdict_name(d.verdicts[0][0]),
+           self_train::verdict_name(d.verdicts[0][1]), d.ambiguous_passed);
+    const self_train::Result s = self_train::keep_checked(two, tries, o, &pear_versions);
+    EXPECT(s.verdicts[0][0] == Verdict::ambiguous && s.verdicts[0][1] == Verdict::ambiguous && s.ambiguous_passed == 1,
+           "strict readings: %s, %s, %zu ambiguous passed", self_train::verdict_name(s.verdicts[0][0]),
+           self_train::verdict_name(s.verdicts[0][1]), s.ambiguous_passed);
 }
 
 inline void test_self_train() {

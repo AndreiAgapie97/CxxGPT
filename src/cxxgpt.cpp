@@ -966,8 +966,9 @@ int cmd_self_train(Args& a) {
     // answer, or a story that could not be drawn again).
     opts.keep_unchecked = a.flag("keep-unchecked");
     // A try whose numbers could come from two places passes if one choice
-    // gives every version's answer (by default it is dropped as ambiguous).
-    opts.every_reading = a.flag("every-reading");
+    // gives every version's answer; with strict readings it is dropped as
+    // ambiguous.
+    opts.every_reading = !a.flag("strict-readings");
     // What makes two tries the same solution: their outline (the values of
     // their calculations, in order) or their text.
     const std::string same = a.str("same", "outline");
@@ -1128,7 +1129,7 @@ int cmd_self_train(Args& a) {
     if (redraws > 0)
         std::printf("re-draw check: %zu of %zu problems drawn again %d times (%zu stories drawn); "
                     "%zu tries with a constant on the answer's path, %zu of them passed; %zu kept unchecked "
-                    "(--keep-unchecked); %zu ambiguous tries passed through one reading (--every-reading)\n",
+                    "(--keep-unchecked); %zu ambiguous tries passed through one reading (dropped by --strict-readings)\n",
                     redrawn, r.problems, redraws, draws, r.with_constants, r.with_constants_passed, r.kept_unchecked,
                     r.ambiguous_passed);
     std::printf("kept %zu solutions -> %s.txt, %s.tok, %s.json (%.1f s)\n", r.kept.size(), out.c_str(),

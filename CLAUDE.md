@@ -282,8 +282,9 @@ Math problem-solving accuracy is the first evaluation focus.
   calculations into a formula over the question's numbers (earlier
   results substituted, other numbers constants) and keeps the try only if
   it gives every version's exact answer (verdict `redraw` if not). A
-  number with two sources is `ambiguous` (dropped; `--every-reading`
-  keeps the try if one choice passes), no formula or no versions is
+  number with two sources makes the try ambiguous: it passes if one
+  choice of sources does (the default since 2026-10-17, owner's
+  decision; `--strict-readings` drops it as `ambiguous`), no formula or no versions is
   `unchecked` (`--keep-unchecked`). The generators' own solutions: with
   one reading 36-67% pass (the rest ambiguous), with every reading
   895 of 896. On rp1 (README): no lucky try (it writes the generators'

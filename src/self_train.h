@@ -119,7 +119,7 @@ struct Options {
     bool keep_gold = false;     // keep tries that are the problem's own solution
     Same same = Same::outline;
     bool keep_unchecked = false;  // keep tries the re-draw check cannot check
-    bool every_reading = false;   // an ambiguous try passes if one of its readings does
+    bool every_reading = true;    // an ambiguous try passes if one of its readings does (false: --strict-readings)
 };
 
 // Numbers a solution may bring in without the question giving them: days
@@ -227,11 +227,13 @@ inline bool sign_wrong(const labels::AnswerLabel& label) {
 // which one it used. Each choice of sources is a reading of the try.
 // The answer's sources are the calculations whose result is the answer
 // (more than one is ambiguous too), or else the question numbers equal to
-// it. The try passes if its one reading gives each version's own answer;
-// an ambiguous try is dropped (Verdict::ambiguous), unless
-// Options::every_reading: then it passes if one of its readings gives
-// every version's answer. Every reading is worked out either way, so the
-// record says how many ambiguous tries would pass.
+// it. The try passes if one of its readings gives every version's own
+// answer (Options::every_reading, the default since 2026-10-17, the
+// owner's decision: generator questions repeat small numbers, so a third
+// to two thirds of right tries are ambiguous). With strict readings
+// (--strict-readings) only a try with one reading can pass, and an
+// ambiguous one is dropped (Verdict::ambiguous). Every reading is worked
+// out either way, so the record says how many ambiguous tries pass.
 struct Trace {
     bool ran = false;        // the try reached the check
     std::string formula;     // the answer's formula, "q1 - (q1 * q2 / 100)"; empty: none found
@@ -407,7 +409,7 @@ inline std::vector<Calc> read_calcs(const std::vector<std::vector<Rational>>& nu
 // The re-draw check of one try, whose work `label` has (labels::label_answer),
 // against the versions of its problem. Every reading is tried, so an
 // ambiguous try's record says whether one of its readings passes, though
-// only Options::every_reading keeps it.
+// strict readings drop it.
 inline Trace trace_try(const Problem& p, const labels::AnswerLabel& label, const std::vector<Problem>& versions) {
     using namespace redraw_detail;
     Trace t;
@@ -528,7 +530,7 @@ struct Result {
     size_t kept_unchecked = 0;   // tries kept by --keep-unchecked
     // Tries compared with the versions with a constant on the answer's path, and those that passed.
     size_t with_constants = 0, with_constants_passed = 0;
-    size_t ambiguous_passed = 0;  // ambiguous tries one of whose readings passes (kept by every_reading)
+    size_t ambiguous_passed = 0;  // ambiguous tries one of whose readings passes (dropped by strict readings)
 
     size_t count(Verdict v) const { return by_verdict[int(v)]; }
 };
