@@ -273,15 +273,30 @@ self-generated files join a night's mix, and how much, is the owner's
 decision (docs/research-plan.md, "Learning from its own checked
 solutions"); keep the original data in the mix too.
 
-First runs (2026-10-17, `runs/rp1.ckpt` on the CPU, 4 tries at temp 0.7):
-- 8 `gen-word` train problems (a new seed): 7 solved, 27 of 32 tries kept,
-  4 wrong, 1 duplicate.
-- 16 GSM8K train problems: 13 first tries right (81%, against 3.9% on
-  the test set: the model has learned GSM8K train, which its mix repeats
-  64 times), 15 solved by some try, 17 tries kept, 31 duplicates of a kept
-  one, 11 wrong, 5 with a wrong step (one the chain above, one `30 - 35 =
-  5`). So GSM8K train gives back mostly what the model already copies;
-  fresh generator problems are the better source.
+First runs (2026-10-17, `runs/rp1.ckpt`, step 58,784):
+
+| problems | tries | first try | pass@N | kept | gold copies | wrong | wrong step | duplicates |
+|---|---|---|---|---|---|---|---|---|
+| GSM8K train, 16 (CPU) | 4 | 81% | 94% | 3 | 45 | 11 | 5 | 0 |
+| `gen-word` train, new seed, 100 (GPU) | 8 | 100% | 100% | 752 | 10 | 2 | 0 | 36 |
+| `gen-math` equations, new seed, 100 (GPU) | 8 | 94% | 97% | 1 | 744 | 41 | 14 | 0 |
+| `gen-math` fractions, new seed, 100 (GPU) | 8 | 90% | 94% | 1 | 682 | 111 | 6 | 0 |
+
+(`--temp 0.7 --seed 1`; the GSM8K row counted from its audit file, the
+gold-copy check came after it. GPU rows `--matmul bf16 --max-new 400`,
+about a minute each.)
+- rp1 has learned GSM8K train by heart (81% there, 3.9% on the test set),
+  so it writes the gold solutions back.
+- rp1's nights train on `gen-word`, `gen-math` equations and fractions, so
+  on new problems it writes the generators' own templated text: word for
+  word for `gen-math` (one fixed solution per story), in another of the
+  sentence patterns for `gen-word` (so these count as kept, though they
+  are generator text all the same).
+- So, for this model, every source tried gives back text we already have
+  or can generate for free, and pass@8 is only 3-4 points above the first
+  try on `gen-math`. `self-train` pays where the model solves problems
+  whose text is not already in its training: problems with an answer but
+  no worked solution, or kinds of problem it has not been taught.
 
 ### Generated word problems
 
