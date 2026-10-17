@@ -494,6 +494,125 @@ Use 3 seeds each.
 
 **Cost.** Medium. This is the direction already agreed with the owner.
 
+**Design: the re-draw check** (2026-10-17; the owner approved it as
+written; built: README, "The re-draw check"). Called "re-draw" here, not
+"replay", because "replay" above means keeping the original data in the
+mix. What building it changed, from the generators' own solutions (which
+are right by construction, so every one they drop is a false drop):
+- a version must also have the original's worked solution once numbers
+  are masked: the same plan step for step. Without it, a solution that
+  leaves out a division by 7 - 6 = 1 failed on versions that need it;
+- 1, 2 and 100 are possible constants even where the question has the
+  same number ("422 / 2" for half the perimeter, next to "2 times its
+  width"), and two calculations giving the answer (a 50% cut is as much
+  as what is left) are two sources: both make the try ambiguous instead
+  of traced wrongly;
+- ambiguity is common: generator questions repeat small numbers, so with
+  one reading only 108 of 300 word problems, 167 of 296 equations and 202
+  of 300 fractions pass. With every reading tried (the option the owner
+  was offered), 895 of 896 pass. Every run counts how many ambiguous
+  tries one reading passes;
+- on rp1 (README, "The re-draw check"): no lucky try among 2,163 right
+  ones (rp1 writes the generators' own solutions), and with one reading
+  35-67% of them ambiguous, with every reading 0-1%. The first run also
+  found two false failures, both fixed: plain arithmetic after a word
+  ("30% of 270 is 270*30/100 = 81") was not read, and a result with too
+  many readings was taken for a constant.
+- The owner's decision (2026-10-17): every reading is the default;
+  `--strict-readings` keeps the rule first approved. The check's real
+  test comes with a model that writes its own solutions instead of the
+  generators'.
+
+*The problem.* `self-train` keeps a try when its final answer and every
+written calculation are right. A wrong plan that lands on the right
+number still passes: "4 / 2 = 2" where the question needed "4 - 2". No
+judge model can tell (ours is too weak, other companies' are excluded by
+the data rule), so the check must be mechanical.
+
+*The idea.* A right method stays right when the question's numbers change;
+a lucky one almost never does. So for a generator problem:
+1. the generator writes the same story again with other numbers, two or
+   three times (the same sentences, people and steps; new numbers; its own
+   exact answer);
+2. the model's solution is turned into a formula over the question's
+   numbers;
+3. the formula is worked out exactly (calc.h) with each re-drawn version's
+   numbers, and the try is kept only if it gives every version's answer.
+Nothing is sampled again: the model's one written solution is checked
+against the new numbers, so this costs no GPU time.
+
+*Re-drawing a story (step 1).* Each generator's random choices are of two
+kinds: what the story is (people, sentence wordings, which steps, the
+distractor's place) and the numbers in it. They come from one random
+stream, mixed. The generators' `Story::draw` (numbers) would be told apart
+from the other choices, plus the few number choices made another way
+(wordgen's payment, mathgen's divisors, the fraction topic's
+denominators). Then:
+- making a problem as today gives exactly the same files as today (same
+  seed, same text, byte for byte: tested);
+- `gen-word`/`gen-math --recipes FILE` also writes, per problem, how to make
+  it again: the generator, its options and the random state just before
+  the problem's story was drawn (one short line each);
+- to re-draw, the story is made once from that state, recording the
+  story choices (and checked to give the problem file's question and
+  answer exactly, so a recipe file can never be paired with another
+  problems file); then made again with the recorded story choices and
+  numbers from a new random stream;
+- a version counts only if its question is the original's word for word
+  once every number is masked ("Maya has # boxes of # cards ..."), its
+  numbers are not all the same as the original's, and, for gen-math, the
+  topic's second solver (`equation_check`, `fraction_check`) accepts it.
+  Otherwise new numbers are drawn, up to 200 times. Story choices that
+  depend on a number (an age gap that changes "older" to "younger",
+  "1 year" against "2 years") give another masked question and are
+  simply drawn again.
+Masking also lines the numbers up: the third number in the original
+question is the third number in every version.
+
+*The formula (step 2).* Every calculation the labels check
+(`labels::AnswerLabel::calcs`) gets its left side kept as written
+("84+4"). Each number in it is traced to one source:
+- a number in the question (by value: "the 3rd number in the question");
+- the result of an earlier calculation in the same try (a chain "6 * 4 + 2
+  = 24 + 2 = 26" is one calculation, from its first link);
+- otherwise a constant ("100" for a percentage, "60" minutes, "7" days):
+  it stays the same in every version.
+The answer must be the result of a traced calculation (the last one whose
+result is the answer), or a number of the question itself; an answer
+reached only in prose ("so she has 17 left") cannot be checked.
+
+*What could not be traced, and the rules proposed:*
+- a number with two sources (two question numbers alike, or a question
+  number equal to an earlier result): **ambiguous**, the try dropped and
+  counted (simplest; trying every reading is possible later if the count
+  is large);
+- a constant: kept if every version passes (a real constant survives new
+  numbers; a number the model worked out in its head, "12" from 3 boxes
+  of 4 without writing it, does not), counted, and its numbers shown in
+  the audit;
+- no formula for the answer, or a story that could not be re-drawn:
+  the try cannot be checked, so it is dropped and counted
+  (`--keep-unchecked` keeps it);
+- a problem without a recipe (GSM8K train, a file made without
+  `--recipes`): its tries are kept as today, and counted.
+Each try's audit line says what was traced, each version's question, the
+formula's value and the version's answer.
+
+*In code.* `src/redraw.h` (recipes, recording, re-drawing, the masked
+question), the formula in `self_train.h`, a new verdict `redraw` (right,
+but fails a re-drawn version), counters for each case above, and
+`self-train --recipes FILE --redraws 3` (0: off, as today). Tests: a right
+solution passes; "4 / 2 = 2" for "4 - 2" fails; a try using the
+distractor's number fails; a constant 100 passes; an ambiguous try is
+counted; the generators' files are unchanged; every re-drawn version is
+accepted by the topic's second solver. Then 100 fresh `gen-word` and 100
+fresh `gen-math` problems with rp1: how many right tries each rule drops.
+
+*Not covered.* GSM8K train has no generator. The same check could compare
+the model's formula with one traced from the gold solution's notes
+(`<<a*b=c>>`) at random numbers, without new text: a later step, if the
+generators' numbers show it is worth it.
+
 ### 4. Place-value position information for digits
 
 **Idea.**

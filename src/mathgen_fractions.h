@@ -187,7 +187,7 @@ inline bool part_of_story(Story& s, std::string& answer, Place& place) {
             parts.push_back({5 * s.draw(1, 19), 100});
             s.out.ops += '%';
         } else {
-            const int64_t den = denominators[s.rng.below(denominators.size())], num = s.draw(1, den - 1);
+            const int64_t den = denominators[s.rng.number_below(denominators.size())], num = s.draw(1, den - 1);
             if (std::gcd(num, den) != 1) return false;  // 2/4 is written 1/2
             parts.push_back({num, den});
             s.out.ops += '/';
@@ -523,7 +523,7 @@ inline bool units_story(Story& s, std::string& answer, Place& place) {
 }
 
 // One attempt at a story of the given kind; false means draw again.
-inline bool candidate(Rng& rng, const MathOptions& options, FractionProblem& out) {
+inline bool candidate(Choices& rng, const MathOptions& options, FractionProblem& out) {
     Story s(rng, options, out, patterns.data());
     std::string answer;
     Place place = Place::anywhere;
@@ -709,7 +709,9 @@ inline FractionProblem make_fraction_problem(Rng& rng, const MathOptions& option
     for (int attempt = 0; attempt < 10000; ++attempt) {
         FractionProblem result;
         result.kind = kind;
-        if (!fraction_detail::candidate(rng, options, result)) continue;
+        result.recipe = recipe_of("fractions", options.distractors, options.test, 0, int(kind), rng);
+        Choices choices(rng);
+        if (!fraction_detail::candidate(choices, options, result)) continue;
         const std::string wrong = fraction_check::problems_with(result);
         CHECK(wrong.empty(), "the checker rejects a generated problem (%s): %s\n%s", wrong.c_str(),
               result.problem.question.c_str(), result.problem.steps.c_str());
@@ -721,6 +723,7 @@ inline FractionProblem make_fraction_problem(Rng& rng, const MathOptions& option
     return {};
 }
 
-inline std::vector<Problem> make_fraction_problems(uint64_t seed, int64_t count, const MathOptions& options = {}) {
-    return make_unique_problems(seed, count, [&](Rng& rng) { return make_fraction_problem(rng, options); });
+inline std::vector<Problem> make_fraction_problems(uint64_t seed, int64_t count, const MathOptions& options = {},
+                                                   std::vector<Recipe>* recipes = nullptr) {
+    return make_unique_problems(seed, count, [&](Rng& rng) { return make_fraction_problem(rng, options); }, recipes);
 }

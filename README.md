@@ -280,9 +280,10 @@ and `--same text` compares only text (spaces around it aside). The files:
 The summary gives the problems tried, the first try's accuracy, the
 problems any try solved (pass@N) and those with a kept solution, and every
 try's verdict (`kept`, `unfinished`, `wrong`, `no_work`, `markers`,
-`arithmetic`, `loop`, `outside`, `gold_copy`, `duplicate`, `over_cap`,
-`too_long`); `--audit FILE.jsonl` writes every try's text, verdict and
-outside numbers. `--recheck FILE.jsonl` (with the same `--problems`) checks
+`arithmetic`, `loop`, `outside`, `gold_copy`, `ambiguous`, `unchecked`,
+`redraw`, `duplicate`, `over_cap`, `too_long`); `--audit FILE.jsonl` writes
+every try's text, verdict and outside numbers (and the re-draw check's
+record, below). `--recheck FILE.jsonl` (with the same `--problems`) checks
 an audit file's tries again without a model, for other settings or newer
 checks; options that decide the sampling are refused with it.
 `--tools calc-notes` lets the calculator finish the model's notes while
@@ -345,6 +346,90 @@ brackets, which reproduces the table above):
   aside) are in 1 of 202 right answers (a `0.10`) and 62 of 1,117 wrong
   ones; without the constants, 6 right answers would be rejected (12, 7,
   60).
+
+#### The re-draw check: right by method, not by luck
+
+The checks above do not see a wrong plan that lands on the right number:
+"6 / 2 = 3" (half) where the story needed "6 - 3". A right method stays
+right when the question's numbers change; a lucky one almost never does.
+So, for generated problems (`src/redraw.h`, docs/research-plan.md item 3):
+
+```sh
+build/cxxgpt gen-word --out data/self/word --seed 77 --count 100 --recipes data/self/word.recipes
+build/cxxgpt-gpu self-train --gpu --ckpt runs/rp1.ckpt --bpe data/licensed-10b/tok.bpe \
+    --problems data/self/word.txt --recipes data/self/word.recipes --out data/self/rp1-word --tries 8
+```
+
+1. `gen-word`/`gen-math --recipes FILE` also writes, per problem, how to
+   make it again: the generator, its options and the random state its story
+   was drawn from (the problems themselves do not change).
+2. `self-train` makes each story again with other numbers (`--redraws 3`
+   versions): the same people, sentences and steps, new numbers, and the
+   generator's own exact answer. The generators tell their two kinds of
+   random choices apart (`Choices`, `src/wordgen.h`): what the story is,
+   recorded and played back, and the numbers, drawn again. A version
+   counts only if its question and its worked solution are the original's
+   once every number is masked (`Maya has # boxes of # cards`), so the plan
+   is the same step for step, and, for `gen-math`, the topic's second solver
+   accepts it.
+3. The try's calculations become a formula over the question's numbers:
+   each number in a calculation is a number of the question (`q3`), an
+   earlier result (whose formula takes its place) or a constant (1, 2,
+   100, a number the question gives in words, or one from nowhere else).
+   For "40 * 25 / 100 = 10, 40 - 10 = 30" it is `q1 - (q1 * q2 / 100)`.
+4. The formula is worked out exactly with each version's numbers, and the
+   try is kept only if it gives every version's answer (`redraw` if not).
+
+Constants stay the same in every version: a real one (100 for a
+percentage) passes, and a number the model worked out without writing it
+down ("12" for 3 boxes of 4) fails. (The outside check runs first and
+already drops most invented numbers, `0.75` for 25% off; the re-draw check
+also catches the ones it allows, such as a 12 or a 7 that only happens to
+be right.) A number with two possible sources (two
+question numbers alike, a question number equal to an earlier result, a
+question number that is also 1, 2 or 100, or two calculations giving the
+answer) leaves the try **ambiguous**: each choice of sources is a
+reading, and the try passes if one reading gives every version's answer
+(the default since 2026-10-17, the owner's decision: with one reading only,
+a third to two thirds of right tries would be dropped).
+`--strict-readings` drops every ambiguous try instead; the summary counts
+the ambiguous tries that one reading passes either way. A try with no formula for
+its answer (an answer stated in prose) or a problem that could not be drawn
+again is `unchecked`: dropped, or kept with `--keep-unchecked`. A problem
+without a recipe (GSM8K train) is not checked, and its kept tries are
+counted. The audit file records, per try, the formula, its constants, each
+version's question and answer and what the formula gave.
+
+On the generators' own solutions (300 problems per topic,
+`tests/test_redraw.h`): with one reading, 108 of 300 word problems, 167 of
+296 equations and 202 of 300 fractions pass, the rest being ambiguous
+(their questions repeat small numbers); with every reading tried, all
+word problems and equations pass, and 299 of 300 fractions (one with more
+combinations than are followed). Without their `<<...>>` notes (as `--notes
+off` writes them, and as rp1 writes) they pass as often.
+
+On rp1 (2026-10-17, `runs/rp1.night1.ckpt`, 100 new problems per topic, 8
+tries, `--temp 0.7 --seed 1`, then `--recheck` with `--keep-gold`, so that
+every right try reaches the check):
+
+| problems | right tries | redraw | ambiguous, `--strict-readings` | ambiguous (default) | unchecked |
+|---|---|---|---|---|---|
+| `gen-word` | 793 | 0 | 534 | 6 | 0 |
+| `gen-math` equations | 741 | 0 | 336 | 8 | 32 |
+| `gen-math` fractions | 629 | 0 | 218 | 0 | 0 |
+
+- No lucky try: rp1 writes the generators' own solutions (by default they
+  are all `gold_copy`), so the run shows what the check costs on right
+  work, not what it catches; the tests show what it catches.
+- What it cost on the first run, all fixed since: 195 fraction tries
+  failed because "30% of 270 is 270*30/100 = 81" was not read as a
+  calculation (the labels read it now: `labels::detail::after_word`), and
+  6 word tries because a result with too many readings was taken for a
+  constant (it makes the try ambiguous now).
+- With one reading (`--strict-readings`), 35-67% of the right tries are
+  ambiguous; with every reading tried (the default), 0-1%. The 32 unchecked tries are 4 age problems whose
+  plan ("3 - 2 = 1, so x + 16 = 32") holds for few other numbers: no 3
+  versions in 200 draws each.
 
 ### Generated word problems
 
