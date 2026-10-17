@@ -245,7 +245,8 @@ Math problem-solving accuracy is the first evaluation focus.
   1, 2, 100, words, unit facts, ordinals, times, bank notes, fractions and
   years stay. Each variant is checked again by calc.h, masked words and
   self-train's re-draw check. 3,658 of 6,966 convert; 0 dev/test leaks;
-  three hand-check rounds of 30, the last all right
+  three hand-check rounds of 30, the last all right (60 variants from a
+  later 0.01 rule unchecked but 3)
   (docs/results/redraw-qa-check.md). Not in a mix (the owner decides).
 - GSM8K dev set: `scripts/get_data.py` holds out 500 GSM8K train problems
   (the 500 questions with the smallest sha256); `DEV=1 scripts/night.sh`

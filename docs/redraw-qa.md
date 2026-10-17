@@ -157,7 +157,7 @@ own question; each round's findings became a rule before the next.
    Saturday's 5 hours, so it changed with them (8 hours a weekday x 7
    days). Rule: `units`. Also "an 8 day work week" (row 802). Rule: days a
    week at most 7, hours a day at most 24, and so on.
-3. **Third round (final rules but one):** 30 of 30 right for the variant's
+3. **Third round (all rules but the last two):** 30 of 30 right for the variant's
    own question. One stated a false fact: row 4804 tied "8 doors", "$8.00 a
    pint" and "a gallon (the same as 8 pints)", so the gallon became 15
    pints. Rule: unit facts stay (8 pints a gallon, 4 quarts, 16 ounces, 3
@@ -165,6 +165,11 @@ own question; each round's findings became a rule before the next.
    final output only that row of the 30 changed (now only its $55
    changes); the 30 with their verdicts are in
    [docs/results/redraw-qa-check.md](results/redraw-qa-check.md).
+
+The last rule, 0.01 as a constant where the problem speaks of percent,
+came after the third round: it added 60 variants (3,598 to 3,658) and
+changed none of the others. No round saw those 60; 3 of them were read and
+are right.
 
 What remains, from the third round:
 - **Odd but right.** New numbers can make a story lopsided: "290 campers in

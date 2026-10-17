@@ -1001,7 +1001,8 @@ again by calc.h and by self-train's re-draw check.
 - **Hand checks:** three rounds of 30. Each round's findings became a rule
   ("$40 bills"; "x 5 days" for weekdays taken for Saturday's "5 hours", a
   wrong answer; "an 8 day work week"; "a gallon is 15 pints"); the last
-  round had 30 of 30 answers right (docs/results/redraw-qa-check.md). Odd
+  round had 30 of 30 answers right (docs/results/redraw-qa-check.md; 60
+  variants from a last rule, 0.01 for percent, came after it, 3 of them read). Odd
   but right stories remain ("245 campers last week"), and so do GSM8K's
   own misreadings.
 - **Use:** not in a mix (the owner decides). `prep-qa --keep-calc` makes
