@@ -157,13 +157,44 @@ patterns for inspection and do not establish the cause of a wrong answer.
 | `text2tok` | encodes text into a token file (parallel, streaming; `--doc-sep` splits documents) |
 | `prep-qa` | turns question/answer JSONL (GSM8K and the like) into token files with a loss mask and a test set |
 | `train` | trains or resumes a model (CPU, or GPU with `cxxgpt-gpu --gpu`); `--val-sources NAME=FILE,...` scores each held-out file on its own at every validation, Q&A files also on their final answers (`--val-log FILE.csv`) |
-| `eval-reasoning` | exact-answer accuracy per task and difficulty; greedy by default, or a vote over several sampled tries (below); `--tools calc-notes` or `calc-plain` also scores the same problems with an exact calculator filling in the model's arithmetic ([docs/calculator.md](docs/calculator.md)); `--gpu` (with `cxxgpt-gpu`) decodes on the GPU, with exact fp32 products by default, so the scores are the CPU's (`--matmul tf32` or `bf16` scores the model as training computes it) |
+| `eval-reasoning` | exact-answer accuracy per task and difficulty (answers compared as numbers, below); greedy by default, or a vote over several sampled tries (below); `--tools calc-notes` or `calc-plain` also scores the same problems with an exact calculator filling in the model's arithmetic ([docs/calculator.md](docs/calculator.md)); `--gpu` (with `cxxgpt-gpu`) decodes on the GPU, with exact fp32 products by default, so the scores are the CPU's (`--matmul tf32` or `bf16` scores the model as training computes it) |
 | `eval-loss` | a checkpoint's loss on held-out token files, one line per file: by default on the same random windows as `train --val` (`--batch 8 --batches 20`, `night.sh`'s 160 windows; with training's `--batch` and `--eval-batches` it repeats training's last validation number), `--all` on every token once; `--gpu` (with `cxxgpt-gpu`), exact fp32 products by default |
 | `self-train` | samples a model's own solutions to training problems and keeps only the ones with the right answer and right arithmetic, as a masked token file (below) |
 | `sample` | generates text from a prompt (`--tools` as for `eval-reasoning`); `--gpu` (with `cxxgpt-gpu`) chooses every token on the GPU, the same text as the CPU's |
 | `bench-infer` | times the ternary inference engine against an fp32 baseline |
 | `leak-check` | finds questions (such as the GSM8K dev set) that share a run of 13 words with training files |
 | `qa-context` | how often random training windows train an answer without its question in view (`--data A.tok,B.tok --seq 512`) |
+
+### How answers are scored
+
+An answer is the text after `#### ` up to the end of the line, and it is
+compared with the problem's answer as a number, not as text
+(`canonical_answer` in `src/reasoning.h`). One number may carry:
+- spaces, and commas that group digits (`1,080`);
+- a `$` before it (`$57`, `-$28.50`);
+- a `%` right after it (`57%`);
+- words after a space (`57 dollars`, `57 square feet`), but no word that
+  makes it another number or joins it to one (`1 million`, `5 dozen`,
+  `57 point 5`, `57 or`, `57 to 60`; the list is `changes_number`);
+- one `.` at the very end (`57.`).
+
+Two numbers are equal when they have the same digits once leading zeros,
+zeros at the end of the decimals and `-0` are gone: `57`, `57.0`, `57.00`,
+`$57` and `57 dollars` all match `57`, `0.8` matches `0.80`, `-28.5`
+matches `-28.50`. It is an exact comparison, digit by digit, with no
+rounding and no tolerance: `5.7`, `570` and `57.01` do not match `57`, nor
+does `-57`. An answer with anything else around its number (`57 or 58`,
+`about 57`, `57 (rounded)`), or that is not written as a number (`1/2`,
+`.5`, `057`, `fifty-seven`), is compared as text, exactly as written; the
+same goes for a gold answer that is not one number. The vote groups tries
+the same way, so `$57` and `57.00` are one answer.
+
+Until 2026-10-17 answers were compared as text (only grouping commas
+removed). That changed no saved score: the gold answers of GSM8K dev and
+test are plain whole numbers, the LibreTexts problems' are already written
+the shortest way, and the greedy first tries of night 1, night 2 (GSM8K
+test) and rp1 on the LibreTexts problems held no answer the two rules
+judge differently.
 
 ### Many tries and a vote
 
@@ -202,7 +233,9 @@ patterns for inspection and do not establish the cause of a wrong answer.
   first try is wrong, by rules anyone can check:
   - `correct`;
   - `unfinished`: no `#### ` line before `--max-new` ran out;
-  - `format`: the right number, written another way (`$18`);
+  - `format`: the right number in the answer line, but not alone or not
+    with its sign (`18 or 19`, `about 18`, `18` for -18; `$18`, `18.00`
+    and `18 dollars` are right, see "How answers are scored");
   - `arithmetic`: a written calculation that is wrong, checked by the
     exact calculator (`480 * 480 = 112,400`; a chain `a = b = c` link by
     link), before any sign of the right number;

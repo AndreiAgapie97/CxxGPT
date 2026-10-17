@@ -152,8 +152,14 @@ inline void test_failure_labels() {
         EXPECT(l.calcs.empty() && l.unreadable == 0, "not calculations: %zu checked, %zu unreadable", l.calcs.size(),
                l.unreadable);
     }
-    // The right number, written another way.
+    // The right number written another way is right, as scoring has it
+    // (canonical_answer); the right number among others, or with the wrong
+    // sign, is a format error.
     for (const char* written : {"$18", "18 dollars", "18.00"}) {
+        const auto l = label_answer(ducks, "16 - 3 - 4 = 9\n9 * 2 = 18\n#### " + std::string(written) + "\n");
+        EXPECT(l.label == Label::correct, "#### %s: %s", written, labels::label_name(l.label));
+    }
+    for (const char* written : {"18 or 19", "-18", "about 18"}) {
         const auto l = label_answer(ducks, "16 - 3 - 4 = 9\n9 * 2 = 18\n#### " + std::string(written) + "\n");
         EXPECT(l.label == Label::format, "#### %s: %s", written, labels::label_name(l.label));
     }

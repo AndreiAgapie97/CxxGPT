@@ -69,6 +69,16 @@ Math problem-solving accuracy is the first evaluation focus.
   "Notes in the training data"). `train --reason-tools calc-notes` takes
   each training exam again with the calculator, on a line of its own
   (docs/calculator.md, "In training's exams").
+- Scoring (since 2026-10-17, `canonical_answer` in `src/reasoning.h`):
+  the text after `#### ` is compared with the gold answer as a number,
+  exactly, digit by digit (no rounding): "57", "57.00", "$57", "57%" and
+  "57 dollars" all match "57", "0.8" matches "0.80"; "57 or 58", "5.7",
+  "570", "-57", "1 million" and "57 or" do not. Anything that is not
+  one number (and its `$`, `%`, unit words, grouping commas, a final
+  ".") is compared as text.
+  eval-reasoning, the vote (equal numbers are one answer), failure labels
+  and self-train all go through it. The old text match changed no saved
+  score (README, "How answers are scored").
 - `eval-reasoning --tries N --temp T --seed S` (or `--effort
   low|medium|high`: 1/8/32 tries): samples each problem N times and votes
   on the final answer (maj@N, also pass@N and the first try's score). Each

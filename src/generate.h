@@ -222,11 +222,11 @@ inline bool completion_done(const std::string& text) {
     return !text.empty() && text.back() == '\n' && text.find("#### ") != std::string::npos;
 }
 
-// The answer the model gave, normalized the way scoring normalizes it:
-// the text after "#### " up to the end of the line, trimmed, with digit-
-// grouping commas removed.
+// The answer the model gave, in the form scoring compares (canonical_answer
+// in reasoning.h): "57", "$57.00" and "57 dollars" are all "57", so the
+// vote counts them as one answer.
 inline std::string normalized_answer(const std::string& completion) {
-    return strip_digit_commas(trim(extract_answer(completion)));
+    return canonical_answer(extract_answer(completion));
 }
 
 // How many times each problem is sampled. With tries > 1, every problem is
@@ -308,7 +308,7 @@ struct TryScore {
     bool first_ok = false;  // the first try alone (with one try: the plain score)
     bool vote_ok = false;   // the most common answer (maj@N)
     bool any_ok = false;    // at least one try (pass@N)
-    int distinct = 0;       // how many different answers the tries gave
+    int distinct = 0;       // how many different answers the tries gave ("57" = "$57")
     size_t shown = 0;       // the try to show when the vote is wrong
 };
 
@@ -326,13 +326,14 @@ inline TryScore score_tries(const std::vector<std::string>& texts, const std::st
         answers.push_back(normalized_answer(texts[t]));
         from.push_back(t);
     }
+    const std::string want = canonical_answer(gold);
     TryScore s;
     s.first_ok = !texts.empty() && completion_done(texts[0]) && answer_matches(texts[0], gold);
-    s.any_ok = std::find(answers.begin(), answers.end(), gold) != answers.end();
+    s.any_ok = std::find(answers.begin(), answers.end(), want) != answers.end();
     s.distinct = int(std::set<std::string>(answers.begin(), answers.end()).size());
     if (answers.empty()) return s;  // no try finished: wrong, and the first try is shown
     const std::string voted = vote_answer(answers);
-    s.vote_ok = voted == gold;
+    s.vote_ok = voted == want;
     // Show the first try that gave the voted answer.
     s.shown = from[size_t(std::find(answers.begin(), answers.end(), voted) - answers.begin())];
     return s;
