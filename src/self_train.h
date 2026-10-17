@@ -114,15 +114,33 @@ struct Options {
 // year, and metric units. (The failure labels already allow 1, 2 and 100.)
 inline constexpr int64_t kConstants[] = {7, 12, 24, 52, 60, 365, 1000};
 
-// The outside numbers that are not common constants, as written.
-inline std::vector<std::string> outside_numbers(const labels::AnswerLabel& label) {
+inline bool is_constant(const calc::Rational& v) {
+    return v.den == 1 && std::find(std::begin(kConstants), std::end(kConstants), v.num) != std::end(kConstants);
+}
+
+// The outside numbers that are not common constants: the failure labels'
+// (digits, as written), then numbers the work writes in words ("Each box
+// holds thirteen"), which that flag does not read. A number word is
+// outside unless the question gives it (in digits or words), the work
+// writes it in digits too, it is one +, -, * or / away from those, or it
+// is 1, 2, 100 or a constant. Words are reported as "13 (in words)".
+inline std::vector<std::string> outside_numbers(const labels::AnswerLabel& label, const Problem& p,
+                                                const std::string& work) {
+    using namespace labels::detail;
     std::vector<std::string> out;
     for (const std::string& n : label.outside) {
-        const auto v = labels::detail::value_of(n);
-        const bool constant = v && v->den == 1 &&
-                              std::find(std::begin(kConstants), std::end(kConstants), v->num) != std::end(kConstants);
-        if (!constant) out.push_back(n);
+        const auto v = value_of(n);
+        if (!v || !is_constant(*v)) out.push_back(n);
     }
+    const std::string digits = strip_digit_commas(work);
+    std::vector<calc::Rational> seen = number_words(p.question);
+    for (const Number& n : numbers_in(strip_digit_commas(p.question))) seen.push_back(n.value);
+    for (const Number& n : numbers_in(digits)) seen.push_back(n.value);
+    for (const int64_t c : {1, 2, 100}) seen.push_back({c, 1});
+    for (const calc::Rational& v : number_words(work))
+        if (!contains(seen, v) && !is_constant(v) && !one_step(seen, v))
+            out.push_back((v.den == 1 ? std::to_string(v.num) : std::to_string(v.num) + "/" + std::to_string(v.den)) +
+                          " (in words)");
     return out;
 }
 
@@ -198,7 +216,7 @@ inline Verdict check_try(const Problem& p, const std::string& text, const Option
     TryInfo& in = info ? *info : local;
     in.calcs = label.calcs.size();
     in.unreadable = label.unreadable;
-    in.outside = outside_numbers(label);
+    in.outside = outside_numbers(label, p, work);
     if (label.wrong_calcs() > 0 || sign_wrong(label) || note_miscopied(work)) return Verdict::arithmetic;
     if (label.loop && !o.allow_loops) return Verdict::loop;
     if (!in.outside.empty() && !o.allow_outside) return Verdict::outside;

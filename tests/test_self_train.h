@@ -213,6 +213,18 @@ inline void test_self_train_outside() {
     allow.allow_outside = true;
     EXPECT(self_train::check_try(p, "Each box holds 37, so 3 + 4 = 7\n#### 7\n", allow) == Verdict::kept,
            "--allow-outside must keep it");
+    // In words too (Codex's review on #69): the failure labels read digits only.
+    info = {};
+    EXPECT(self_train::check_try(p, "Each box holds thirteen, so 3 + 4 = 7\n#### 7\n", o, &info) ==
+                   Verdict::outside &&
+               info.outside == std::vector<std::string>({"13 (in words)"}),
+           "an invented thirteen must be rejected and named (%zu outside numbers)", info.outside.size());
+    // A word for a number the question gives, a result, or one step away, is not outside.
+    const Problem words = self_train_problem("What is three plus four?", "7");
+    EXPECT(self_train::check_try(words, "Three and four make 3 + 4 = 7, which is seven\n#### 7\n", o) == Verdict::kept,
+           "number words from the question and the result must not be outside");
+    EXPECT(self_train::check_try(p, "3 + 4 = 7, twelve less than a dozen and seven\n#### 7\n", o) == Verdict::kept,
+           "a constant in words (a dozen, twelve) must not be outside");
     // Results, and numbers one step from the question's, are not outside.
     EXPECT(self_train::check_try(p, "3 + 4 = 7, which is 6 more than 1\n#### 7\n", o) == Verdict::kept,
            "a result and a number one step away must not be outside");

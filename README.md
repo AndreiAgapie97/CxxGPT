@@ -250,7 +250,9 @@ as `eval-reasoning --tries`), and a try is kept only if (`src/self_train.h`):
   words), not a result after `=`, and not one `+ - * /` away from numbers
   already seen (the `--labels` outside flag), apart from 1, 2, 100 and a
   few constants (7, 12, 24, 52, 60, 365, 1000: days a week, months,
-  hours, minutes, weeks and days a year, metric units). An invented
+  hours, minutes, weeks and days a year, metric units). Numbers the work
+  writes in words (`Each box holds thirteen`) are checked too, against
+  the question's numbers, the work's own and one step from them. An invented
   quantity is a wrong plan even when the answer comes out right
   (`--allow-outside` keeps those);
 - it is not the problem file's own solution (`--keep-gold` keeps those):
