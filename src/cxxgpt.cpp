@@ -941,12 +941,22 @@ int cmd_self_train(Args& a) {
     opts.keep = a.integer_int("keep", 0);
     CHECK(opts.keep >= 0, "--keep must not be negative");
     opts.allow_loops = a.flag("allow-loops");
-    // Keep tries that copy the problem file's own solution word for word.
+    // Keep tries with numbers from outside the question (constants aside).
+    opts.allow_outside = a.flag("allow-outside");
+    // Keep tries that are the problem file's own solution.
     opts.keep_gold = a.flag("keep-gold");
+    // What makes two tries the same solution: their outline (the values of
+    // their calculations, in order) or their text.
+    const std::string same = a.str("same", "outline");
+    CHECK(same == "outline" || same == "text", "--same must be outline or text");
+    opts.same = same == "text" ? self_train::Same::text : self_train::Same::outline;
     // Questions not to train on, such as GSM8K test and dev (gen-math's rule).
     const std::string exclude = a.str("exclude", "");
     // Every try's text and verdict, one JSON line per try, for audits.
     const std::string audit_path = a.str("audit");
+    // Checks again the tries of an earlier run's --audit file (with the same
+    // --problems), without a model: for new or changed checks.
+    const std::string recheck = a.str("recheck");
     const std::string bpe = a.str("bpe");
     const calc::Mode tool = calculator_mode(a);
     const bool use_gpu = a.flag("gpu");
@@ -956,20 +966,29 @@ int cmd_self_train(Args& a) {
     a.done();
     CHECK(!problems_path.empty() && !out.empty(),
           "usage: cxxgpt self-train --ckpt model.ckpt --problems FILE.txt --out PREFIX [--tries 8 --temp 0.7]");
+    // The tries come from the file, so nothing that decides how they are
+    // sampled or which problems are tried may be given with it.
+    for (const char* option : {"ckpt", "tries", "temp", "seed", "no-repeat", "max-new", "batch", "limit", "exclude",
+                               "tools", "gpu", "matmul"})
+        CHECK(recheck.empty() || !a.has(option), "--%s does nothing with --recheck: the tries come from the file",
+              option);
 #ifndef CXXGPT_CUDA
     CHECK(!use_gpu, "this cxxgpt was built without CUDA; use cxxgpt-gpu (make gpu) for --gpu");
 #endif
     const Tokenizer tok = load_tokenizer(bpe);
-    Model<float> model(peek_checkpoint_config(ckpt));
-    load_checkpoint(ckpt, model, nullptr, nullptr);
+    std::unique_ptr<Model<float>> model;
+    if (recheck.empty()) {
+        model = std::make_unique<Model<float>>(peek_checkpoint_config(ckpt));
+        load_checkpoint(ckpt, *model, nullptr, nullptr);
+    }
 #ifdef CXXGPT_CUDA
     std::unique_ptr<GpuTrainer> gpu;
     int gpu_batch = 0;
     if (use_gpu) {
         const Matmul mm = matmul == "fp32" ? Matmul::fp32 : matmul == "bf16" ? Matmul::bf16 : Matmul::tf32;
-        gpu = std::make_unique<GpuTrainer>(model.cfg, model.infos, mm, false, /*inference=*/true);
-        gpu->set_params(model.params.data());
-        gpu->set_router_bias(model.router_bias);
+        gpu = std::make_unique<GpuTrainer>(model->cfg, model->infos, mm, false, /*inference=*/true);
+        gpu->set_params(model->params.data());
+        gpu->set_router_bias(model->router_bias);
         gpu_batch = gpu->decode_capacity(batch);
         CHECK(gpu_batch >= vote.tries,
               "the GPU has room for %d answers at a time (%zu MB each, %zu MB free), fewer than --tries %d",
@@ -985,33 +1004,70 @@ int cmd_self_train(Args& a) {
     std::unique_ptr<Exclusions> exclusions;
     if (!exclude.empty()) exclusions = std::make_unique<Exclusions>(exclude);
     size_t excluded = 0;
-    const size_t wanted = limit > 0 ? std::min(size_t(limit), all.size()) : all.size();
-    for (size_t i = 0; i < wanted; ++i) {
-        const size_t place = limit > 0 ? i * all.size() / wanted : i;  // an even sample, as eval-reasoning's
-        if (exclusions && exclusions->excludes(all[place], 0)) {
-            ++excluded;
-            continue;
+    std::vector<std::vector<std::string>> texts;
+    if (!recheck.empty()) {
+        // The audit file's tries, problem by problem, in the order written.
+        std::ifstream f(recheck, std::ios::binary);
+        CHECK(f, "cannot open %s", recheck.c_str());
+        long line_no = 0;
+        for (std::string line; std::getline(f, line);) {
+            ++line_no;
+            if (line.find_first_not_of(" \t\r") == std::string::npos) continue;
+            Json j;
+            std::string err;
+            CHECK(Json::parse(line, j, &err), "%s:%ld: %s", recheck.c_str(), line_no, err.c_str());
+            const Json *problem = j.get("problem"), *attempt = j.get("try"), *text = j.get("text");
+            CHECK(problem && attempt && text && problem->type == Json::Number && attempt->type == Json::Number &&
+                      text->type == Json::String,
+                  "%s:%ld: not a self-train --audit line", recheck.c_str(), line_no);
+            const size_t place = size_t(problem->number);
+            CHECK(problem->number >= 0 && place < all.size(), "%s:%ld: problem %s is not in %s", recheck.c_str(),
+                  line_no, problem->str.c_str(), problems_path.c_str());
+            if (vote.problem_ids.empty() || vote.problem_ids.back() != place) {
+                vote.problem_ids.push_back(place);
+                problems.push_back(all[place]);
+                texts.emplace_back();
+            }
+            CHECK(size_t(attempt->number) == texts.back().size(), "%s:%ld: try %s out of order", recheck.c_str(),
+                  line_no, attempt->str.c_str());
+            texts.back().push_back(text->str);
         }
-        problems.push_back(all[place]);
-        vote.problem_ids.push_back(place);
+        vote.tries = texts.empty() ? 0 : int(texts[0].size());
+        for (const auto& tries : texts)
+            CHECK(int(tries.size()) == vote.tries, "%s: problems with different numbers of tries", recheck.c_str());
+    } else {
+        const size_t wanted = limit > 0 ? std::min(size_t(limit), all.size()) : all.size();
+        for (size_t i = 0; i < wanted; ++i) {
+            const size_t place = limit > 0 ? i * all.size() / wanted : i;  // an even sample, as eval-reasoning's
+            if (exclusions && exclusions->excludes(all[place], 0)) {
+                ++excluded;
+                continue;
+            }
+            problems.push_back(all[place]);
+            vote.problem_ids.push_back(place);
+        }
     }
     const double t0 = now_seconds();
     calc::Counts calls;
-    std::vector<std::vector<std::string>> texts;
 #ifdef CXXGPT_CUDA
     if (gpu) {
-        GpuDecoder dec{model.cfg, *gpu};
+        GpuDecoder dec{model->cfg, *gpu};
         texts = sample_tries(dec, problems, tok, gpu_batch, max_new, vote, tool, &calls);
     }
 #endif
-    if (texts.empty() && !problems.empty()) texts = sample_tries(model, problems, tok, batch, max_new, vote, tool, &calls);
+    if (model && texts.empty() && !problems.empty())
+        texts = sample_tries(*model, problems, tok, batch, max_new, vote, tool, &calls);
     const self_train::Result r = self_train::keep_checked(problems, texts, opts);
     self_train::write(out, r.kept, tok);
 
     auto pct = [](size_t part, size_t whole) { return 100.0 * double(part) / double(std::max<size_t>(1, whole)); };
     const std::string no_repeat = vote.no_repeat ? ", no-repeat " + std::to_string(vote.no_repeat) : "";
-    std::printf("%zu problems (%zu excluded), %d tries each (temp %g, seed %ld%s), %zu tries\n", r.problems,
-                excluded, vote.tries, vote.temperature, seed, no_repeat.c_str(), r.tries);
+    if (recheck.empty())
+        std::printf("%zu problems (%zu excluded), %d tries each (temp %g, seed %ld%s), %zu tries\n", r.problems,
+                    excluded, vote.tries, vote.temperature, seed, no_repeat.c_str(), r.tries);
+    else
+        std::printf("%zu problems, %d tries each, %zu tries, checked again from %s\n", r.problems, vote.tries,
+                    r.tries, recheck.c_str());
     std::printf("first try right: %.1f%% (%zu); solved by any try (pass@%d): %.1f%% (%zu); "
                 "with a kept solution: %.1f%% (%zu)\n",
                 pct(r.first_right, r.problems), r.first_right, vote.tries, pct(r.solved, r.problems), r.solved,
@@ -1029,14 +1085,16 @@ int cmd_self_train(Args& a) {
     auto str = [](const std::string& s) { return "\"" + labels::json_escape(s) + "\""; };
     char temp[32];
     std::snprintf(temp, sizeof temp, "%g", vote.temperature);
-    std::string json = "{\"ckpt\":" + str(ckpt) + ",\"problems\":" + str(problems_path) + ",\"bpe\":" + str(bpe) +
+    std::string json = "{\"ckpt\":" + str(recheck.empty() ? ckpt : "") + ",\"recheck\":" + str(recheck) +
+                       ",\"problems\":" + str(problems_path) + ",\"bpe\":" + str(bpe) +
                        ",\"exclude\":" + str(exclude) + ",\"limit\":" + std::to_string(limit) +
                        ",\"tries\":" + std::to_string(vote.tries) + ",\"temp\":" + std::string(temp) +
                        ",\"seed\":" + std::to_string(seed) + ",\"no_repeat\":" + std::to_string(vote.no_repeat) +
                        ",\"max_new\":" + std::to_string(max_new) + ",\"tools\":" +
                        str(tool == calc::Mode::notes ? "calc-notes" : tool == calc::Mode::plain ? "calc-plain" : "none") +
                        ",\"keep\":" + std::to_string(opts.keep) + ",\"allow_loops\":" +
-                       (opts.allow_loops ? "true" : "false") + ",\"keep_gold\":" +
+                       (opts.allow_loops ? "true" : "false") + ",\"allow_outside\":" +
+                       (opts.allow_outside ? "true" : "false") + ",\"same\":" + str(same) + ",\"keep_gold\":" +
                        (opts.keep_gold ? "true" : "false") + ",\"gpu\":" + (use_gpu ? "true" : "false") +
                        ",\"matmul\":" + str(matmul) + ",\"problems_tried\":" + std::to_string(r.problems) +
                        ",\"excluded\":" + std::to_string(excluded) + ",\"first_right\":" +
@@ -1053,11 +1111,14 @@ int cmd_self_train(Args& a) {
         FILE* log = create_file(audit_path, "wb");
         CHECK(log, "cannot write %s", audit_path.c_str());
         for (size_t i = 0; i < problems.size(); ++i)
-            for (size_t t = 0; t < texts[i].size(); ++t)
-                CHECK(std::fprintf(log, "{\"problem\":%zu,\"try\":%zu,\"verdict\":%s,\"text\":%s}\n",
+            for (size_t t = 0; t < texts[i].size(); ++t) {
+                std::string outside;  // the try's numbers from outside the question
+                for (const std::string& n : r.outside[i][t]) outside += (outside.empty() ? "" : ",") + str(n);
+                CHECK(std::fprintf(log, "{\"problem\":%zu,\"try\":%zu,\"verdict\":%s,\"outside\":[%s],\"text\":%s}\n",
                                    vote.problem_ids[i], t, str(self_train::verdict_name(r.verdicts[i][t])).c_str(),
-                                   str(texts[i][t]).c_str()) >= 0,
+                                   outside.c_str(), str(texts[i][t]).c_str()) >= 0,
                       "error writing %s", audit_path.c_str());
+            }
         CHECK(std::fclose(log) == 0, "error writing %s", audit_path.c_str());
         std::printf("every try: %s\n", audit_path.c_str());
     }

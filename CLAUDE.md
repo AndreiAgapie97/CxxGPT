@@ -251,18 +251,22 @@ Math problem-solving accuracy is the first evaluation focus.
   and seeds of `eval-reasoning --tries`, CPU or `--gpu`) and keeps a try
   only with the right answer, some work, every calculation right by
   calc.h (notes, the number after a note, and plain `16 x 7 = 112`, as
-  failure_labels.h finds them, sign included; a right chain `a = b = c`
-  is rejected), no repeated line (`--allow-loops`), not the gold solution
-  word for word (`--keep-gold`) and no
-  `[[no-loss]]` marker; exact copies dropped, at most `--keep K` per
-  problem. Writes `OUT.txt` (problems), `OUT.tok` (prep-qa's masking:
-  question masked, work and gold answer trained) and `OUT.json`
-  (settings, counts). `--exclude` drops problems repeating dev/test
-  questions. Tests: `tests/test_self_train.h` (scripted fake model) and
-  `tests/test_cli.sh`. On rp1 (README, "First runs"): it writes back
-  GSM8K train's gold solutions (memorized) and, on new gen-word and
-  gen-math problems, the generators' own text (both are in its mix), so
-  nothing new is kept yet; pass@8 is 3-4 points above the first try on
+  failure_labels.h finds them, sign included, chains `a = b = c` link by
+  link), no repeated line (`--allow-loops`), no number from outside the
+  question but a few constants (`--allow-outside`), not the gold solution
+  (`--keep-gold`) and no `[[no-loss]]` marker. "The same solution" (for
+  dedupe and the gold check) is the same outline by default: the
+  calculations' values in order, in any words (`--same text` for text
+  only); at most `--keep K` per problem. Writes `OUT.txt` (problems),
+  `OUT.tok` (prep-qa's masking: question masked, work and gold answer
+  trained) and `OUT.json` (settings, counts). `--exclude` drops problems
+  repeating dev/test questions; `--recheck AUDIT.jsonl` checks a run's
+  tries again without a model. Tests: `tests/test_self_train.h` (scripted
+  fake model) and `tests/test_cli.sh`. On rp1 (README, "First runs"): it
+  writes back GSM8K train's gold solutions (memorized) and, on new
+  gen-word and gen-math problems, the generators' own solutions (both are
+  in its mix; gen-word's in other sentence patterns, caught by outline),
+  so nothing is kept; pass@8 is 3-4 points above the first try on
   gen-math. Self-generated data is in no mix: the owner decides.
 - `src/cxxgpt.cpp`: the CLI (train, sample, eval, data prep, benchmarks).
 - `scripts/get_data.py`: downloads GSM8K into `data/gsm8k/` as JSON Lines
