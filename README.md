@@ -983,6 +983,15 @@ mix, taken from gen-word's share at the same total tokens, and is tested
 first on a copy of the checkpoint against the dev set. No mix file and no
 `night.sh` default includes it yet.
 
+Built 2026-10-17 at fbe174a into `data/gen-math-nt` (git-ignored, on the
+laptop; `manifest.json` has the seeds, counts and hashes, 2 minutes 22
+seconds on the CPU): `nt-dev` 993 problems (230,495 tokens), `nt-train`
+497,275 problems (113,955,252 tokens). For the train file, gen-math drew
+again 534 problems sharing a 13-word run with the dev file and 49,819 with
+a dev or GSM8K problem's numbers and answer (small stories often share
+them), so the dev file stays held out; Python's cruder numbers check then
+dropped 7 dev and 2,725 train problems. No factor problem in either file.
+
 A hand check of 30 problems (seed 2026, train) and 15 (seed 77, test): all
 45 answers and solutions right; one train wording asked "How many trays
 does Leo need?" after a sentence that named nobody, in 3 of the 30. That
