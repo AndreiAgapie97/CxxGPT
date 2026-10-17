@@ -252,8 +252,11 @@ How a graph becomes a story:
   before" or "the last ship" keeps its sentence after the one it points
   to. The question comes last, as in GSM8K.
 - **Words for numbers.** "Twice", "half" and "three weekends" are words;
-  multipliers such as "3 times" are digits. That matters for the re-draw
-  check (below).
+  multipliers such as "3 times" are digits. Which form a multiplier takes
+  is a story choice, and a digit multiplier is drawn from 3 up, so a
+  re-drawn version never turns "3 times" into "twice" (that would change
+  the masked question and lose the version). That matters for the
+  re-draw check (below).
 - **More people, objects and settings** than `gen-word`'s 12 names and 8
   objects, and each world's ranges realistic (a box of 6-48 markers, a
   marker $1-4).
@@ -484,8 +487,8 @@ taken from the papers, no text.
 
 ## Size and the smallest useful version
 
-For scale: the equations and fractions topics were built in one day each
-(2026-10-16, about 700-1,000 lines of generator, 200-300 of tests, CLI
+For scale: the equations and fractions topics were both built in one day
+by one session (2026-10-16, about 700-1,000 lines of generator, 200-300 of tests, CLI
 tests and a README section), and the number theory topic (PR #87) in one
 session. This generator is bigger: a graph, a backward solver, story
 rendering from the graph, and plans held out.
