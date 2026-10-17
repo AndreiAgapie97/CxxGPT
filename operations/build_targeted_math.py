@@ -31,6 +31,12 @@ it, so the new training set is filtered against the same dev set:
       --old data/targeted-math --out data/word-fresh-1 --tok data/licensed-10b/tok.bpe \\
       --dev-from data/targeted-math --seed 202610170 --count 2500000
 
+With --notes on, the solutions keep GSM8K-style calculator notes ("18*12 =
+<<18*12=216>>216") in the tokens, for eval-reasoning --tools calc-notes. The
+problems are the same as without (gen-word draws the same ones, and the
+filters read each solution without its notes), so night 2's word-notes-1 is
+word-fresh-1 with notes (--seed 202610190 --count 2500000 --notes on).
+
 The cxxgpt given must be built from the checkout: the manifest records the
 source's hash, and a program built before the last change to src/wordgen.h
 writes other problems. One check: with --seed 202610160, the first problems

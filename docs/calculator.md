@@ -114,3 +114,42 @@ solutions commonly write:
 These deliberately narrow rules will miss equations containing currency
 symbols on both operands, worded units or mathematical markup. They avoid
 silently inventing the meaning of unsupported text.
+
+## Notes in the training data
+
+The notes mode needs a model that writes `<<48/2=`. Until 2026-10-17 no
+training file showed it one: `prep-qa` removes GSM8K's notes unless
+`--keep-calc`, and the generators ran with `--notes off`. That is why
+`calc-notes` never fired on GSM8K with the RunPod model, and why
+`calc-plain` fired on whatever the model happened to write (409 calls on
+the 383 textbook problems, 217 of them malformed).
+
+Night 2 (2026-10-17) trains on the same math problems as planned, with
+their notes kept:
+
+| File | Problems | Tokens without, with notes |
+|---|---|---|
+| `data/gsm8k-notes/gsm8k-train.tok` (`operations/build_gsm8k_notes.py`) | 6,966 | 1.24M, 1.48M |
+| `data/thin-notes-2026-10-17/word-notes-5.tok` (a fifth of `data/word-notes-1`) | 486,603 | 99.8M, 127.2M |
+| `data/thin-notes-2026-10-17/eq-train-3.tok` (a third of `data/gen-math-notes`) | 165,830 | 37.3M, 44.1M |
+| `data/thin-notes-2026-10-17/frac-train-3.tok` | 166,358 | 20.5M, 26.0M |
+
+The checks:
+- **The same problems.** For each file, `prep-qa` without `--keep-calc` on
+  the new JSON Lines gives the file it replaces byte for byte. The
+  generators write the same problems with notes on and off, and the
+  builders' overlap filters read each solution without its notes.
+- **Every note's result is exact.** A separate checker
+  (`operations/check_calc_notes.py FILE.jsonl ...`) evaluates each note
+  with exact fractions, without calc.h, and compares the result with
+  what the calculator writes. In the generated files it found 15.6
+  million notes, none wrong.
+  GSM8K's own 22,088 train notes have no wrong result either. 638 of them
+  write the result another way (`144.00`, `.4`), and the builder rewrites
+  those as the calculator does (`144`, `0.4`), inside the note only. The
+  2 notes with `//` are left as they are.
+- **All of it is trained.** Every added token is an answer token.
+
+Training's exams have no `--tools` option yet, so the night's exam scores
+are without the calculator. The morning's `eval-reasoning --tools
+calc-notes` prints the score without and with it.
