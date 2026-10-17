@@ -204,8 +204,8 @@ patterns for inspection and do not establish the cause of a wrong answer.
   - `unfinished`: no `#### ` line before `--max-new` ran out;
   - `format`: the right number, written another way (`$18`);
   - `arithmetic`: a written calculation that is wrong, checked by the
-    exact calculator (`480 * 480 = 112,400`), before any sign of the
-    right number;
+    exact calculator (`480 * 480 = 112,400`; a chain `a = b = c` link by
+    link), before any sign of the right number;
   - `passed_gold`: the right number appears in the work, then another
     answer is given (18 dollars a day, then "in a week, 18 * 7 = 126");
   - `other`: wrong with no wrong calculation in sight: a wrong plan or
@@ -233,11 +233,11 @@ as `eval-reasoning --tries`), and a try is kept only if (`src/self_train.h`):
   `<<48/2=24>>` notes (and the number written after a note) and plain
   `16 x 7 = 112`, found as `--labels` finds them, sign included (`30 - 35
   = 5` is wrong here, though `--labels` compares numbers without their
-  sign). A right answer through a wrong step (`3 + 4 = 8, so 7`) is a
-  lucky answer, and would teach the mistake. A calculation the calculator
-  cannot read (`10 / 3 = 3.33`) is counted, not rejected. One known false
-  rejection: a chain such as `6 * 4 + 2 = 24 + 2 = 26` reads as
-  `6 * 4 + 2 = 24`, which is wrong;
+  sign). A chain such as `6 * 4 + 2 = 24 + 2 = 26` is checked link by
+  link (`6 * 4 + 2 = 24 + 2`, then `24 + 2 = 26`). A right answer through
+  a wrong step (`3 + 4 = 8, so 7`) is a lucky answer, and would teach the
+  mistake. A calculation the calculator cannot read (`10 / 3 = 3.33`) is
+  counted, not rejected;
 - no line of 12 or more characters is written twice (`--allow-loops` keeps
   those);
 - it is not the problem file's own solution word for word (`--keep-gold`
@@ -283,8 +283,10 @@ First runs (2026-10-17, `runs/rp1.ckpt`, step 58,784):
 | `gen-math` fractions, new seed, 100 (GPU) | 8 | 90% | 94% | 1 | 682 | 111 | 6 | 0 |
 
 (`--temp 0.7 --seed 1`; the GSM8K row counted from its audit file, the
-gold-copy check came after it. GPU rows `--matmul bf16 --max-new 400`,
-about a minute each.)
+gold-copy check came after it, and one of its wrong steps was a right
+chain, `6 * 4 + 2 = 24 + 2 = 26`, misread then: chains are checked link
+by link since. GPU rows `--matmul bf16 --max-new 400`, about a minute
+each.)
 - rp1 has learned GSM8K train by heart (81% there, 3.9% on the test set),
   so it writes the gold solutions back.
 - rp1's nights train on `gen-word`, `gen-math` equations and fractions, so

@@ -117,12 +117,11 @@ inline bool note_miscopied(std::string work) {
 // failure labels compare numbers without their sign (prose rarely writes
 // one), so these pass there; training text must not state them. A plain
 // result is read from its first digit, so "30 - 35 = -5" is unreadable
-// there (counted, not wrong) and never reaches this check.
+// there (counted, not wrong) and never reaches this check; a chain's link
+// keeps its sign ("2 - 7 + 8 = -5 + 8 = 3" is right: -5 + 8 is 3).
 inline bool sign_wrong(const labels::AnswerLabel& label) {
-    for (const labels::Calculation& c : label.calcs) {
-        const std::string wrote = trim(c.wrote);
-        if (!c.exact.empty() && (c.exact[0] == '-') != (!wrote.empty() && wrote[0] == '-')) return true;
-    }
+    for (const labels::Calculation& c : label.calcs)
+        if (!c.exact.empty() && (c.exact[0] == '-') != c.negative) return true;
     return false;
 }
 

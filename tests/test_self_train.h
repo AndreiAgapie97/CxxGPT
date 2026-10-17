@@ -74,6 +74,20 @@ inline void test_self_train_check() {
     EXPECT(self_train::check_try(p, "10 / 3 = 3.33, then 3 + 4 = 7\n#### 7\n", o, &calcs, &unreadable) ==
                Verdict::kept && calcs == 1 && unreadable == 1,
            "an unreadable 10 / 3 must be counted, not rejected (calcs %zu, unreadable %zu)", calcs, unreadable);
+    // A chain is checked link by link (rp1's "6 * 4 + 2 = 24 + 2 = 26" was
+    // rejected), signs included: -5 + 8 is a positive 3.
+    const Problem bags = self_train_problem("6 bags of 4 apples and 2 more: how many apples?", "26");
+    EXPECT(self_train::check_try(bags, "6 * 4 + 2 = 24 + 2 = 26\n#### 26\n", o) == Verdict::kept,
+           "a right chain must be kept");
+    EXPECT(self_train::check_try(bags, "6 * 4 + 2 = 24 + 2 = 28, so 26\n#### 26\n", o) == Verdict::arithmetic,
+           "a chain with a wrong second link must be rejected");
+    EXPECT(self_train::check_try(bags, "6 * 3 + 2 = 24 + 2 = 26\n#### 26\n", o) == Verdict::arithmetic,
+           "a chain with a wrong first link must be rejected");
+    const Problem three = self_train_problem("What is 2 minus 7 plus 8?", "3");
+    EXPECT(self_train::check_try(three, "2 - 7 + 8 = -5 + 8 = 3\n#### 3\n", o) == Verdict::kept,
+           "a link that starts with a minus sign, of a positive value, must be kept");
+    EXPECT(self_train::check_try(three, "7 - 2 - 8 = 5 - 8 = 3\n#### 3\n", o) == Verdict::arithmetic,
+           "5 - 8 is -3, not 3: the sign of a chain's result is checked");
     // "$" and digit-grouping commas, as GSM8K writes them, are read.
     const Problem money = self_train_problem("How much for 2 at $600?", "1200");
     EXPECT(self_train::check_try(money, "2 x $600 = $1,200\n#### 1,200\n", o) == Verdict::kept,

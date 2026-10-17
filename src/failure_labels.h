@@ -20,8 +20,11 @@
 // its forms: "<<48/2=24>>" notes and plain "16 x 7 = 112", on the work with
 // "$" signs and digit-grouping commas dropped ("1,200 x $50" reads as
 // "1200 x 50"; the calculator takes neither). An "=" after a bare number
-// ("half of 10 = 5") is not a calculation. Every check is kept, so a label
-// can be audited from its own evidence.
+// ("half of 10 = 5") is not a calculation. A chain "6 * 4 + 2 = 24 + 2 = 26"
+// is checked link by link: "6 * 4 + 2 = 24 + 2", then "24 + 2 = 26" (a
+// link is the text up to the next " = " on the line, when all of it is
+// arithmetic). Every check is kept, so a label can be audited from its own
+// evidence.
 //
 // Flags, not labels (they also fire on right answers, so they are reported
 // for right and wrong answers separately):
@@ -70,11 +73,13 @@ inline const char* label_name(Label l) {
 }
 
 // One written calculation the calculator could read: where its "=" is, the
-// text it sits in, what the model wrote after the "=" and the exact value.
+// text it sits in, what the model wrote after the "=" (a number, or the
+// next link of a chain: "24 + 2") and the exact value. `negative`: what was
+// written is below zero ("-3", or "-5 + 2"); ok ignores signs.
 struct Calculation {
     size_t at = 0;
     std::string text, wrote, exact;
-    bool ok = false;
+    bool ok = false, negative = false;
 };
 
 struct AnswerLabel {
@@ -205,9 +210,39 @@ inline std::string around(std::string_view s, size_t eq, size_t end) {
     return std::string(s.substr(begin, end - begin));
 }
 
+inline std::string_view trim_blanks(std::string_view s) {
+    while (!s.empty() && (s.front() == ' ' || s.front() == '\t')) s.remove_prefix(1);
+    while (!s.empty() && (s.back() == ' ' || s.back() == '\t')) s.remove_suffix(1);
+    return s;
+}
+
+// `s` as one whole calculation, ready for the calculator ("6 x 4 + 2" gives
+// "6 * 4 + 2"): only arithmetic, all of it, with an operator after its first
+// character. A bare number ("24", "-7") is not a calculation, and neither is
+// "9 eggs. 9 * 2", though the calculator would read "9 * 2" in it.
+inline std::optional<std::string> whole_calculation(std::string_view s) {
+    s = trim_blanks(s);
+    std::string expr;
+    for (size_t k = 0; k < s.size(); ++k) {
+        const char c = s[k];
+        if (s.substr(k).starts_with("\xc3\x97")) {  // "×"
+            expr += '*';
+            ++k;
+        } else if (c == 'x' && calc::times_sign(s, k)) {
+            expr += '*';
+        } else if (digit(c) || std::string_view(".+-*/() \t").find(c) != std::string_view::npos) {
+            expr += c;
+        } else {
+            return {};
+        }
+    }
+    if (expr.find_first_of("+-*/", 1) == std::string::npos || !calc::Parser(expr).parse()) return {};
+    return expr;
+}
+
 // Every calculation in the work, checked: notes ("<<16-3-4=9>>") and plain
 // ("16 - 3 - 4 = 9", "$50 x 3 = $150"), found as the calculator finds its
-// calls.
+// calls, and chains ("6 * 4 + 2 = 24 + 2 = 26") link by link.
 inline void check_calculations(std::string_view work, AnswerLabel& out) {
     for (size_t i = 0; i < work.size(); ++i) {
         if (work[i] != '=') continue;
@@ -217,10 +252,11 @@ inline void check_calculations(std::string_view work, AnswerLabel& out) {
             const std::string_view wrote =
                 work.substr(i + 1, close == std::string_view::npos ? 0 : close - i - 1);
             const std::string result = r->ends_with(">>") ? r->substr(0, r->size() - 2) : *r;
-            const auto got = value_of(wrote);
+            const auto got = calc::Parser(wrote).parse();
             const auto exact = result.empty() ? std::nullopt : value_of(result);
             if (got && exact && close != std::string_view::npos) {
-                out.calcs.push_back({i, around(work, i, close + 2), std::string(wrote), result, same(*got, *exact)});
+                out.calcs.push_back({i, around(work, i, close + 2), std::string(wrote), result,
+                                     same(magnitude(*got), *exact), got->num < 0});
             } else {
                 ++out.unreadable;
             }
@@ -230,18 +266,45 @@ inline void check_calculations(std::string_view work, AnswerLabel& out) {
         if (i + 1 >= work.size() || work[i + 1] != ' ' || i == 0 || work[i - 1] != ' ') continue;
         const size_t after = i + 2;
         if (work.substr(after).starts_with("<<")) continue;  // "48/2 = <<48/2=24>>24": the note is checked
-        const auto r = calc::response(work.substr(0, after), calc::Mode::plain);
+        const size_t newline = work.rfind('\n', i), line_begin = newline == std::string_view::npos ? 0 : newline + 1;
+        // The left side: what the calculator reads before " = ", or else, in
+        // a chain, the link before this one ("24 + 2" in "... = 24 + 2 = 26";
+        // the calculator stops at the earlier "=" and finds nothing to read).
+        auto r = calc::response(work.substr(0, after), calc::Mode::plain);
+        if (!r || r->empty()) {
+            const size_t prev = i >= 4 ? work.rfind(" = ", i - 4) : std::string_view::npos;
+            if (prev != std::string_view::npos && prev >= line_begin)
+                if (const auto link = whole_calculation(work.substr(prev + 3, i - 1 - (prev + 3))))
+                    r = calc::evaluate(*link).value_or("");
+        }
         if (!r) continue;  // not a calculation: "x = 5", "The total = ..."
+        const auto exact = r->empty() ? std::nullopt : value_of(*r);
+        // The right side: the next link of a chain, if this "=" has one (the
+        // text up to the next " = " on the line, all of it arithmetic), or
+        // else the number written right after the "=".
+        const size_t line_end = std::min(work.find('\n', after), work.size());
+        const size_t next = work.find(" = ", after);
+        if (next != std::string_view::npos && next < line_end) {
+            if (const auto link = whole_calculation(work.substr(after, next - after))) {
+                if (!exact) {
+                    ++out.unreadable;
+                    continue;
+                }
+                const calc::Rational v = *calc::Parser(*link).parse();
+                const std::string wrote(trim_blanks(work.substr(after, next - after)));
+                out.calcs.push_back({i, around(work, i, next), wrote, *r, same(magnitude(v), *exact), v.num < 0});
+                continue;
+            }
+        }
         const auto nums = numbers_in(work.substr(after));
         const bool written = !nums.empty() && nums[0].at == 0;
-        const auto exact = r->empty() ? std::nullopt : value_of(*r);
         if (!written || !exact) {
             ++out.unreadable;
             continue;
         }
         const Number& n = nums[0];
         out.calcs.push_back({i, around(work, i, after + n.end), std::string(work.substr(after, n.end)), *r,
-                             same(n.value, *exact)});
+                             same(n.value, *exact), false});
     }
 }
 
