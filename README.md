@@ -928,6 +928,13 @@ exact decimal. The options:
    our calculator use, and every eval with `--tools calc-notes` would need
    it too.
 
+For self-train the difference is plain: options 1 and 2 leave the re-draw
+check as it is (the 20 and the 8 of option 1, or a rounded 28.57, are still
+numbers its formulas keep as constants), so right tries on this topic would
+still be dropped; only option 3 makes number theory a topic self-train can
+check, at the cost of changing calc.h, the formula reader and the
+calculator evals together.
+
 In 1M problems: multiples 110k different stories, remainders 26k, cycles
 25k, common divisors 7.9k, patterns 6.5k, digits 2.0k and factors only
 about 300 (a number of chairs up to 200 has few factorings), so factors

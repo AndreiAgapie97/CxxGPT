@@ -193,17 +193,19 @@ enum Setting { pack, seat, bus, light, visit, packs_bought, kits, ribbon, rows, 
 // usable but is not. Wordings 0-5 for train, 6-8 for test. They may use
 // the story's words ({things}, {holder}, {first}, {gift}, ...). Half the
 // problems get one (candidate). None changes what the question asks: no
-// limit on how many holders there are, no extra things to pack.
+// limit on how many holders there are, no extra things to pack, and none
+// speaks of the holders, bags or teams as a group that already exists,
+// since the question is how many there can be.
 inline constexpr std::array<std::array<const char*, 9>, setting_count> fillers = {{
     {{"Each empty {holder} costs ${a} at the store.", "{name} has been packing for {a} minutes.",
       "The {things} were bought {a} days ago.", "{other} offers to help with the packing.",
-      "{name} writes a label on every {holder}.", "The {holders} are stacked by the door.",
+      "{name} writes a label on every {holder}.", "{name} works at the kitchen table.",
       "{name} paid ${a} for a roll of tape.", "It takes {name} {a} seconds to close a {holder}.",
       "{other} carries the full {holders} to the car."}},
     {{"The {holders} were rented for ${a} each.", "{name} arrived {a} minutes early.",
       "Each of the {things} brought a bottle of water.", "{other} has been planning this for {a} days.",
       "Everyone is excited.", "The {holders} are all the same size.",
-      "{name} counted everyone twice to be sure.", "The {holders} are {a} years old.",
+      "{name} counted everyone twice to be sure.", "{name} has done this {a} times before.",
       "{other} is in charge of the snacks."}},
     {{"A ticket costs ${a}.", "The ride into town takes {a} minutes.", "Each bus has {a} seats.",
       "{name} is waiting at the stop.", "The station has a small cafe.", "It is a cold morning.",
@@ -221,7 +223,7 @@ inline constexpr std::array<std::array<const char*, 9>, setting_count> fillers =
       "{other} will bring the drinks.", "The store is {a} minutes from home.", "{name} makes a shopping list first.",
       "Each pack of {second} costs ${a}.", "{name} drives to the store with {other}.",
       "The {first} are on sale this week."}},
-    {{"{name} bought the bags for ${a}.", "The bags are for a school fair.", "{other} ties a ribbon on each bag.",
+    {{"{name} paid ${a} for the ribbon.", "The bags are for a school fair.", "{other} ties a ribbon on each bag.",
       "{name} spent {a} minutes planning.", "The fair is in {a} days.", "The {first} were on sale.",
       "The {second} cost ${a} in all.", "{other} writes a card for every bag.", "{name} finishes before lunch."}},
     {{"{name} paid ${a} for the material.", "{name} measures everything twice.",
@@ -232,7 +234,7 @@ inline constexpr std::array<std::array<const char*, 9>, setting_count> fillers =
       "The hall is {a} meters long.", "All the chairs are blue.", "{name} has {a} minutes to finish.",
       "The stage is {a} meters wide.", "{other} brings the tickets.", "The hall smells of fresh paint."}},
     {{"Each game lasts {a} minutes.", "{other} brought {a} balls.", "The weather is perfect for playing.",
-      "The teams will wear colored shirts.", "The field is {a} meters long.", "{name} blows a whistle to start.",
+      "Everyone is wearing sneakers.", "The field is {a} meters long.", "{name} blows a whistle to start.",
       "The winners get a prize worth ${a}.", "Everyone brings water.", "{other} keeps score."}},
     {{"Each ticket costs ${a}.", "The fair lasts {a} days.", "{name} sold the last ticket at noon.",
       "The prizes are on a long table.", "{other} reads out the winning numbers.",
