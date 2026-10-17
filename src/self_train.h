@@ -143,9 +143,12 @@ struct Options {
     Same same = Same::outline;
     bool keep_unchecked = false;  // keep tries the re-draw check cannot check
     bool every_reading = true;    // an ambiguous try passes if one of its readings does (false: --strict-readings)
+    // The stricter checks, off by default (README "Stricter checks"):
     bool strict_outside = false;  // no number one + - * / away from the given ones (unearned_numbers)
-    bool check_dead = false, check_mismatch = false, check_computed = false;
-    bool check_broken = false;
+    bool check_dead = false;      // every result used later or the answer (dead_calculations)
+    bool check_mismatch = false;  // the text before a note is the note's calculation (note_mismatch)
+    bool check_broken = false;    // every note written "<<calculation=result>>" (broken_note)
+    bool check_computed = false;  // a calculation gives the answer (answer_computed)
 };
 
 // Numbers a solution may bring in without the question giving them: days

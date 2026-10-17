@@ -523,12 +523,68 @@ inline void test_self_train_redraw() {
            self_train::verdict_name(s.verdicts[0][1]), s.ambiguous_passed);
 }
 
+// The stricter checks (off by default): each drops its kind of junk only
+// with its switch on, and keeps the look-alikes GSM8K's own solutions write.
+inline void test_self_train_strict() {
+    using self_train::Verdict;
+    struct Case {
+        const Problem* p;
+        std::string text;
+        Verdict with;  // with the check on; every case is kept without it
+    };
+    const Problem apples = self_train_problem("Tom has 12 apples and eats 4. How many are left?", "8");
+    const Problem bottles = self_train_problem("Valia brought 6 cases of 24 bottles. How many bottles?", "144");
+    const Problem coat = self_train_problem("A coat costs $80 and is 25% off. What does it cost now?", "60");
+    const Problem pens = self_train_problem("A shop sells 12 pens a day for 5 days. How many pens?", "60");
+    auto check = [](bool self_train::Options::*flag, const char* name, std::initializer_list<Case> cases) {
+        self_train::Options off, on;
+        on.*flag = true;
+        for (const Case& c : cases) {
+            const Verdict without = self_train::check_try(*c.p, c.text, off), with = self_train::check_try(*c.p, c.text, on);
+            EXPECT(without == Verdict::kept && with == c.with, "%s, '%s': %s without, %s with (expected kept, %s)", name,
+                   c.text.c_str(), self_train::verdict_name(without), self_train::verdict_name(with),
+                   self_train::verdict_name(c.with));
+        }
+    };
+    // 3 is 12 / 4, one step from the question's numbers: the outside check
+    // lets it in, the strict one does not.
+    check(&self_train::Options::strict_outside, "strict outside",
+          {{&apples, "There are 3 groups of 4, and 12 - 4 = <<12-4=8>>8 are left.\n#### 8\n", Verdict::outside},
+           {&apples, "He eats 4, so 12 - 4 = <<12-4=8>>8 are left.\n#### 8\n", Verdict::kept},
+           {&apples, "12 - 4 = <<12-4=8>>8 are left, 8 in all.\n#### 8\n", Verdict::kept}});
+    check(&self_train::Options::check_dead, "dead calculations",
+          {{&bottles, "6 + 24 = <<6+24=30>>30 and 6 * 24 = <<6*24=144>>144 bottles.\n#### 144\n", Verdict::dead},
+           {&bottles, "6 * 24 = <<6*24=144>>144 bottles.\n#### 144\n", Verdict::kept},
+           // 75 used as .75, its share.
+           {&coat, "100 - 25 = <<100-25=75>>75 percent is left, so 80 * .75 = <<80*.75=60>>60.\n#### 60\n",
+            Verdict::kept}});
+    check(&self_train::Options::check_mismatch, "mismatched notes",
+          {{&pens, "It sells 12 x 4 = <<12*5=60>>60 pens.\n#### 60\n", Verdict::mismatch},
+           {&pens, "It sells 12 x 5 = <<12*5=60>>60 pens.\n#### 60\n", Verdict::kept},
+           // Only the arithmetic before " = " is read: "x 5".
+           {&pens, "It sells 12 pens/day x 5 = <<12*5=60>>60 pens.\n#### 60\n", Verdict::kept},
+           // The same value another way, as in "16 + 20 + 48 = <<8*2+4*5+12*4=84>>".
+           {&pens, "It sells 12 * 5 = 6 * 10 = <<12*5=60>>60 pens.\n#### 60\n", Verdict::kept},
+           // The note may add a number: "15% * 1000 = <<15*.01*1000=150>>".
+           {&coat, "It is 25% * 80 = <<25*.01*80=20>>20 off, so 80 - 20 = <<80-20=60>>60.\n#### 60\n",
+            Verdict::kept}});
+    check(&self_train::Options::check_broken, "broken notes",
+          {{&pens, "It sells 12 * 5 = <<60=60>>60 pens.\n#### 60\n", Verdict::broken},
+           {&pens, "It sells 12 * 5 = <<12*5=60>>60>>60 pens.\n#### 60\n", Verdict::broken},
+           {&pens, "It sells 12 * 5 = 60 pens.\n#### 60\n", Verdict::kept}});
+    check(&self_train::Options::check_computed, "computed answers",
+          {{&apples, "Of the 12 apples he eats 4, so 8 are left.\n#### 8\n", Verdict::uncomputed},
+           {&apples, "He has 12-4=8 left.\n#### 8\n", Verdict::kept},  // the calculation check does not read it
+           {&apples, "Let x be what is left: x + 4 = 12, so x = 8.\n#### 8\n", Verdict::kept}});
+}
+
 inline void test_self_train() {
     test_self_train_check();
     test_self_train_keep();
     test_self_train_outline();
     test_self_train_outside();
     test_self_train_unused();
+    test_self_train_strict();
     test_self_train_files();
     test_self_train_redraw();
 }

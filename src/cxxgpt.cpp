@@ -935,6 +935,21 @@ int cmd_eval_reasoning(Args& a) {
     return 0;
 }
 
+// The stricter checks (self_train.h; README "Stricter checks"), off by
+// default: together they drop about twice as many lucky tries as clean
+// ones are lost, and a quarter of GSM8K's own solutions fail them. --strict
+// turns on all five.
+void strict_check_flags(Args& a, self_train::Options& o) {
+    const bool all = a.flag("strict");
+    const bool outside = a.flag("strict-outside"), dead = a.flag("check-dead"), mismatch = a.flag("check-mismatch"),
+               broken = a.flag("check-broken"), computed = a.flag("check-computed");
+    o.strict_outside = all || outside;
+    o.check_dead = all || dead;
+    o.check_mismatch = all || mismatch;
+    o.check_broken = all || broken;
+    o.check_computed = all || computed;
+}
+
 // The model's own checked solutions as training data (self_train.h): every
 // problem sampled --tries times, and only the tries with the right answer
 // and right arithmetic kept, written as OUT.txt (problems), OUT.tok (masked
@@ -988,6 +1003,7 @@ int cmd_self_train(Args& a) {
     // gives every version's answer; with strict readings it is dropped as
     // ambiguous.
     opts.every_reading = !a.flag("strict-readings");
+    strict_check_flags(a, opts);
     // What makes two tries the same solution: their outline (the values of
     // their calculations, in order) or their text.
     const std::string same = a.str("same", "outline");
@@ -1171,7 +1187,12 @@ int cmd_self_train(Args& a) {
                        (opts.keep_gold ? "true" : "false") + ",\"recipes\":" + str(recipes_path) +
                        ",\"redraws\":" + std::to_string(redraws) + ",\"keep_unchecked\":" +
                        (opts.keep_unchecked ? "true" : "false") + ",\"every_reading\":" +
-                       (opts.every_reading ? "true" : "false") + ",\"ambiguous_passed\":" +
+                       (opts.every_reading ? "true" : "false") + ",\"strict_outside\":" +
+                       (opts.strict_outside ? "true" : "false") + ",\"check_dead\":" +
+                       (opts.check_dead ? "true" : "false") + ",\"check_mismatch\":" +
+                       (opts.check_mismatch ? "true" : "false") + ",\"check_broken\":" +
+                       (opts.check_broken ? "true" : "false") + ",\"check_computed\":" +
+                       (opts.check_computed ? "true" : "false") + ",\"ambiguous_passed\":" +
                        std::to_string(r.ambiguous_passed) + ",\"redrawn\":" + std::to_string(redrawn) +
                        ",\"redraw_draws\":" + std::to_string(draws) + ",\"with_constants\":" +
                        std::to_string(r.with_constants) + ",\"with_constants_passed\":" +
@@ -1235,11 +1256,7 @@ int cmd_score_checks(Args& a) {
     o.allow_outside = a.flag("allow-outside");
     o.allow_unused = a.flag("allow-unused");
     o.keep_gold = a.flag("keep-gold");
-    o.strict_outside = a.flag("strict-outside");
-    o.check_dead = a.flag("check-dead");
-    o.check_mismatch = a.flag("check-mismatch");
-    o.check_computed = a.flag("check-computed");
-    o.check_broken = a.flag("check-broken");
+    strict_check_flags(a, o);
     // Prints the tune half's tries with this verdict and label
     // ("kept:lucky"), to see what a new check could catch; the held-out
     // half is never shown.
