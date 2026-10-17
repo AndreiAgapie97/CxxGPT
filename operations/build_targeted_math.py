@@ -21,6 +21,20 @@ data/targeted-math as a whole. Usage (from the repository root):
 
   python -I operations/build_targeted_math.py --cxxgpt build/cxxgpt.exe \\
       --old data/targeted-math --out data/targeted-math-new --tok data/licensed-10b/tok.bpe
+
+Fresh problems for another night, so the word problems need not repeat:
+--seed and --count choose the training problems, and --dev-from FOLDER copies
+that folder's word-dev (the one the runs validate on) instead of generating
+it, so the new training set is filtered against the same dev set:
+
+  python -I operations/build_targeted_math.py --cxxgpt build/cxxgpt.exe \\
+      --old data/targeted-math --out data/word-fresh-1 --tok data/licensed-10b/tok.bpe \\
+      --dev-from data/targeted-math --seed 202610170 --count 2500000
+
+The cxxgpt given must be built from the checkout: the manifest records the
+source's hash, and a program built before the last change to src/wordgen.h
+writes other problems. One check: with --seed 202610160, the first problems
+gen-word writes are data/targeted-math's (those its filter kept).
 """
 import argparse
 import datetime
@@ -67,6 +81,9 @@ def main():
     ap.add_argument('--old', required=True, help='the current data/targeted-math (read only)')
     ap.add_argument('--out', required=True, help='a new folder for the rebuilt set')
     ap.add_argument('--tok', required=True, help="the RunPod model's tokenizer")
+    ap.add_argument('--seed', type=int, default=202610160, help="the training problems' seed")
+    ap.add_argument('--count', type=int, default=1000000, help='training problems to generate')
+    ap.add_argument('--dev-from', help='copy word-dev from this folder instead of generating it')
     args = ap.parse_args()
     old, out = pathlib.Path(args.old), pathlib.Path(args.out)
     args.cxxgpt = str(pathlib.Path(args.cxxgpt).resolve())  # Windows does not search relative paths
@@ -90,7 +107,17 @@ def main():
         return any((tuple(k), answer) in held_numbers for k in keys)
 
     records = {}
-    for split, seed, count, style in [('dev', 202610161, 1000, 'test'), ('train', 202610160, 1000000, 'train')]:
+    if args.dev_from:
+        dev_from = pathlib.Path(args.dev_from)
+        for suffix in ['.jsonl', '.tok', '.txt']:
+            shutil.copy2(dev_from / ('word-dev' + suffix), out / ('word-dev' + suffix))
+        for line in (out / 'word-dev.jsonl').read_text(encoding='utf-8').splitlines():
+            held.update(grams(json.loads(line)['question']))
+        records['dev'] = json.loads((dev_from / 'manifest.json').read_text(encoding='utf-8'))['splits']['dev']
+        assert records['dev']['sha256'] == sha256(out / 'word-dev.tok'), 'word-dev.tok differs from its manifest'
+        records['dev']['copied_from'] = str(dev_from)
+    splits = [] if args.dev_from else [('dev', 202610161, 1000, 'test')]
+    for split, seed, count, style in splits + [('train', args.seed, args.count, 'train')]:
         prefix, raw = out / ('word-' + split), out / ('generated-' + split)
         subprocess.run([args.cxxgpt, 'gen-word', '--out', str(raw), '--count', str(count), '--seed', str(seed),
                         '--split', style, '--notes', 'off'], check=True)
@@ -133,6 +160,9 @@ def main():
         'source': 'locally generated from repository templates, not an externally downloaded dataset',
         'generator_source_sha256': hashlib.sha256(source).hexdigest(),
         'generator_commit': commit,
+        # The source hash above is the checkout's; this is the program that ran, which
+        # can be older than the checkout if it was not rebuilt.
+        'cxxgpt_sha256': sha256(args.cxxgpt),
         'tokenizer_sha256': sha256(args.tok),
         'split': 'generator train/test sentence templates; distinct seeds; train rejects 13-word overlaps with '
                  "GSM8K dev/test and generated word dev, and problems with a GSM8K dev/test question's numbers "
