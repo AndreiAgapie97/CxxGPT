@@ -418,6 +418,61 @@ right arithmetic (the area of a triangle as `7 x 7 = 49`, where `14 x 7 /
 version of the problem (the re-draw check, below), which these problems
 do not have. None of it is in a mix.
 
+#### How clean are the kept tries?
+
+```sh
+build/cxxgpt score-checks                  # tests/checker_labels.jsonl
+build/cxxgpt score-checks --allow-unused   # the same, one check off
+```
+
+The owner's rule (2026-10-17): self-train trains only on clean solutions.
+To measure how far the checks are from that, every try with the right
+answer in two 32-try audits of rp1 (20 minutes into night 2's mix, `--temp
+0.7 --seed 1 --tools calc-notes`) was labelled by hand, blind to the
+checks' verdicts: 546 tries, 217 on 106 of the 383 textbook problems and
+329 on 179 of the 500 GSM8K dev problems; tries the
+checks call duplicates are left out. The labels (`tests/checker_labels.jsonl`,
+written by `operations/build_checker_labels.py`, with each textbook page's
+address and CC BY licence; GSM8K is MIT; the tries are our model's own):
+- `clean`: every statement true, every calculation right and needed, a
+  method that would give the right answer with other numbers;
+- `padded`: a sound method, plus something not to train on (a calculation
+  never used, a false or nonsense sentence, a number copied wrong);
+  `minor` when that is one wrong word or unit (`5 x 2 = 10 miles per
+  hour` for miles a day);
+- `lucky`: the answer does not follow from a sound method (`7 x 7 = 49`
+  for a triangle of base 14 and height 7; `24 + 12 = 36` with the 12
+  never worked out).
+
+Of the 546: 27 clean, 93 minor, 108 padded, 318 lucky. Each problem is in a
+tune half or a held-out half (the first byte of the sha256 of its question,
+odd: held out); new checks are tried on the tune half, and the held-out
+half gives the number to believe. `score-checks` runs today's checks on
+every try:
+
+| half | kept | clean | clean or minor | clean tries dropped |
+|---|---|---|---|---|
+| tune | 118 | 9 (7.6%) | 28 (23.7%) | 0 |
+| held-out | 111 | 3 (2.7%) | 13 (11.7%) | 0 |
+
+- The checks never drop a clean try, but of what they keep, 2.7% is clean
+  on the held-out half (and half of it is lucky: 58 of 111). Each check
+  helps: with the loop, outside and unused checks off, 1.5% is clean.
+- The arithmetic, loop, outside and unused checks drop 232 tries, all
+  padded or lucky (114 by the unused check, 112 of them lucky).
+- Most clean GSM8K tries (15 of 17) are gold copies: the same outline as
+  GSM8K's own solution, which a sound short solution often is. The model
+  never saw these dev solutions, so they count as clean, but self-train
+  drops them on purpose (`--keep-gold` keeps them).
+- One reader labelled all 546 in one day. 30 tries labelled again blind,
+  in random order, got the same label, but the reader remembered many of
+  them; a second reader would be a better check.
+
+So today's checks are far from training only on clean solutions: on the
+held-out half they keep 36 tries that are not clean for every clean one. Nothing
+self-trained goes into a mix until a check set clears a bar fixed in
+advance on the held-out half (95% clean was proposed).
+
 #### The re-draw check: right by method, not by luck
 
 The checks above do not see a wrong plan that lands on the right number:

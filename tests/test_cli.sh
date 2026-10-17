@@ -699,6 +699,14 @@ grep -q -- '--tries does nothing with --recheck' "$TEST_DIR/self-bad.log"
 # --exclude drops a problem that repeats an excluded question.
 "$CXXGPT" self-train --ckpt "$TEST_DIR/audit.ckpt" --problems "$TEST_DIR/audit.txt" --out "$TEST_DIR/self-x"     --exclude "$TEST_DIR/audit.txt" --tries 2 --max-new 4 --threads 2 > "$TEST_DIR/self-x.log"
 grep -q '^0 problems (1 excluded), ' "$TEST_DIR/self-x.log"
+# score-checks: the hand-labelled tries (tests/checker_labels.jsonl) through
+# today's checks. A check that changes these numbers changes README's
+# "How clean are the kept tries?": update both. No clean try may be dropped.
+"$CXXGPT" score-checks > "$TEST_DIR/score.log"
+grep -q '^tune     kept 118: clean 9 (7.6%), clean or minor 28 (23.7%); clean tries dropped: 0$' "$TEST_DIR/score.log"
+grep -q '^held-out kept 111: clean 3 (2.7%), clean or minor 13 (11.7%); clean tries dropped: 0$' "$TEST_DIR/score.log"
+"$CXXGPT" score-checks --allow-unused > "$TEST_DIR/score-unused.log"
+grep -q '^held-out kept 181: ' "$TEST_DIR/score-unused.log"
 # The re-draw check: gen-word/gen-math --recipes writes one recipe per
 # problem and leaves the problems as they are; self-train draws each one
 # again (3 versions by default), records it in the summary and the JSON,
