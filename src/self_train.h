@@ -96,10 +96,14 @@ enum class Verdict {
     ambiguous,    // a number on the answer's path could come from two places
     unchecked,    // the re-draw check could not run: no formula for the answer, or no versions
     redraw,       // the formula misses a version's answer: right by luck
+    dead,         // a calculation whose result nothing uses (dead_calculations)
+    mismatch,     // the text before a note is another calculation than the note's (note_mismatch)
+    broken,       // a note not written "<<calculation=result>>" (broken_note)
+    uncomputed,   // no calculation gives the answer (answer_computed)
     duplicate,    // the same solution as an earlier kept try of the problem
     over_cap,     // the problem already has `keep` kept tries
 };
-inline constexpr int kVerdicts = 16;
+inline constexpr int kVerdicts = 20;
 
 inline const char* verdict_name(Verdict v) {
     switch (v) {
@@ -117,6 +121,10 @@ inline const char* verdict_name(Verdict v) {
         case Verdict::ambiguous: return "ambiguous";
         case Verdict::unchecked: return "unchecked";
         case Verdict::redraw: return "redraw";
+        case Verdict::dead: return "dead";
+        case Verdict::mismatch: return "mismatch";
+        case Verdict::broken: return "broken";
+        case Verdict::uncomputed: return "uncomputed";
         case Verdict::duplicate: return "duplicate";
         case Verdict::over_cap: return "over_cap";
     }
@@ -135,6 +143,12 @@ struct Options {
     Same same = Same::outline;
     bool keep_unchecked = false;  // keep tries the re-draw check cannot check
     bool every_reading = true;    // an ambiguous try passes if one of its readings does (false: --strict-readings)
+    // The stricter checks, off by default (README "Stricter checks"):
+    bool strict_outside = false;  // no number one + - * / away from the given ones (unearned_numbers)
+    bool check_dead = false;      // every result used later or the answer (dead_calculations)
+    bool check_mismatch = false;  // the text before a note is the note's calculation (note_mismatch)
+    bool check_broken = false;    // every note written "<<calculation=result>>" (broken_note)
+    bool check_computed = false;  // a calculation gives the answer (answer_computed)
 };
 
 // Numbers a solution may bring in without the question giving them: days
@@ -171,6 +185,197 @@ inline std::vector<std::string> unused_numbers(const Problem& p, const std::stri
         if (!has(n.value) && !(percent && hundredth && has(*hundredth))) out.push_back(n.written);
     }
     return out;
+}
+
+// The work's numbers that nothing gives it, a stricter outside check: a
+// number must be in the question (in digits or words, a fraction word as
+// its parts, "four-fifths" giving 4 and 5, and a percentage as its
+// hundredth too), 1, 2, 100 or a constant, the result of a calculation
+// (right after "="), or written earlier in the work. The outside check
+// also lets in a number one + - * / away from those, which lets in almost
+// any small number (4 is 2 * 2); rp1's lucky tries use that ("12/4 = 3,
+// 12*3 = 36" for the LCM of 9 and 12). In the order of the work.
+inline std::vector<std::string> unearned_numbers(const Problem& p, const std::string& work) {
+    using namespace labels::detail;
+    auto clean = [](std::string s) {
+        s = strip_digit_commas(s);
+        s.erase(std::remove(s.begin(), s.end(), '$'), s.end());
+        return s;
+    };
+    const std::string question = clean(p.question);
+    std::vector<calc::Rational> given = number_words(question);
+    // Fraction words number_words leaves out ("fifths", "tenth").
+    static const std::pair<const char*, int64_t> parts[] = {{"fourth", 4}, {"fifth", 5}, {"sixth", 6},
+                                                            {"seventh", 7}, {"eighth", 8}, {"ninth", 9},
+                                                            {"tenth", 10}};
+    for (const auto& [word, v] : parts)
+        if (question.find(word) != std::string::npos) given.push_back({v, 1});
+    for (const auto& n : numbers_in(question)) {
+        given.push_back(n.value);
+        if (const auto h = calc::times(n.value, calc::Rational{1, 100})) given.push_back(*h);
+    }
+    for (const int64_t c : {1, 2, 100}) given.push_back({c, 1});
+    std::vector<std::string> out;
+    const std::string w = clean(work);
+    for (const auto& n : numbers_in(w)) {
+        size_t k = n.at;
+        while (k > 0 && w[k - 1] == ' ') --k;
+        const bool result = k > 0 && w[k - 1] == '=';
+        if (!result && !contains(given, n.value) && !is_constant(n.value)) out.push_back(n.written);
+        given.push_back(n.value);
+    }
+    return out;
+}
+
+// The work as the failure labels read it (label_answer): the text before
+// the answer line, "$" and digit-grouping commas dropped. Their
+// calculations' positions (Calculation::at) are in this text.
+inline std::string labels_work(const std::string& text) {
+    std::string w = strip_digit_commas(text.substr(0, text.find("#### ")));
+    w.erase(std::remove(w.begin(), w.end(), '$'), w.end());
+    return w;
+}
+
+// Decimals written without their 0 (".4 liters", "60 x .75") with it, so
+// that numbers_in reads them (it skips a number right after a "."). For
+// reading values only: positions move.
+inline std::string with_zeros(std::string s) {
+    for (size_t i = 0; i + 1 < s.size(); ++i)
+        if (s[i] == '.' && labels::detail::digit(s[i + 1]) && (i == 0 || !labels::detail::digit(s[i - 1])))
+            s.insert(i, "0"), ++i;
+    return s;
+}
+
+// a is b, or b as a percentage of it or a share: "100 - 25 = 75" is used
+// as ".75", "0.25" is "25" percent.
+inline bool same_or_percent(const calc::Rational& a, const calc::Rational& b) {
+    using labels::detail::same;
+    if (same(a, b)) return true;
+    const auto up = calc::times(a, calc::Rational{100, 1}), down = calc::times(a, calc::Rational{1, 100});
+    return (up && same(*up, b)) || (down && same(*down, b));
+}
+
+// Where the result written after a calculation's "=" ends: after the note's
+// ">>" and the number copied after it, or after a plain "= 24".
+inline size_t result_end(const std::string& w, size_t eq) {
+    size_t pos = eq + 1;
+    const size_t open = w.rfind("<<", eq), before = w.rfind(">>", eq), close = w.find(">>", eq);
+    const bool in_note = open != std::string::npos && (before == std::string::npos || before < open) &&
+                         close != std::string::npos && close < w.find('\n', eq);
+    if (in_note) pos = close + 2;
+    while (pos < w.size() && w[pos] == ' ') ++pos;
+    const auto n = labels::detail::numbers_in(std::string_view(w).substr(pos));
+    if (!n.empty() && n[0].at == 0) pos += n[0].end;
+    return pos;
+}
+
+// Calculations whose result nothing uses: no later number of the work is
+// that value (or it as a percentage), and it is not the answer ("171 + 380
+// = 551" and then never 551 again). A clean solution computes what it
+// needs.
+inline std::vector<std::string> dead_calculations(const labels::AnswerLabel& label, const Problem& p,
+                                                  const std::string& text) {
+    using namespace labels::detail;
+    const std::string w = labels_work(text);
+    const auto answer = value_of(strip_digit_commas(p.answer));
+    std::vector<std::string> out;
+    for (const auto& c : label.calcs) {
+        const auto v = value_of(c.exact);
+        if (!v) continue;
+        const calc::Rational m = magnitude(*v);
+        if (answer && same_or_percent(m, magnitude(*answer))) continue;
+        bool used = false;
+        for (const auto& n : numbers_in(with_zeros(w.substr(result_end(w, c.at))))) used |= same_or_percent(m, n.value);
+        if (!used) out.push_back(c.text);
+    }
+    return out;
+}
+
+// The calculation written right before a note, when it is another one:
+// a whole calculation with another value (".71 x 100 = <<171*100=17100>>",
+// "60 / 1 = <<60/4=15>>"; "16 + 20 + 48 = <<8*2+4*5+12*4=84>>" is the same),
+// or else a number the note leaves out. The note may add numbers ("15% *
+// 1000 = <<15*.01*1000=150>>"), and only the arithmetic right before the
+// " = " is read ("20 minutes/day * 3 = <<20*3=60>>" gives "* 3").
+inline bool note_mismatch(const std::string& text) {
+    using namespace labels::detail;
+    const std::string w = labels_work(text);
+    for (size_t at = 0; (at = w.find("<<", at)) != std::string::npos; at += 2) {
+        const size_t eq = w.find('=', at), close = w.find(">>", at);
+        if (eq == std::string::npos || close == std::string::npos || eq > close) continue;
+        size_t end = at;
+        while (end > 0 && w[end - 1] == ' ') --end;
+        if (end == 0 || w[end - 1] != '=') continue;
+        --end;
+        size_t begin = end;
+        while (begin > 0) {
+            const char c = w[begin - 1];
+            // Digits, signs, and the bytes of "×", "÷" and "−" (U+2212).
+            if (digit(c) || std::string_view(".+-*/() \t\xc3\x97\xb7\xe2\x88\x92").find(c) != std::string_view::npos ||
+                (c == 'x' && calc::times_sign(w, begin - 1)))
+                --begin;
+            else
+                break;
+        }
+        const std::string run = with_zeros(w.substr(begin, end - begin));
+        if (const auto whole = whole_calculation(run)) {
+            const auto mine = calc::Parser(*whole).parse(), theirs = calc::Parser(w.substr(at + 2, eq - at - 2)).parse();
+            if (mine && theirs && !same(magnitude(*mine), magnitude(*theirs))) return true;
+            continue;
+        }
+        std::vector<calc::Rational> note;
+        for (const auto& n : numbers_in(with_zeros(w.substr(at + 2, eq - at - 2)))) note.push_back(n.value);
+        for (const auto& n : numbers_in(run)) {
+            const auto it =
+                std::find_if(note.begin(), note.end(), [&](const calc::Rational& x) { return same(x, n.value); });
+            if (it == note.end()) return true;
+            note.erase(it);
+        }
+    }
+    return false;
+}
+
+// A note that is not "<<calculation=result>>": no "=" ("<<19.45>>",
+// "<<27%>>"), no operator before it ("<<60=60>>"), or a ">>" that closes
+// no note ("<<300-255=45>>45>>45").
+inline bool broken_note(const std::string& text) {
+    const std::string w = labels_work(text);
+    size_t opens = 0, closes = 0;
+    for (size_t at = 0; (at = w.find(">>", at)) != std::string::npos; at += 2) ++closes;
+    for (size_t at = 0; (at = w.find("<<", at)) != std::string::npos; at += 2) {
+        ++opens;
+        const size_t close = w.find(">>", at);
+        if (close == std::string::npos) return true;
+        const std::string_view inner = std::string_view(w).substr(at + 2, close - at - 2);
+        const size_t eq = inner.find('=');
+        if (eq == std::string_view::npos || eq == 0) return true;
+        if (inner.substr(0, eq).find_first_of("+-*/", 1) == std::string_view::npos &&
+            inner.substr(0, eq).find("\xc3\x97") == std::string_view::npos)
+            return true;
+    }
+    return closes > opens;
+}
+
+// The answer is computed: some calculation of the work gives it (or it as
+// a percentage), or it is written right after an "=" with its sign
+// ("4+6=10", "x = 2350", which the calculation check does not read). A
+// number answer only.
+inline bool answer_computed(const labels::AnswerLabel& label, const Problem& p, const std::string& text) {
+    using namespace labels::detail;
+    const auto answer = value_of(strip_digit_commas(p.answer));
+    if (!answer) return true;
+    for (const auto& c : label.calcs)
+        if (const auto v = value_of(c.exact); v && same_or_percent(magnitude(*v), magnitude(*answer))) return true;
+    const std::string w = with_zeros(labels_work(text));
+    for (size_t i = 0; (i = w.find('=', i)) != std::string::npos; ++i) {
+        size_t k = i + 1;
+        while (k < w.size() && w[k] == ' ') ++k;
+        const bool minus = k < w.size() && w[k] == '-';
+        const auto n = numbers_in(std::string_view(w).substr(k + minus));
+        if (!n.empty() && n[0].at == 0 && same(n[0].value, magnitude(*answer)) && minus == (answer->num < 0))
+            return true;
+    }
+    return false;
 }
 
 // The outside numbers that are not common constants: the failure labels'
@@ -577,9 +782,16 @@ inline Verdict check_try(const Problem& p, const std::string& text, const Option
     in.calcs = label.calcs.size();
     in.unreadable = label.unreadable;
     in.outside = outside_numbers(label, p, work);
+    if (o.strict_outside)
+        for (const std::string& n : unearned_numbers(p, work))
+            if (std::find(in.outside.begin(), in.outside.end(), n) == in.outside.end()) in.outside.push_back(n);
     if (label.wrong_calcs() > 0 || sign_wrong(label) || note_miscopied(work) || note_inexact(work))
         return Verdict::arithmetic;
+    if (o.check_mismatch && note_mismatch(text)) return Verdict::mismatch;
+    if (o.check_broken && broken_note(text)) return Verdict::broken;
     if (label.loop && !o.allow_loops) return Verdict::loop;
+    if (o.check_computed && !answer_computed(label, p, text)) return Verdict::uncomputed;
+    if (o.check_dead && !dead_calculations(label, p, text).empty()) return Verdict::dead;
     if (!in.outside.empty() && !o.allow_outside) return Verdict::outside;
     in.key = solution_key(label, work, o.same);
     // A model that learned its training problems by heart (rp1 on GSM8K

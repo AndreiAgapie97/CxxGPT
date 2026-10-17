@@ -313,7 +313,16 @@ Math problem-solving accuracy is the first evaluation focus.
   clean, padded, minor or lucky; tune and held-out halves by problem;
   README "How clean are the kept tries?"): on the held-out half 2.7% of
   the kept tries are clean (11.7% with minor slips), none clean is
-  dropped. Try new checks on the tune half; `test_cli.sh` pins the numbers.
+  dropped. Try new checks on the tune half (`score-checks --show
+  VERDICT:LABEL` prints its tries, never the held-out ones); `test_cli.sh`
+  pins the numbers. Five stricter checks, off by default (`--strict` for
+  all, on self-train and score-checks; README "Stricter checks",
+  2026-10-17): `--strict-outside`, `--check-dead`, `--check-mismatch`,
+  `--check-broken`, `--check-computed`. Together: held-out 5.2% clean
+  (22.4% with minor), none clean dropped, but they drop 26% of GSM8K
+  train's own solutions (13% today). What is left is right arithmetic on
+  the wrong story, which no text check catches: the re-draw check is the
+  way to tell.
   The re-draw check (`src/redraw.h`, README "The re-draw check",
   2026-10-17): `gen-word`/`gen-math --recipes FILE` writes how to make
   each problem again (the problems unchanged, byte for byte: the
