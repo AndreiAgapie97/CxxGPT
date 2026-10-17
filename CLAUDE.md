@@ -264,6 +264,21 @@ Math problem-solving accuracy is the first evaluation focus.
   gen-math problems, the generators' own text (both are in its mix), so
   nothing new is kept yet; pass@8 is 3-4 points above the first try on
   gen-math. Self-generated data is in no mix: the owner decides.
+  The re-draw check (`src/redraw.h`, README "The re-draw check",
+  2026-10-17): `gen-word`/`gen-math --recipes FILE` writes how to make
+  each problem again (the problems unchanged, byte for byte: the
+  generators' story choices and number choices are told apart,
+  `Choices`); `self-train --recipes FILE` (`--redraws 3`) makes each story
+  again with other numbers (same masked question and masked worked
+  solution; gen-math's second solver accepts it), turns a try's
+  calculations into a formula over the question's numbers (earlier
+  results substituted, other numbers constants) and keeps the try only if
+  it gives every version's exact answer (verdict `redraw` if not). A
+  number with two sources is `ambiguous` (dropped; `--every-reading`
+  keeps the try if one choice passes), no formula or no versions is
+  `unchecked` (`--keep-unchecked`). The generators' own solutions: with
+  one reading 36-67% pass (the rest ambiguous), with every reading
+  895 of 896. Tests: `tests/test_redraw.h`, `tests/test_self_train.h`.
 - `src/cxxgpt.cpp`: the CLI (train, sample, eval, data prep, benchmarks).
 - `scripts/get_data.py`: downloads GSM8K into `data/gsm8k/` as JSON Lines
   (for `prep-qa`), with the 500 dev problems held out of train (the same

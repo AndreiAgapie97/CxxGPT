@@ -494,9 +494,25 @@ Use 3 seeds each.
 
 **Cost.** Medium. This is the direction already agreed with the owner.
 
-**Design: the re-draw check** (2026-10-17, proposed, not built; for the
-owner to check). Called "re-draw" here, not "replay", because "replay"
-above means keeping the original data in the mix.
+**Design: the re-draw check** (2026-10-17; the owner approved it as
+written; built: README, "The re-draw check"). Called "re-draw" here, not
+"replay", because "replay" above means keeping the original data in the
+mix. What building it changed, from the generators' own solutions (which
+are right by construction, so every one they drop is a false drop):
+- a version must also have the original's worked solution once numbers
+  are masked: the same plan step for step. Without it, a solution that
+  leaves out a division by 7 - 6 = 1 failed on versions that need it;
+- 1, 2 and 100 are possible constants even where the question has the
+  same number ("422 / 2" for half the perimeter, next to "2 times its
+  width"), and two calculations giving the answer (a 50% cut is as much
+  as what is left) are two sources: both make the try ambiguous instead
+  of traced wrongly;
+- ambiguity is common: generator questions repeat small numbers, so with
+  one reading only 108 of 300 word problems, 167 of 296 equations and 202
+  of 300 fractions pass. With every reading tried (`--every-reading`, the
+  option the owner was offered), 895 of 896 pass. The default stays the
+  approved one (drop ambiguous tries); every run counts how many
+  ambiguous tries one reading would pass, for the owner to decide.
 
 *The problem.* `self-train` keeps a try when its final answer and every
 written calculation are right. A wrong plan that lands on the right
