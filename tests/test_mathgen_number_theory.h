@@ -54,9 +54,15 @@ inline void check_problem(const NumberTheoryProblem& p, bool notes) {
     for (size_t at = 0; (at = q.steps.find("<<", at)) != std::string::npos; ++at) ++notes_seen;
     EXPECT(notes ? notes_seen == size_t(q.difficulty) && notes_seen >= 1 : notes_seen == 0,
            "difficulty is not the number of steps");
-    // No distractor that names a numbered thing (mathgen.h, add_distractor).
-    for (int label : {4, 5, 6, 7, 8, 9, 12, 13, 16, 17, 18, 19, 21})
-        EXPECT(p.distractor != label, "a numbered-thing distractor in: %s", q.question.c_str());
+    // Fillers are this topic's own, never gen-word's shared sentences.
+    for (const char* shared : word_detail::distractors) {
+        // The longer side of the number: " pictures on the wall.", "The room has ".
+        const std::string text = shared;
+        const size_t at = text.find("{a}");
+        const std::string before = text.substr(0, at), after = at == std::string::npos ? "" : text.substr(at + 3);
+        const std::string& fixed = before.size() >= after.size() ? before : after;
+        EXPECT(q.question.find(fixed) == std::string::npos, "a shared filler in: %s", q.question.c_str());
+    }
     if (p.distractor_number) {
         const auto used = equation_test::written_numbers(q.steps + " " + q.answer);
         EXPECT(std::find(used.begin(), used.end(), p.distractor_number) == used.end(),
@@ -162,7 +168,7 @@ inline void test_mathgen_number_theory() {
     std::set<std::string> questions[2];
     std::set<int> patterns[2];
     std::set<int> kinds_seen[2];
-    int checked = 0, changed = 0, caught = 0, unchanged = 0;
+    int checked = 0, changed = 0, caught = 0, unchanged = 0, filled = 0;
     for (bool test : {false, true}) {
         Rng rng(77);
         for (int i = 0; i < 4000; ++i) {
@@ -177,6 +183,7 @@ inline void test_mathgen_number_theory() {
             // Every kind, setting and question asked.
             kinds_seen[test].insert((p.kind * 8 + p.context) * 8 + p.asked);
             if (p.distractor >= 0) EXPECT((p.distractor >= 12) == test, "distractor wording leaked across splits");
+            filled += p.distractor >= 0;
             ++checked;
         }
     }
@@ -185,8 +192,15 @@ inline void test_mathgen_number_theory() {
     EXPECT(caught * 3 >= changed * 2 && unchanged * 50 <= 800,
            "the checker caught only %d of %d story numbers moved by one; none in %d of 800 problems", caught, changed,
            unchanged);
-    EXPECT(patterns[0].size() == size_t(family_count) * 4 && patterns[1].size() == size_t(family_count) * 2,
-           "not all sentence patterns exercised (%zu train, %zu test)", patterns[0].size(), patterns[1].size());
+    // Half the problems get a filler.
+    EXPECT(filled * 100 >= checked * 45 && filled * 100 <= checked * 55, "%d of %d problems with a filler", filled,
+           checked);
+    // Story sentences: 4 train and 2 test wordings each; questions and
+    // solution lines: 2 and 1.
+    using number_detail::phrase_count;
+    EXPECT(patterns[0].size() == size_t(family_count) * 4 + size_t(phrase_count) * 2 &&
+               patterns[1].size() == size_t(family_count) * 2 + size_t(phrase_count),
+           "not all wordings exercised (%zu train, %zu test)", patterns[0].size(), patterns[1].size());
     // remainder 2 x 4, lcm 3 x 2 + 3, gcd 3 + 2, factors 2, multiples 5,
     // digits 3, pattern 2 x 2.
     const size_t asked_total = 8 + 9 + 5 + 2 + 5 + 3 + 4;
@@ -196,6 +210,8 @@ inline void test_mathgen_number_theory() {
     std::set<std::string> texts;
     for (const auto& family : number_detail::patterns)
         for (const char* pattern : family) EXPECT(texts.insert(pattern).second, "duplicate pattern: %s", pattern);
+    for (const auto& phrase : number_detail::phrases)
+        for (const char* wording : phrase) EXPECT(texts.insert(wording).second, "duplicate wording: %s", wording);
     for (const auto& family : equation_detail::patterns)
         for (const char* pattern : family) EXPECT(texts.insert(pattern).second, "pattern shared with equations: %s", pattern);
     for (const auto& family : fraction_detail::patterns)
@@ -212,7 +228,8 @@ inline void test_mathgen_number_theory() {
                        math_detail::without_notes(noted.problem.steps) == plain.problem.steps,
                    "notes changed the problem");
             EXPECT(quiet.problem.answer == plain.problem.answer && quiet.problem.steps == plain.problem.steps &&
-                       quiet.problem.question.size() < plain.problem.question.size(),
+                       (plain.distractor < 0 ? quiet.problem.question == plain.problem.question
+                                             : quiet.problem.question.size() < plain.problem.question.size()),
                    "distractors changed the math");
         }
     }
@@ -225,7 +242,8 @@ inline void test_mathgen_number_theory() {
     for (const auto& p : a) unique.insert(p.question);
     EXPECT(unique.size() == a.size(), "duplicate questions in one file");
     EXPECT(a[0].question != make_number_theory_problems(32, 1)[0].question, "seed has no effect");
-    std::printf("  %d number-theory problems checked by the second solver; all %d patterns, both splits; "
+    std::printf("  %d number-theory problems checked by the second solver; all %d sentence and %d question or "
+                "solution wordings, both splits; %d with a filler; "
                 "%d of %d story numbers moved by one caught (none in %d of 800 problems)\n",
-                checked, family_count * 6, caught, changed, unchanged);
+                checked, family_count * 6, phrase_count * 3, filled, caught, changed, unchanged);
 }

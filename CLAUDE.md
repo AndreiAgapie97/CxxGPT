@@ -229,9 +229,11 @@ Math problem-solving accuracy is the first evaluation focus.
   digit puzzles, repeating patterns; whole answers. calc.h has only + - *
   /, so a quotient is written as two products around the number
   ("7*28 = 196 and 7*29 = 203 is more than 200"); `number_theory_check`
-  works every story out by brute force. 120 patterns, 40 held out; the
-  distractors naming numbered things are left out. `--exclude` draws 829
-  of 300k again, then 0 GSM8K test/dev leaks. `--recipes` works, but most
+  works every story out by brute force. 120 story patterns (40 held
+  out), 37 question and solution phrases of 3 wordings (1 held out), its
+  own 24 fillers in half the problems (gen-word's shared ones name
+  numbered things and are in every equations/fractions problem).
+  `--exclude` draws 884 of 300k again, then 0 GSM8K test/dev leaks. `--recipes` works, but most
   gold solutions fail the re-draw check (numbers no calculation makes
   become constants). Not in the mix. Next topic: counting (the answer
   format of probability needs a decision first).
