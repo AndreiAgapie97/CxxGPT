@@ -224,8 +224,11 @@ Math problem-solving accuracy is the first evaluation focus.
 - `operations/build_libretexts_problems.py` (2026-10-17): 383 human-written
   word problems with their book answers (one number, no worked solution)
   from the CC BY math textbooks in Common Pile's LibreTexts (OpenStax 1e
-  copies, made before OpenStax went CC BY-NC-SA on 2026-04-23), into
-  `data/libretexts-problems/`, with each page's licence and address. Kept
+  copies, made before OpenStax went CC BY-NC-SA in March-April 2026), into
+  `data/libretexts-problems/`, with each page's licence and address
+  (second build: `data/libretexts-problems-2/`, 475, 93 new, with "Answer:"
+  layouts, fractions in questions and nursing dosage problems; the
+  LibreTexts file holds about 1,000 such problems at most). Kept
   out: GSM8K dev/test overlaps, copies, unclear pairings
   (`tests/test_libretexts_problems.py`). 100 checked by hand; the books'
   own keys are wrong a few percent of the time. For self-train and
