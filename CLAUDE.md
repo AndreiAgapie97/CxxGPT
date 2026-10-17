@@ -60,7 +60,9 @@ Math problem-solving accuracy is the first evaluation focus.
   that finishes the arithmetic the model starts (`<<48/2=` or `16 x 7 = `);
   `eval-reasoning` then prints the score without and with it, and the call
   counts. Neither mode fires on the curriculum's `a*b=c` steps
-  (docs/calculator.md). Until 2026-10-17 no training file had notes
+  (docs/calculator.md). Since 2026-10-17 notes read strict digit-grouping
+  commas (`<<24*600,000=` gives `14400000>>`; `1,2345` or `2,3+4` stay
+  malformed); plain mode still stops at a comma. Until 2026-10-17 no training file had notes
   (prep-qa strips them without `--keep-calc`; the generators ran with
   `--notes off`), so calc-notes never fired. Night 2's math replay keeps
   them (`operations/build_gsm8k_notes.py`, `build_targeted_math.py` and

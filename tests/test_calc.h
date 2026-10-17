@@ -78,16 +78,26 @@ inline void test_calc() {
         {"-(2+3)*4/8", "-2.5"}, {"12.5000", "12.5"}, {"0/-2", "0"},
         {"3-2-1", "0"}, {"2+3*4", "14"}, {".5 + 1.", "1.5"},
         {"9223372036854775807/9223372036854775807", "1"}, {"1/8", "0.125"},
-        {"1/1000000000000000000", "0.000000000000000001"}
+        {"1/1000000000000000000", "0.000000000000000001"},
+        // Digit-grouping commas, strict groups only (calc::ungroup).
+        {"1,000", "1000"}, {"24*600,000", "14400000"}, {"100,000*30", "3000000"}, {"24,600,000", "24600000"},
+        {"1,234.5*2", "2469"}, {"-1,000+1", "-999"}, {"(1,000)/8", "125"}, {"1,000,000.25", "1000000.25"},
+        {"999,999,999,999,999,999", "999999999999999999"}
     };
     for (const auto& [expr, expected] : exact)
         EXPECT(calc::evaluate(expr) == std::optional<std::string>(expected), "calculator exact: %s", expr);
-    for (const char* expr : {"", " ", "1/0", "1/3", "2^3", "sqrt(4)", "2x3", "1,000", "2(3)",
+    for (const char* expr : {"", " ", "1/0", "1/3", "2^3", "sqrt(4)", "2x3", "2(3)",
                             "1e3", "1..2", "(2+3", "2+3)", "2+", "1=1", "nan", "inf", "a+2",
-                            "9223372036854775808", "9223372036854775807+1", "1/0.0000000000000000001"})
+                            "9223372036854775808", "9223372036854775807+1", "1/0.0000000000000000001",
+                            // commas that are not strict groups stay, and are refused
+                            "1,2345", "1,2", "2,3+4", "1234,567", "1,234,56", "1,000,5", "1.5,000", ",000",
+                            "1,000,", "0,125", "01,000", "1,0000", "1 ,000", "1, 000", "1,,000",
+                            "9,223,372,036,854,775,808"})
         EXPECT(!calc::evaluate(expr), "calculator must reject: %s", expr);
     EXPECT(!calc::evaluate(std::string(129, '(') + "1" + std::string(129, ')')), "calculator depth bound");
     EXPECT(!calc::evaluate(std::string(4097, '1')), "calculator length bound");
+    EXPECT(!calc::evaluate("1,000" + std::string(4092, ' ')), "the length bound is on the text before its commas go");
+    EXPECT(calc::evaluate("1,000" + std::string(4091, ' ')) == std::optional<std::string>("1000"), "4096 bytes with commas");
 
     // Random expression trees against an exact reference that never uses
     // fractions (see CalcDecimal). The calculator's answer must be exactly
@@ -209,7 +219,9 @@ inline void test_calc() {
         {"He has 3 bags. -3 * 2 = ", "-6"}, {"So, he pays 2 * 3 = ", "6"}, {"3.5 * 2 = ", "7"}};
     for (const auto& [expr, expected] : clauses)
         EXPECT(calc::response(expr, calc::Mode::plain) == std::optional<std::string>(expected), "clause boundary: %s", expr);
-    for (const char* expr : {"1,000 * 2 = ", "8,and 8 * 2 = ", "3 + 4.5 * 2,3 * 2 = "}) {
+    // Plain mode keeps its rule: a comma ends the expression, so a grouped
+    // number is refused there (the calculator never sees the comma).
+    for (const char* expr : {"1,000 * 2 = ", "24 * 600,000 = ", "8,and 8 * 2 = ", "3 + 4.5 * 2,3 * 2 = "}) {
         const auto r = calc::response(expr, calc::Mode::plain);
         EXPECT(r && r->empty(), "punctuation without a space is no boundary: %s", expr);
     }
@@ -232,6 +244,15 @@ inline void test_calc() {
     EXPECT(open_note && open_note->empty(), "an open note is malformed at its first =");
     EXPECT(!calc::response("<<5/0=unknown =", calc::Mode::notes), "an open note is not counted again at a later =");
     EXPECT(!calc::response("<<5/0=unknown, so 2+2=", calc::Mode::notes), "nor at a later = with arithmetic");
+    // A note may copy the question's numbers with their grouping commas.
+    std::string worked;
+    EXPECT(calc::response("<<24*600,000=", calc::Mode::notes, &worked) == std::optional<std::string>("14400000>>") &&
+               worked == "24*600000", "a note with grouping commas, worked out without them");
+    EXPECT(calc::response("so <<100,000*30=", calc::Mode::notes) == std::optional<std::string>("3000000>>"), "grouped note");
+    for (const char* expr : {"<<1,2345*2=", "<<2,3+4=", "<<1.5,000*2=", "<<0,125*8="}) {
+        const auto r = calc::response(expr, calc::Mode::notes);
+        EXPECT(r && r->empty(), "a comma that is not a strict group is malformed: %s", expr);
+    }
 }
 
 // At each decode position the fake predicts the next scripted token. Poison
