@@ -1113,6 +1113,10 @@ grep -q 'question 1: One two' "$TEST_DIR/leak.log"
 "$CXXGPT" leak-check --questions "$TEST_DIR/leak-questions.txt" \
     --train "$TEST_DIR/leak-miss.txt,$TEST_DIR/leak-hit.txt" --hits "$TEST_DIR/leak.hits" > "$TEST_DIR/leak.log"
 [[ "$(cat "$TEST_DIR/leak.hits")" == 1 ]] && grep -q '1 / 1 questions in any training file' "$TEST_DIR/leak.log"
+# A token file is read as its text (a mix's *N repeat once).
+"$CXXGPT" text2tok --in "$TEST_DIR/leak-hit.txt" --out "$TEST_DIR/leak-hit.tok" > /dev/null
+"$CXXGPT" leak-check --questions "$TEST_DIR/leak-questions.txt" --train "$TEST_DIR/leak-hit.tok*8" > "$TEST_DIR/leak.log"
+grep -q 'leak-hit.tok: 1 / 1' "$TEST_DIR/leak.log"
 # The example is cut at 240 bytes without splitting a UTF-8 character: here
 # bytes 239-240 are one two-byte character, so the cut moves back to 239.
 printf 'One two three four five six seven eight nine ten eleven twelve 13 %s\xc3\xa9 end\n' \

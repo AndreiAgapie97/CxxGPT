@@ -91,4 +91,20 @@ inline void test_leak_check() {
     }
     std::istringstream empty_training(q);
     EXPECT(leak_check::Index({}).scan(empty_training).empty(), "empty question index");
+
+    // A token file (leak-check on .tok files): the same hits as its text,
+    // decoded a few tokens at a time, so runs straddle the chunks.
+    const Tokenizer bytes;
+    for (int trial = 0; trial < 100; ++trial) {
+        const std::string question = random_text(20);
+        std::string text = random_text(35);
+        if (trial % 2) text += " " + question;
+        std::vector<uint16_t> ids;
+        for (int id : bytes.encode(text)) ids.push_back(uint16_t(id));
+        const leak_check::Index token_index({question});
+        leak_check::TokenText buf(ids, bytes, size_t(1 + trial % 7));
+        std::istream in(&buf);
+        EXPECT(token_index.scan(in)[0] == leak_reference(question, text), "token file overlap, chunks of %d",
+               1 + trial % 7);
+    }
 }

@@ -211,19 +211,36 @@ std::string utf8_prefix(const std::string& text, size_t max_bytes) {
 
 int cmd_leak_check(Args& a) {
     const std::string questions = a.str("questions"), train = a.str("train"), hits_out = a.str("hits");
+    const std::string bpe = a.str("bpe");
     a.done();
     CHECK(!questions.empty() && !train.empty(),
           "usage: cxxgpt leak-check --questions QUESTIONS.txt --train A.txt,B.txt,... [--hits HITS.txt]\n"
           "Questions: prep-qa problem records or one question per line.\n"
           "Finds exact runs of 13 ASCII letter/digit words, ignoring case.\n"
           "--hits: writes the numbers (from 1) of the questions found in any training file, one a line\n"
-          "(eval-choice --skip leaves them out).");
+          "(eval-choice --skip leaves them out).\n"
+          "--bpe tok.bpe (default: bytes): training files ending in .tok are read as their text\n"
+          "(a mix's FILE*N repeat is read once).");
     const leak_check::Index index(leak_check::read_questions(questions));
     std::vector<bool> any(index.questions.size(), false);
-    for (const std::string& path : split(train, ',')) {
-        std::ifstream in(path, std::ios::binary);
-        CHECK(in, "cannot open %s", path.c_str());
-        const auto hits = index.scan(in);
+    Tokenizer tok;
+    if (!bpe.empty()) tok.load(bpe);
+    for (std::string path : split(train, ',')) {
+        if (const size_t star = path.rfind('*'); star != std::string::npos && path.find('/', star) == std::string::npos)
+            path.resize(star);
+        std::vector<bool> hits;
+        if (path.size() > 4 && path.compare(path.size() - 4, 4, ".tok") == 0) {
+            const TokenData data = TokenData::load(path);
+            CHECK(int(data.vocab) <= tok.vocab_size(), "%s has vocab %u, more than the tokenizer's %d: --bpe?", path.c_str(),
+                  data.vocab, tok.vocab_size());
+            leak_check::TokenText text(data.tokens, tok);
+            std::istream in(&text);
+            hits = index.scan(in);
+        } else {
+            std::ifstream in(path, std::ios::binary);
+            CHECK(in, "cannot open %s", path.c_str());
+            hits = index.scan(in);
+        }
         for (size_t q = 0; q < hits.size(); ++q) any[q] = any[q] || hits[q];
         const size_t count = size_t(std::count(hits.begin(), hits.end(), true));
         std::printf("%s: %zu / %zu questions share a 13-word run\n", path.c_str(), count, hits.size());

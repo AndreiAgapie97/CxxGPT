@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Offline tests of scripts/get_choice_data.py: a local HTTP fake, never the real files.
 
-Every test's converter runs on program-written fixture records in the
-upstream layout; the download, the checksum check and the output files
-are real. Checking the real sources is `get_choice_data.py --check all`.
+Every test's converter runs on fixture records written here in the
+upstream layout; the download, the checksum check and the output files are
+real. Checking the real sources is `get_choice_data.py --check all`.
 """
 import contextlib
 import hashlib
@@ -36,29 +36,19 @@ def zipped(member, data):
     return buf.getvalue()
 
 
-# Fixture records in each upstream format (made up here, not real questions).
-ARC = jsonl([
-    {"id": "f1", "question": {"stem": "Which is a fixture?", "choices": [
-        {"text": "this one", "label": "A"}, {"text": "that  one", "label": "B"}]}, "answerKey": "B"},
-    {"id": "f2", "question": {"stem": "Pick three.", "choices": [
-        {"text": "one", "label": "1"}, {"text": "two", "label": "2"}, {"text": "three", "label": "3"}]},
-     "answerKey": "3"},
-])
-SCIQ = json.dumps([{"question": "What is made up?", "distractor1": "a", "distractor2": "b", "distractor3": "c",
-                    "correct_answer": "this", "support": "Support text."},
-                   {"question": "No support?", "distractor1": "x", "distractor2": "y", "distractor3": "z",
-                    "correct_answer": "w", "support": ""}]).encode()
-PIQA = jsonl([{"goal": "Open a fixture", "sol1": "pull", "sol2": "push"}])
-PIQA_LABELS = b"1\n"
-HELLASWAG = jsonl([{"ind": 7, "activity_label": "Fixtures", "ctx_a": "A person writes a test.",
-                    "ctx_b": "they", "endings": ["run it [title] twice.", "stop.", "sing.", "go."], "label": "0"}])
-BOOLQ = jsonl([{"question": "is this a fixture", "passage": "A made-up passage.", "answer": True}])
-PUBMEDQA = json.dumps({"111": {"QUESTION": "Does it work?", "CONTEXTS": ["First part.", "Second part."],
-                               "final_decision": "maybe"},
-                       "222": {"QUESTION": "Not in the test?", "CONTEXTS": ["x"], "final_decision": "yes"}}).encode()
-PUBMEDQA_TEST = json.dumps({"111": "maybe"}).encode()
-OBQA = jsonl([{"id": "o1", "question": {"stem": "A fixture is", "choices": [
-    {"text": "made up", "label": "A"}, {"text": "real", "label": "B"}]}, "answerKey": "A"}])
+# Made-up records in each upstream layout (not real questions).
+BLOBS = {
+    "piqa": [jsonl([{"goal": "Open a fixture", "sol1": "pull  it", "sol2": "push it"},
+                    {"goal": "Close it", "sol1": "shut", "sol2": "open"}]), b"1\n0\n"],
+    "pubmedqa": [json.dumps({"111": {"QUESTION": "Does it work?", "CONTEXTS": ["First part.", "Second part."],
+                                     "LONG_ANSWER": "It does, maybe.", "final_decision": "maybe"},
+                             "222": {"QUESTION": "Not in the test?", "CONTEXTS": ["x"],
+                                     "final_decision": "yes"}}).encode(),
+                 json.dumps({"111": "maybe"}).encode()],
+    "boolq": [zipped("BoolQ/val.jsonl", jsonl([
+        {"question": "is this a fixture", "passage": "Fixture -- A made-up passage.", "idx": 0, "label": True},
+        {"question": "is it real", "passage": "No.", "idx": 1, "label": False}]))],
+}
 
 
 class ChoiceDataTest(unittest.TestCase):
@@ -95,92 +85,75 @@ class ChoiceDataTest(unittest.TestCase):
         self.temp.cleanup()
 
     def serve(self, test, blobs):
-        """Serves a test's files as blobs, with TESTS pinned to their digests."""
+        """Serves a test's fixture files, with its pins set to their digests."""
         spec = choice.TESTS[test]
         files = [(name, url, hashlib.sha256(b).hexdigest()) for (name, url, _), b in zip(spec["files"], blobs)]
         for (name, _, _), b in zip(spec["files"], blobs):
             self.files[f"/{test}/{name}"] = b
         return patch.dict(choice.TESTS, {test: dict(spec, files=files, size=None)})
 
-    def run_test(self, test, blobs):
-        with self.serve(test, blobs), contextlib.redirect_stdout(io.StringIO()):
+    def run_test(self, test, blobs=None):
+        with self.serve(test, blobs or BLOBS[test]), contextlib.redirect_stdout(io.StringIO()):
             choice.get(test, str(self.root), False)
         rows = [json.loads(l) for l in (self.root / f"{test}.jsonl").read_text(encoding="utf-8").splitlines()]
         lines = (self.root / f"{test}.questions.txt").read_text(encoding="utf-8").splitlines()
         self.assertEqual(len(rows), len(lines))
-        for r in rows:
-            self.assertTrue(all(o.startswith(" ") and o.strip() for o in r["options"]), r)
-            self.assertTrue(0 <= r["gold"] < len(r["options"]))
         return rows, lines
 
-    def blobs_for(self, test):
-        names = [name for name, _, _ in choice.TESTS[test]["files"]]
-        table = {"arc-easy": [ARC], "arc-challenge": [ARC], "sciq": [SCIQ], "piqa": [PIQA, PIQA_LABELS],
-                 "hellaswag": [HELLASWAG], "boolq": [BOOLQ], "pubmedqa": [PUBMEDQA, PUBMEDQA_TEST],
-                 "openbookqa": [OBQA]}
-        blobs = table[test]
-        # A test whose upstream file is a zip gets the fixture zipped.
-        member = choice.TESTS[test].get("member")
-        if member:
-            blobs = [zipped(member, blobs[0])] + blobs[1:]
-        self.assertEqual(len(blobs), len(names), test)
-        return blobs
+    def test_every_test_has_fixtures(self):
+        self.assertEqual(set(BLOBS), set(choice.TESTS))
+        for test, spec in choice.TESTS.items():
+            self.assertEqual(len(BLOBS[test]), len(spec["files"]), test)
+            for _name, url, digest in spec["files"]:
+                self.assertTrue(url.startswith("https://"), url)
+                self.assertRegex(digest, "^[0-9a-f]{64}$")
 
-    def test_every_converter(self):
-        for test in choice.TESTS:
-            with self.subTest(test=test):
-                rows, lines = self.run_test(test, self.blobs_for(test))
-                self.assertTrue(rows and lines[0])
+    def test_piqa(self):
+        rows, lines = self.run_test("piqa")
+        self.assertEqual(rows[0], {"id": "0", "context": "Question: Open a fixture\nAnswer:",
+                                   "options": [" pull it", " push it"], "gold": 1})
+        self.assertEqual(rows[1]["gold"], 0)
+        self.assertEqual(lines[0], "Question: Open a fixture Answer: pull it push it")
 
-    def test_formats(self):
-        if "arc-easy" in choice.TESTS:
-            rows, lines = self.run_test("arc-easy", self.blobs_for("arc-easy"))
-            self.assertEqual(rows[0], {"id": "f1", "context": "Question: Which is a fixture?\nAnswer:",
-                                       "options": [" this one", " that one"], "gold": 1})
-            self.assertEqual(rows[1]["gold"], 2)  # numeric labels
-            self.assertEqual(lines[0], "Question: Which is a fixture? Answer: this one that one")
-        if "sciq" in choice.TESTS:
-            rows, _ = self.run_test("sciq", self.blobs_for("sciq"))
-            gold = hashlib.sha256(b"What is made up?").digest()[0] % 4
-            self.assertEqual(rows[0]["options"][rows[0]["gold"]], " this")
-            self.assertEqual(rows[0]["gold"], gold)
-            self.assertEqual(rows[0]["context"], "Support text.\nQuestion: What is made up?\nAnswer:")
-            self.assertEqual(rows[1]["context"], "Question: No support?\nAnswer:")
-        if "hellaswag" in choice.TESTS:
-            rows, _ = self.run_test("hellaswag", self.blobs_for("hellaswag"))
-            self.assertEqual(rows[0]["context"], "Fixtures: A person writes a test. They")
-            self.assertEqual(rows[0]["options"][0], " run it. twice.")
-        if "pubmedqa" in choice.TESTS:
-            rows, _ = self.run_test("pubmedqa", self.blobs_for("pubmedqa"))
-            self.assertEqual(rows, [{"id": "111", "context": "Abstract: First part. Second part.\n"
-                                     "Question: Does it work?\nAnswer:", "options": [" yes", " no", " maybe"],
-                                     "gold": 2}])
-        if "boolq" in choice.TESTS:
-            rows, _ = self.run_test("boolq", self.blobs_for("boolq"))
-            self.assertEqual(rows[0]["options"], [" no", " yes"])
-            self.assertEqual(rows[0]["gold"], 1)
-        if "piqa" in choice.TESTS:
-            rows, _ = self.run_test("piqa", self.blobs_for("piqa"))
-            self.assertEqual(rows[0]["gold"], 1)
+    def test_pubmedqa(self):
+        # Only the test questions, and never their conclusion (LONG_ANSWER).
+        rows, lines = self.run_test("pubmedqa")
+        self.assertEqual(rows, [{"id": "111", "context": "Abstract: First part. Second part.\n"
+                                 "Question: Does it work?\nAnswer:", "options": [" yes", " no", " maybe"],
+                                 "gold": 2}])
+        self.assertNotIn("It does", lines[0])
+        # A test label that disagrees with the data stops the script.
+        blobs = [BLOBS["pubmedqa"][0], json.dumps({"111": "yes"}).encode()]
+        with self.assertRaises(SystemExit):
+            self.run_test("pubmedqa", blobs)
+
+    def test_boolq(self):
+        rows, _ = self.run_test("boolq")
+        self.assertEqual(rows[0], {"id": "0", "context": "Fixture -- A made-up passage.\n"
+                                   "Question: is this a fixture?\nAnswer:", "options": [" no", " yes"], "gold": 1})
+        self.assertEqual(rows[1]["gold"], 0)
 
     def test_changed_upstream_file_stops(self):
-        test = next(iter(choice.TESTS))
-        blobs = self.blobs_for(test)
-        with self.serve(test, blobs):
-            self.files[f"/{test}/{choice.TESTS[test]['files'][0][0]}"] = blobs[0] + b"\n"
+        blobs = BLOBS["piqa"]
+        with self.serve("piqa", blobs):
+            self.files["/piqa/valid.jsonl"] = blobs[0] + b"\n"
             with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit) as stop:
-                choice.get(test, str(self.root), False)
+                choice.get("piqa", str(self.root), False)
         self.assertIn("sha256", str(stop.exception))
-        self.assertFalse((self.root / f"{test}.jsonl").exists())
+        self.assertFalse((self.root / "piqa.jsonl").exists())
+
+    def test_wrong_size_stops(self):
+        with self.serve("piqa", BLOBS["piqa"]), patch.dict(choice.TESTS["piqa"], size=1838):
+            with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit) as stop:
+                choice.get("piqa", str(self.root), False)
+        self.assertIn("expected 1838", str(stop.exception))
 
     def test_rerun_keeps_timestamps(self):
-        test = next(iter(choice.TESTS))
-        blobs = self.blobs_for(test)
-        self.run_test(test, blobs)
-        out = self.root / f"{test}.jsonl"
+        self.run_test("boolq")
+        out = self.root / "boolq.jsonl"
         first = out.read_bytes()
         os.utime(out, (1, 1))
-        self.run_test(test, blobs)
+        self.run_test("boolq")
         self.assertEqual(out.stat().st_mtime_ns, 1_000_000_000)
         self.assertEqual(out.read_bytes(), first)
 
