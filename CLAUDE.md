@@ -248,6 +248,18 @@ Math problem-solving accuracy is the first evaluation focus.
   (raw: `data/openstax-raw/`, `--fetch`). 50 checked by hand: 4 bad in the
   first draw, all right after four rules; the cross-check found 4 wrong
   keys in the LibreTexts sets (README). Same use as LibreTexts'.
+- `cxxgpt redraw-qa` (`src/redraw_qa.h`, 2026-10-17, docs/redraw-qa.md):
+  GSM8K train's human questions with new numbers and exact answers. The
+  gold notes become a formula over the question's numbers (self-train's
+  `read_calcs`); kept only if every number has one clear source (no
+  constant from nowhere: mental arithmetic), every new result keeps its
+  kind, and the solution's numbers name the same units as the question's;
+  1, 2, 100, words, unit facts, ordinals, times, bank notes, fractions and
+  years stay. Each variant is checked again by calc.h, masked words and
+  self-train's re-draw check. 3,642 of 6,966 convert; 0 dev/test leaks;
+  three hand-check rounds of 30, the last all right (60 variants from a
+  later 0.01 rule unchecked but 3)
+  (docs/results/redraw-qa-check.md). Not in a mix (the owner decides).
 - GSM8K dev set: `scripts/get_data.py` holds out 500 GSM8K train problems
   (the 500 questions with the smallest sha256); `DEV=1 scripts/night.sh`
   validates on it instead of the test set. `cxxgpt leak-check` finds

@@ -1047,6 +1047,33 @@ a GSM8K dev or test question.
   - Use: as the LibreTexts sets, for evaluation and self-train only, and
     not a held-out test (the first editions are in the training data).
 
+**GSM8K train with new numbers (2026-10-17, `cxxgpt redraw-qa`).** GSM8K
+train's human questions, each with its numbers swapped for new ones and an
+exact worked solution and answer for them (`src/redraw_qa.h`,
+[docs/redraw-qa.md](docs/redraw-qa.md)): the model has learned the gold
+solutions by heart, but cannot recite the answer to a question it has seen
+with other numbers. The gold solution's calculator notes become a formula
+over the question's numbers (self-train's re-draw code); a problem is kept
+only if every number has one clear source, and every new result keeps its
+kind (whole, positive, at most two decimals). Every variant is checked
+again by calc.h and by self-train's re-draw check.
+- **Yield:** 3,642 of 6,966 problems (52.3%) from
+  `data/gsm8k-notes/gsm8k-train.txt` (dev and test held out; the tool
+  refuses a dev or test file); 10,803 variants with `--versions 3`. The
+  rest are mostly arithmetic done in the head (a constant from nowhere,
+  1,085) and numbers that could stand for two things (932).
+- **Leak check:** 0 of GSM8K dev and test share a 13-word run with the
+  variants, or the same question with numbers masked.
+- **Hand checks:** three rounds of 30. Each round's findings became a rule
+  ("$40 bills"; "x 5 days" for weekdays taken for Saturday's "5 hours", a
+  wrong answer; "an 8 day work week"; "a gallon is 15 pints"); the last
+  round had 30 of 30 answers right (docs/results/redraw-qa-check.md; 60
+  variants from a last rule, 0.01 for percent, came after it, 3 of them read). Odd
+  but right stories remain ("245 campers last week"), and so do GSM8K's
+  own misreadings.
+- **Use:** not in a mix (the owner decides). `prep-qa --keep-calc` makes
+  tokens of `OUT.jsonl`.
+
 To see whether math training costs the model its general text, score a
 checkpoint on held-out text it never trained on, the corpus's validation
 files (encoded with `data/licensed-10b/tok.bpe`, so only for models with
