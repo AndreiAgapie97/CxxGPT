@@ -1085,6 +1085,35 @@ for dev in 0 1; do
 done
 printf 'CLI: leak-check scans questions across lines; DEV selects both validation files\n'
 
+# redraw-qa: GSM8K train problems written again with other numbers. One
+# converts; in the other a result (2 x 8 = 16) has a question number's value
+# (16 slices). The variants read back with prep-qa --keep-calc, the same
+# seed writes the same file, and a dev or test file is refused.
+{
+    printf '%s\t%s\t%s\t%s\t%s\n' gsm8k 1 \
+        "Natalia sold clips to 48 of her friends in April, and then she sold half as many clips in May. How many clips did Natalia sell altogether in April and May?" \
+        "Natalia sold 48/2 = <<48/2=24>>24 clips in May.\\nNatalia sold 48+24 = <<48+24=72>>72 clips altogether in April and May." 72
+    printf '%s\t%s\t%s\t%s\t%s\n' gsm8k 1 \
+        "Albert buys 2 large pizzas and 2 small pizzas. A large pizza has 16 slices and a small pizza has 8 slices. If he eats it all, how many pieces does he eat that day?" \
+        "He eats 32 from the largest pizzas because 2 x 16 = <<2*16=32>>32\\nHe eats 16 from the small pizza because 2 x 8 = <<2*8=16>>16\\nHe eats 48 pieces because 32 + 16 = <<32+16=48>>48" 48
+} > "$TEST_DIR/redraw-train.txt"
+"$CXXGPT" redraw-qa --problems "$TEST_DIR/redraw-train.txt" --out "$TEST_DIR/redraw-a" --versions 2 > "$TEST_DIR/redraw.log"
+grep -q '2 problems, 1 converted, 2 variants' "$TEST_DIR/redraw.log"
+grep -q '"ambiguous": 1' "$TEST_DIR/redraw-a.json"
+[[ $(wc -l < "$TEST_DIR/redraw-a.jsonl") == 2 && $(wc -l < "$TEST_DIR/redraw-a.audit.jsonl") == 2 ]]
+"$CXXGPT" prep-qa --in "$TEST_DIR/redraw-a.jsonl" --out "$TEST_DIR/redraw-prep" --keep-calc > "$TEST_DIR/redraw-prep.log"
+grep -q ': 2 problems' "$TEST_DIR/redraw-prep.log"
+cmp <(cut -f3- "$TEST_DIR/redraw-prep.txt") <(cut -f3- "$TEST_DIR/redraw-a.txt")
+require_absent -q 'Natalia sold clips to 48 ' "$TEST_DIR/redraw-a.txt"
+"$CXXGPT" redraw-qa --problems "$TEST_DIR/redraw-train.txt" --out "$TEST_DIR/redraw-b" --versions 2 > /dev/null
+cmp "$TEST_DIR/redraw-a.txt" "$TEST_DIR/redraw-b.txt"
+cp "$TEST_DIR/redraw-train.txt" "$TEST_DIR/gsm8k-dev.txt"
+status=0
+"$CXXGPT" redraw-qa --problems "$TEST_DIR/gsm8k-dev.txt" --out "$TEST_DIR/redraw-dev" > "$TEST_DIR/redraw-dev.log" 2>&1 || status=$?
+[[ "$status" == 1 ]]
+grep -q 'looks like a dev or test file' "$TEST_DIR/redraw-dev.log"
+printf 'CLI: redraw-qa writes GSM8K train questions again with other numbers\n'
+
 # Without MIX, night.sh trains on the RunPod model's last mix, and stops
 # before training when one of its files is missing.
 math="$TEST_DIR/night-data/targeted-math"

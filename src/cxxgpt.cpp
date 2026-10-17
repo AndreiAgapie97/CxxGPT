@@ -14,6 +14,8 @@
 //                                      (with --tools, the calculator's run too: FILE.calc-notes.jsonl)
 //   cxxgpt self-train --ckpt model.ckpt --problems FILE --out PREFIX  the model's own checked solutions
 //       [--tries 8] [--temp 0.7] [--keep K] -> PREFIX.txt, PREFIX.tok (masked), PREFIX.json
+//   cxxgpt redraw-qa --problems FILE.txt --out PREFIX   GSM8K train questions with new numbers
+//       [--versions 1] [--seed 1] -> PREFIX.txt, PREFIX.jsonl, PREFIX.audit.jsonl, PREFIX.json
 //   cxxgpt eval-loss --ckpt model.ckpt --data a.tok,b.tok [--all]  loss on held-out text
 //   cxxgpt qa-context --data a.tok,b.tok [--seq 512]   answers trained without their question
 //   cxxgpt bench-infer [--ckpt model.ckpt | model options]  ternary engine vs fp32 decode
@@ -50,6 +52,7 @@
 #include "reasoning.h"
 #include "reason_report.h"
 #include "redraw.h"
+#include "redraw_qa.h"
 #include "self_train.h"
 #include "tokenizer.h"
 #include "train.h"
@@ -226,6 +229,95 @@ int cmd_leak_check(Args& a) {
             ++shown;
         }
     }
+    return 0;
+}
+
+// Human word problems (GSM8K train, as prep-qa --keep-calc writes them)
+// written again with other numbers, exact answers and checked notes
+// (redraw_qa.h). Writes PREFIX.txt (a problems file), PREFIX.jsonl (GSM8K's
+// JSON Lines, for prep-qa --keep-calc), PREFIX.audit.jsonl (one line per
+// input problem: what became of it and why) and PREFIX.json (settings and
+// counts). Adds nothing to a training mix.
+int cmd_redraw_qa(Args& a) {
+    const std::string problems_path = a.str("problems"), out = a.str("out");
+    redraw_qa::Options o;
+    // Variants per problem at most, and draws of new numbers per variant.
+    o.versions = a.integer_int("versions", 1);
+    o.draws = a.integer_int("draws", 300);
+    const long seed = a.integer("seed", 1);
+    const long limit = a.integer("limit", 0);
+    a.done();
+    CHECK(!problems_path.empty() && !out.empty(),
+          "usage: cxxgpt redraw-qa --problems FILE.txt --out PREFIX [--versions 1] [--seed 1] [--draws 300] "
+          "[--limit N]\nFILE.txt: GSM8K train with its calculator notes (prep-qa --keep-calc), e.g. "
+          "data/gsm8k-notes/gsm8k-train.txt");
+    CHECK(o.versions > 0 && o.draws > 0 && seed >= 0 && limit >= 0,
+          "--versions and --draws must be positive, --seed and --limit not negative");
+    o.seed = uint64_t(seed);
+    // Dev and test problems are never written again: they are held out.
+    const std::string name = std::filesystem::path(problems_path).filename().string();
+    CHECK(name.find("dev") == std::string::npos && name.find("test") == std::string::npos,
+          "%s looks like a dev or test file: redraw-qa is for training problems only", problems_path.c_str());
+    std::vector<Problem> problems = load_problems(problems_path);
+    if (limit > 0 && size_t(limit) < problems.size()) problems.resize(size_t(limit));
+
+    std::vector<Problem> variants;
+    size_t by_reason[redraw_qa::kReasons] = {}, fixed = 0, numbers = 0, draws = 0, traced = 0;
+    FILE* audit = create_file(out + ".audit.jsonl", "wb");
+    CHECK(audit, "cannot write %s.audit.jsonl", out.c_str());
+    auto str = [](std::string_view s) { return "\"" + labels::json_escape(s) + "\""; };
+    for (size_t i = 0; i < problems.size(); ++i) {
+        const redraw_qa::Outcome r = redraw_qa::redraw_problem(problems[i], i, o);
+        ++by_reason[int(r.reason())];
+        draws += r.draws;
+        traced += r.traced ? r.variants.size() : 0;
+        std::string fixed_list;
+        for (const auto& q : r.analysis.question) {
+            ++numbers;
+            if (q.fixed_why.empty()) continue;
+            ++fixed;
+            fixed_list += std::string(fixed_list.empty() ? "" : ",") + str(q.n.written + " (" + q.fixed_why + ")");
+        }
+        std::fprintf(audit,
+                     "{\"row\":%zu,\"reason\":%s,\"detail\":%s,\"formula\":%s,\"variables\":%zu,\"fixed\":[%s],"
+                     "\"hundredths\":%s,\"draws\":%zu,\"variants\":%zu,\"retraced\":%s}\n",
+                     i + 1, str(redraw_qa::reason_name(r.reason())).c_str(),
+                     str(r.failed.empty() ? r.analysis.detail : r.failed).c_str(), str(r.analysis.formula).c_str(),
+                     r.analysis.variables.size(), fixed_list.c_str(), r.analysis.hundredths ? "true" : "false",
+                     r.draws, r.variants.size(), r.traced ? "true" : "false");
+        variants.insert(variants.end(), r.variants.begin(), r.variants.end());
+    }
+    CHECK(std::fclose(audit) == 0, "error writing %s.audit.jsonl", out.c_str());
+    save_problems(out + ".txt", variants);
+    FILE* jsonl = create_file(out + ".jsonl", "wb");
+    CHECK(jsonl, "cannot write %s.jsonl", out.c_str());
+    for (const Problem& v : variants)
+        std::fprintf(jsonl, "{\"question\": %s, \"answer\": %s}\n", str(v.question).c_str(),
+                     str(v.steps + "\n#### " + v.answer).c_str());
+    CHECK(std::fclose(jsonl) == 0, "error writing %s.jsonl", out.c_str());
+
+    std::string reasons;
+    for (int k = 0; k < redraw_qa::kReasons; ++k)
+        reasons += std::string(k ? ", " : "") + str(redraw_qa::reason_name(redraw_qa::Reason(k))) + ": " +
+                   std::to_string(by_reason[k]);
+    FILE* summary = create_file(out + ".json", "wb");
+    CHECK(summary, "cannot write %s.json", out.c_str());
+    std::fprintf(summary,
+                 "{\n  \"problems_file\": %s,\n  \"seed\": %ld,\n  \"versions\": %d,\n  \"draws\": %d,\n"
+                 "  \"problems\": %zu,\n  \"variants\": %zu,\n  \"question_numbers\": %zu,\n  \"fixed_numbers\": %zu,\n"
+                 "  \"draws_made\": %zu,\n  \"variants_retraced\": %zu,\n  \"reasons\": {%s}\n}\n",
+                 str(problems_path).c_str(), seed, o.versions, o.draws, problems.size(), variants.size(), numbers,
+                 fixed, draws, traced, reasons.c_str());
+    CHECK(std::fclose(summary) == 0, "error writing %s.json", out.c_str());
+    std::printf("%s: %zu problems, %zu converted, %zu variants -> %s.txt, %s.jsonl\n", problems_path.c_str(),
+                problems.size(), by_reason[0], variants.size(), out.c_str(), out.c_str());
+    std::printf("  %zu variants also passed self-train's re-draw check (the others use a percentage as its "
+                "hundredth, which it cannot read)\n",
+                traced);
+    for (int k = 1; k < redraw_qa::kReasons; ++k)
+        if (by_reason[k]) std::printf("  %-15s %zu\n", redraw_qa::reason_name(redraw_qa::Reason(k)), by_reason[k]);
+    CHECK(by_reason[int(redraw_qa::Reason::check)] == 0, "%zu variants failed the final check: a bug (see %s.audit.jsonl)",
+          by_reason[int(redraw_qa::Reason::check)], out.c_str());
     return 0;
 }
 
@@ -2283,6 +2375,7 @@ int main(int argc, char** argv) {
         {"self-train", cmd_self_train, "keeps the model's own right, checked solutions as training tokens"},
         {"eval-loss", cmd_eval_loss, "a checkpoint's loss on held-out token files"},
         {"bench-infer", cmd_bench_infer, "times the ternary inference engine against fp32 decoding"},
+        {"redraw-qa", cmd_redraw_qa, "writes GSM8K train questions again with new numbers and exact answers"},
         {"leak-check", cmd_leak_check, "finds questions that share a 13-word run with training files"},
         {"qa-context", cmd_qa_context, "how often training windows cut an answer off from its question"},
     };

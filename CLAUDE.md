@@ -236,6 +236,17 @@ Math problem-solving accuracy is the first evaluation focus.
   own keys are wrong a few percent of the time. For self-train and
   evaluation, not the mix; not held out (LibreTexts is in training)
   (README, "Textbook word problems with answer keys").
+- `cxxgpt redraw-qa` (`src/redraw_qa.h`, 2026-10-17, docs/redraw-qa.md):
+  GSM8K train's human questions with new numbers and exact answers. The
+  gold notes become a formula over the question's numbers (self-train's
+  `read_calcs`); kept only if every number has one clear source (no
+  constant from nowhere: mental arithmetic), every new result keeps its
+  kind, and the solution's numbers name the same units as the question's;
+  1, 2, 100, words, unit facts, ordinals, times, bank notes, fractions and
+  years stay. Each variant is checked again by calc.h, masked words and
+  self-train's re-draw check. 3,658 of 6,966 convert; 0 dev/test leaks;
+  three hand-check rounds of 30, the last all right
+  (docs/results/redraw-qa-check.md). Not in a mix (the owner decides).
 - GSM8K dev set: `scripts/get_data.py` holds out 500 GSM8K train problems
   (the 500 questions with the smallest sha256); `DEV=1 scripts/night.sh`
   validates on it instead of the test set. `cxxgpt leak-check` finds

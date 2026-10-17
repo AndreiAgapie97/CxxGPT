@@ -27,6 +27,7 @@
 #include "test_vote.h"
 #include "test_self_train.h"
 #include "test_redraw.h"
+#include "test_redraw_qa.h"
 #include "test_no_repeat.h"
 #include "test_qa_context.h"
 #include "test_unlikelihood.h"
@@ -68,6 +69,7 @@ int main(int argc, char** argv) {
         {"vote", test_vote},
         {"self-train", test_self_train},
         {"re-draw", test_redraw},
+        {"re-drawn GSM8K problems", test_redraw_qa},
         {"no-repeat block", test_no_repeat},
         {"qa context", test_qa_context},
         {"unlikelihood", test_unlikelihood},
