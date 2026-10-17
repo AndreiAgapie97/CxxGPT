@@ -159,6 +159,7 @@ patterns for inspection and do not establish the cause of a wrong answer.
 | `train` | trains or resumes a model (CPU, or GPU with `cxxgpt-gpu --gpu`); `--val-sources NAME=FILE,...` scores each held-out file on its own at every validation, Q&A files also on their final answers (`--val-log FILE.csv`) |
 | `eval-reasoning` | exact-answer accuracy per task and difficulty; greedy by default, or a vote over several sampled tries (below); `--tools calc-notes` or `calc-plain` also scores the same problems with an exact calculator filling in the model's arithmetic ([docs/calculator.md](docs/calculator.md)); `--gpu` (with `cxxgpt-gpu`) decodes on the GPU, with exact fp32 products by default, so the scores are the CPU's (`--matmul tf32` or `bf16` scores the model as training computes it) |
 | `eval-loss` | a checkpoint's loss on held-out token files, one line per file: by default on the same random windows as `train --val` (`--batch 8 --batches 20`, `night.sh`'s 160 windows; with training's `--batch` and `--eval-batches` it repeats training's last validation number), `--all` on every token once; `--gpu` (with `cxxgpt-gpu`), exact fp32 products by default |
+| `self-train` | samples a model's own solutions to training problems and keeps only the ones with the right answer and right arithmetic, as a masked token file (below) |
 | `sample` | generates text from a prompt (`--tools` as for `eval-reasoning`); `--gpu` (with `cxxgpt-gpu`) chooses every token on the GPU, the same text as the CPU's |
 | `bench-infer` | times the ternary inference engine against an fp32 baseline |
 | `leak-check` | finds questions (such as the GSM8K dev set) that share a run of 13 words with training files |
@@ -217,6 +218,54 @@ patterns for inspection and do not establish the cause of a wrong answer.
   they fire on right answers too, so the summary reports them for right
   and wrong answers apart. Labels describe the run without the
   calculator.
+
+### The model's own checked solutions (self-train)
+
+```sh
+build/cxxgpt-gpu self-train --gpu --ckpt runs/rp1.ckpt --bpe data/licensed-10b/tok.bpe     --problems data/licensed-10b/gsm8k-train.txt --out data/self/rp1-gsm8k     --tries 8 --temp 0.7 --seed 1 --keep 2     --exclude data/licensed-10b/gsm8k-test.txt,data/licensed-10b/gsm8k-dev.txt
+```
+
+The model tries every problem `--tries` times (the same sampler and seeds
+as `eval-reasoning --tries`), and a try is kept only if (`src/self_train.h`):
+- it finished its `#### ` line with the right answer, and wrote some work
+  before it;
+- every calculation in the work is right by the exact calculator, both
+  `<<48/2=24>>` notes (and the number written after a note) and plain
+  `16 x 7 = 112`, found as `--labels` finds them. A right answer through a
+  wrong step (`3 + 4 = 8, so 7`) is a lucky answer, and would teach the
+  mistake. A calculation the calculator cannot read (`10 / 3 = 3.33`) is
+  counted, not rejected;
+- no line of 12 or more characters is written twice (`--allow-loops` keeps
+  those);
+- it holds no `[[no-loss]]` marker and no BOS byte.
+
+Of those, an exact copy of an earlier try's work is dropped, and at most
+`--keep K` per problem are kept (0, the default: every distinct one), in
+try order, so the same seed writes the same files:
+- `OUT.txt`: the kept solutions as a problems file (for a person,
+  `leak-check` or `eval-reasoning`);
+- `OUT.tok`: the same as `prep-qa` writes them, the question masked out
+  and the work and `#### ` answer trained on, the answer as the problem
+  file gives it (`1200`, where the model may have written `1,200`);
+- `OUT.json`: the settings (checkpoint, problems, tokenizer) and counts,
+  the record of where the data came from.
+
+The summary gives the problems tried, the first try's accuracy, the
+problems any try solved (pass@N) and those with a kept solution, and every
+try's verdict (`kept`, `unfinished`, `wrong`, `no_work`, `markers`,
+`arithmetic`, `loop`, `duplicate`, `over_cap`, `too_long`); `--audit
+FILE.jsonl` writes every try's text and verdict. `--tools calc-notes`
+lets the calculator finish the model's notes while it writes, as in
+`eval-reasoning`.
+
+The problems must be training problems: GSM8K train (as `prep-qa` writes
+it, without the dev problems), or the train split of a generator, never a
+dev or test set. Nothing in a problems file says which split it is, so
+pass the held-out sets to `--exclude` (`gen-math`'s rule: a 13-word run,
+or the same numbers and answer); excluded problems are counted. Whether
+self-generated files join a night's mix, and how much, is the owner's
+decision (docs/research-plan.md, "Learning from its own checked
+solutions"); keep the original data in the mix too.
 
 ### Generated word problems
 
@@ -493,8 +542,12 @@ on dev, from about step 45,000, weights only: 20/500 dev, 47/1319 test).
 
 **Data provenance (2026-10-16).** What the models learn from, and why: a
 model meant to be published should depend only on openly licensed text,
-human-written problems and our own programs, never on text another
-company's AI model wrote.
+human-written problems, our own programs and our own models, never on text
+another company's AI model (or any model under a restrictive licence)
+wrote. Our own models' output is allowed (owner's decision, 2026-10-16)
+when the model that wrote it trained only on clean data itself, such as
+`self-train` files from the RunPod model or the nights that continue it;
+each such file's `OUT.json` names the checkpoint that wrote it.
 
 What trains the models now (`night.sh`'s default mix, above):
 - **Common Pile:** openly licensed text (open textbooks, DOAB books, arXiv
@@ -503,6 +556,9 @@ What trains the models now (`night.sh`'s default mix, above):
 - **`gen-word` word problems:** written by our own C++ program from
   templates and seeds, with exact answers. No AI model writes them.
 - **GSM8K:** human-written problems and solutions, MIT licence.
+
+Not in the mix yet: `self-train` solutions (the model's own, checked; the
+owner decides when and how much).
 
 Which checkpoints are clean to publish: **the RunPod model** (2026-10-16)
 and the nights that continue it. They trained on the data above only, from

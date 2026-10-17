@@ -11,6 +11,8 @@
 //                                      sample N tries per problem; the headline becomes their maj@N vote
 //       [--no-repeat N]                never write a run of N tokens twice (also on sample)
 //       [--labels FILE.jsonl]          why each first try is wrong, one JSON line per problem
+//   cxxgpt self-train --ckpt model.ckpt --problems FILE --out PREFIX  the model's own checked solutions
+//       [--tries 8] [--temp 0.7] [--keep K] -> PREFIX.txt, PREFIX.tok (masked), PREFIX.json
 //   cxxgpt eval-loss --ckpt model.ckpt --data a.tok,b.tok [--all]  loss on held-out text
 //   cxxgpt qa-context --data a.tok,b.tok [--seq 512]   answers trained without their question
 //   cxxgpt bench-infer [--ckpt model.ckpt | model options]  ternary engine vs fp32 decode
@@ -46,6 +48,7 @@
 #include "qa_context.h"
 #include "reasoning.h"
 #include "reason_report.h"
+#include "self_train.h"
 #include "tokenizer.h"
 #include "train.h"
 #include "train_control.h"
@@ -404,13 +407,6 @@ int cmd_text2tok(Args& a) {
         std::printf("warning: %zu chunks longer than %zu bytes were written as plain bytes, without merges\n",
                     long_chunks, Tokenizer::kMaxChunkBytes);
     return 0;
-}
-
-// BOS and the prompt (not trained on), then the completion (trained on).
-void append_problem(TokenData& d, const Problem& p, const Tokenizer& tok) {
-    const std::vector<int> prompt = prompt_tokens(p, tok);
-    for (int t : prompt) d.tokens.push_back(uint16_t(t)), d.mask.push_back(0);
-    encode_loss_marked(p.completion(), tok, d.tokens, d.mask);
 }
 
 // "a.tok,b.tok*3": the files concatenated, b three times (to weight a small
@@ -912,6 +908,156 @@ int cmd_eval_reasoning(Args& a) {
                     assisted.tool_calls.fired, assisted.tool_calls.malformed);
     }
     std::printf("(%.1f s)\n", now_seconds() - t0);
+    return 0;
+}
+
+// The model's own checked solutions as training data (self_train.h): every
+// problem sampled --tries times, and only the tries with the right answer
+// and right arithmetic kept, written as OUT.txt (problems), OUT.tok (masked
+// tokens, as prep-qa writes them) and OUT.json (settings and counts). The
+// problems must be training problems (GSM8K train, generator train splits),
+// never a dev or test set: --exclude drops any that repeat those.
+int cmd_self_train(Args& a) {
+    ThreadPool tp(threads_arg(a));
+    g_pool = &tp;
+    const std::string ckpt = a.str("ckpt", "model.ckpt"), problems_path = a.str("problems");
+    const std::string out = a.str("out");
+    const int batch = a.integer_int("batch", 64), limit = a.integer_int("limit", 0);
+    const int max_new = a.integer_int("max-new", 200);
+    CHECK(max_new > 0, "--max-new must be positive");
+    VoteOpts vote;
+    vote.tries = a.integer_int("tries", 8);
+    CHECK(vote.tries > 0, "--tries must be positive");
+    vote.temperature = a.real("temp", 0.7);
+    CHECK(vote.temperature > 0, "--temp must be above 0: greedy tries are all the same");
+    // Each try is seeded from (seed, problem, try), as in eval-reasoning.
+    const long seed = a.integer("seed", 1);
+    CHECK(seed >= 0, "--seed must not be negative");
+    vote.seed = uint64_t(seed);
+    vote.no_repeat = a.integer_int("no-repeat", 0);
+    CHECK(vote.no_repeat == 0 || vote.no_repeat >= 2, "--no-repeat must be 0 (off) or at least 2");
+    self_train::Options opts;
+    // Kept tries per problem at most (0: every distinct one).
+    opts.keep = a.integer_int("keep", 0);
+    CHECK(opts.keep >= 0, "--keep must not be negative");
+    opts.allow_loops = a.flag("allow-loops");
+    // Questions not to train on, such as GSM8K test and dev (gen-math's rule).
+    const std::string exclude = a.str("exclude", "");
+    // Every try's text and verdict, one JSON line per try, for audits.
+    const std::string audit_path = a.str("audit");
+    const std::string bpe = a.str("bpe");
+    const calc::Mode tool = calculator_mode(a);
+    const bool use_gpu = a.flag("gpu");
+    CHECK(use_gpu || !a.has("matmul"), "--matmul needs --gpu");
+    const std::string matmul = a.str("matmul", "fp32");
+    CHECK(matmul == "fp32" || matmul == "tf32" || matmul == "bf16", "--matmul takes fp32, tf32 or bf16");
+    a.done();
+    CHECK(!problems_path.empty() && !out.empty(),
+          "usage: cxxgpt self-train --ckpt model.ckpt --problems FILE.txt --out PREFIX [--tries 8 --temp 0.7]");
+#ifndef CXXGPT_CUDA
+    CHECK(!use_gpu, "this cxxgpt was built without CUDA; use cxxgpt-gpu (make gpu) for --gpu");
+#endif
+    const Tokenizer tok = load_tokenizer(bpe);
+    Model<float> model(peek_checkpoint_config(ckpt));
+    load_checkpoint(ckpt, model, nullptr, nullptr);
+#ifdef CXXGPT_CUDA
+    std::unique_ptr<GpuTrainer> gpu;
+    int gpu_batch = 0;
+    if (use_gpu) {
+        const Matmul mm = matmul == "fp32" ? Matmul::fp32 : matmul == "bf16" ? Matmul::bf16 : Matmul::tf32;
+        gpu = std::make_unique<GpuTrainer>(model.cfg, model.infos, mm, false, /*inference=*/true);
+        gpu->set_params(model.params.data());
+        gpu->set_router_bias(model.router_bias);
+        gpu_batch = gpu->decode_capacity(batch);
+        CHECK(gpu_batch >= vote.tries,
+              "the GPU has room for %d answers at a time (%zu MB each, %zu MB free), fewer than --tries %d",
+              gpu_batch, gpu->decode_bytes_per_sequence() >> 20, GpuTrainer::free_device_bytes() >> 20, vote.tries);
+        std::printf("gpu: %s, %s matmuls, %d answers at a time\n", GpuTrainer::device_name().c_str(),
+                    matmul.c_str(), gpu_batch);
+    }
+#endif
+    // Each problem keeps its place in the file as its number, so its tries
+    // are seeded the same whatever --limit or --exclude leave out.
+    const std::vector<Problem> all = load_problems(problems_path);
+    std::vector<Problem> problems;
+    std::unique_ptr<Exclusions> exclusions;
+    if (!exclude.empty()) exclusions = std::make_unique<Exclusions>(exclude);
+    size_t excluded = 0;
+    const size_t wanted = limit > 0 ? std::min(size_t(limit), all.size()) : all.size();
+    for (size_t i = 0; i < wanted; ++i) {
+        const size_t place = limit > 0 ? i * all.size() / wanted : i;  // an even sample, as eval-reasoning's
+        if (exclusions && exclusions->excludes(all[place], 0)) {
+            ++excluded;
+            continue;
+        }
+        problems.push_back(all[place]);
+        vote.problem_ids.push_back(place);
+    }
+    const double t0 = now_seconds();
+    calc::Counts calls;
+    std::vector<std::vector<std::string>> texts;
+#ifdef CXXGPT_CUDA
+    if (gpu) {
+        GpuDecoder dec{model.cfg, *gpu};
+        texts = sample_tries(dec, problems, tok, gpu_batch, max_new, vote, tool, &calls);
+    }
+#endif
+    if (texts.empty() && !problems.empty()) texts = sample_tries(model, problems, tok, batch, max_new, vote, tool, &calls);
+    const self_train::Result r = self_train::keep_checked(problems, texts, opts);
+    self_train::write(out, r.kept, tok);
+
+    auto pct = [](size_t part, size_t whole) { return 100.0 * double(part) / double(std::max<size_t>(1, whole)); };
+    const std::string no_repeat = vote.no_repeat ? ", no-repeat " + std::to_string(vote.no_repeat) : "";
+    std::printf("%zu problems (%zu excluded), %d tries each (temp %g, seed %ld%s), %zu tries\n", r.problems,
+                excluded, vote.tries, vote.temperature, seed, no_repeat.c_str(), r.tries);
+    std::printf("first try right: %.1f%% (%zu); solved by any try (pass@%d): %.1f%% (%zu); "
+                "with a kept solution: %.1f%% (%zu)\n",
+                pct(r.first_right, r.problems), r.first_right, vote.tries, pct(r.solved, r.problems), r.solved,
+                pct(r.solved_kept, r.problems), r.solved_kept);
+    std::printf("tries by verdict:");
+    for (int v = 0; v < self_train::kVerdicts; ++v)
+        std::printf(" %s %zu", self_train::verdict_name(self_train::Verdict(v)), r.by_verdict[v]);
+    std::printf("\ncalculations in the right tries' work: %zu (%zu the calculator could not read)\n", r.calcs,
+                r.unreadable);
+    if (tool != calc::Mode::none)
+        std::printf("calculator calls: %zu fired, %zu malformed\n", calls.fired, calls.malformed);
+    std::printf("kept %zu solutions -> %s.txt, %s.tok, %s.json (%.1f s)\n", r.kept.size(), out.c_str(),
+                out.c_str(), out.c_str(), now_seconds() - t0);
+
+    auto str = [](const std::string& s) { return "\"" + labels::json_escape(s) + "\""; };
+    char temp[32];
+    std::snprintf(temp, sizeof temp, "%g", vote.temperature);
+    std::string json = "{\"ckpt\":" + str(ckpt) + ",\"problems\":" + str(problems_path) + ",\"bpe\":" + str(bpe) +
+                       ",\"exclude\":" + str(exclude) + ",\"limit\":" + std::to_string(limit) +
+                       ",\"tries\":" + std::to_string(vote.tries) + ",\"temp\":" + std::string(temp) +
+                       ",\"seed\":" + std::to_string(seed) + ",\"no_repeat\":" + std::to_string(vote.no_repeat) +
+                       ",\"max_new\":" + std::to_string(max_new) + ",\"tools\":" +
+                       str(tool == calc::Mode::notes ? "calc-notes" : tool == calc::Mode::plain ? "calc-plain" : "none") +
+                       ",\"keep\":" + std::to_string(opts.keep) + ",\"allow_loops\":" +
+                       (opts.allow_loops ? "true" : "false") + ",\"gpu\":" + (use_gpu ? "true" : "false") +
+                       ",\"matmul\":" + str(matmul) + ",\"problems_tried\":" + std::to_string(r.problems) +
+                       ",\"excluded\":" + std::to_string(excluded) + ",\"first_right\":" +
+                       std::to_string(r.first_right) + ",\"solved\":" + std::to_string(r.solved) +
+                       ",\"solved_kept\":" + std::to_string(r.solved_kept) + ",\"kept\":" +
+                       std::to_string(r.kept.size()) + ",\"verdicts\":{";
+    for (int v = 0; v < self_train::kVerdicts; ++v)
+        json += std::string(v ? "," : "") + str(self_train::verdict_name(self_train::Verdict(v))) + ":" +
+                std::to_string(r.by_verdict[v]);
+    json += "}}\n";
+    FILE* f = create_file(out + ".json", "wb");
+    CHECK(f && std::fputs(json.c_str(), f) >= 0 && std::fclose(f) == 0, "cannot write %s.json", out.c_str());
+    if (!audit_path.empty()) {
+        FILE* log = create_file(audit_path, "wb");
+        CHECK(log, "cannot write %s", audit_path.c_str());
+        for (size_t i = 0; i < problems.size(); ++i)
+            for (size_t t = 0; t < texts[i].size(); ++t)
+                CHECK(std::fprintf(log, "{\"problem\":%zu,\"try\":%zu,\"verdict\":%s,\"text\":%s}\n",
+                                   vote.problem_ids[i], t, str(self_train::verdict_name(r.verdicts[i][t])).c_str(),
+                                   str(texts[i][t]).c_str()) >= 0,
+                      "error writing %s", audit_path.c_str());
+        CHECK(std::fclose(log) == 0, "error writing %s", audit_path.c_str());
+        std::printf("every try: %s\n", audit_path.c_str());
+    }
     return 0;
 }
 
@@ -1952,6 +2098,7 @@ int main(int argc, char** argv) {
         {"gen-math", cmd_gen_math, "writes math problems (equations, fractions) that a second solver checks"},
         {"prep-qa", cmd_prep_qa, "turns question/answer JSON Lines into problems and token files"},
         {"eval-reasoning", cmd_eval_reasoning, "exact-answer accuracy on a problems file"},
+        {"self-train", cmd_self_train, "keeps the model's own right, checked solutions as training tokens"},
         {"eval-loss", cmd_eval_loss, "a checkpoint's loss on held-out token files"},
         {"bench-infer", cmd_bench_infer, "times the ternary inference engine against fp32 decoding"},
         {"leak-check", cmd_leak_check, "finds questions that share a 13-word run with training files"},

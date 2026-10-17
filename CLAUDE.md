@@ -241,8 +241,24 @@ Math problem-solving accuracy is the first evaluation focus.
   vocabulary sizes, so nothing would catch it). `night.sh STEP0=46946
   LR=1.2e-4` continues the checkpoint (docs/LAPTOP.md, "Continuing the
   RunPod model"; not yet run on the laptop). Only openly licensed
-  text, human-written problems and our own generators' output train the
-  models, never text an AI model wrote.
+  text, human-written problems, our own generators' output and our own
+  models' output train the models, never text another company's AI model
+  (or one under a restrictive licence) wrote. Our own model's output is
+  allowed only if that model trained on clean data alone (owner's
+  decision, 2026-10-16; README, "Data provenance").
+- `cxxgpt self-train` (`src/self_train.h`, research plan item 3): samples
+  `--tries` solutions per training problem (`sample_tries`, the sampler
+  and seeds of `eval-reasoning --tries`, CPU or `--gpu`) and keeps a try
+  only with the right answer, some work, every calculation right by
+  calc.h (notes, the number after a note, and plain `16 x 7 = 112`, as
+  failure_labels.h finds them), no repeated line (`--allow-loops`) and no
+  `[[no-loss]]` marker; exact copies dropped, at most `--keep K` per
+  problem. Writes `OUT.txt` (problems), `OUT.tok` (prep-qa's masking:
+  question masked, work and gold answer trained) and `OUT.json`
+  (settings, counts). `--exclude` drops problems repeating dev/test
+  questions. Tests: `tests/test_self_train.h` (scripted fake model) and
+  `tests/test_cli.sh`. On rp1 (CPU, 8 gen-word train problems x 4 tries):
+  27 kept of 32. Self-generated data is in no mix: the owner decides.
 - `src/cxxgpt.cpp`: the CLI (train, sample, eval, data prep, benchmarks).
 - `scripts/get_data.py`: downloads GSM8K into `data/gsm8k/` as JSON Lines
   (for `prep-qa`), with the 500 dev problems held out of train (the same
