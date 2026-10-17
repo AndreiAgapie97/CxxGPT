@@ -109,6 +109,13 @@ inline std::vector<Fixture> redraw_qa_fixtures() {
             "It will take her 120/24 = <<120/24=5>>5 hours to read 120 pages.",
             "5"),
          R::constant, ""},
+        // 12 is $6 a month over two months, worked out in the head: a unit's
+        // number (12 months a year) only where it is no step from the
+        // question's numbers. It would stay 12 when the 6 changes.
+        {"a unit's number from the head",
+         qa("Sam saves $6 per month. How much does he have after two months and a $6 gift?",
+            "He saves 12 dollars in two months, and 12+6=<<12+6=18>>18 dollars with the gift.", "18"),
+         R::constant, ""},
         // "x 5 days" are the five weekdays, not Saturday's 5 hours: the
         // same value by chance (GSM8K train row 5204).
         {"another unit",
@@ -345,7 +352,21 @@ inline void test_redraw_qa_units() {
     };
     EXPECT(differ("5 days a week", "5 hours on Saturday"), "5 days are not 5 hours");
     EXPECT(differ("3 people eat", "3 cartons of ice cream"), "3 people are not 3 cartons");
-    EXPECT(!differ("5 chairs", "5 red chairs") && !differ("6 ft", "6 feet") && !differ("180 guests", "180 people") &&
+    EXPECT(differ("5 red cartons", "5 red cards") && differ("5 large boxes", "5 small cups"),
+           "a shared word that describes is no shared unit");
+    using redraw_qa::detail::constant_here;
+    EXPECT(!constant_here({12, 1}, "$6 per month for two months", "12 dollars in two months"),
+           "12 is 6 x 2, worked out in the head, not 12 months: no year is named");
+    EXPECT(constant_here({12, 1}, "6 per month for two years", "2 years is 2*12 months"),
+           "12 months a year where months and years are named");
+    EXPECT(!constant_here({60, 1}, "$12 an hour, 50 minutes", "she earned 0.2 x 50"),
+           "60 counts only where its own line names minutes or hours");
+    EXPECT(constant_here({60, 1}, "$12 an hour, 50 minutes", "12/60 per minute") && constant_here({2, 1}, "", "") &&
+               constant_here({1, 100}, "20%", "") && !constant_here({1, 100}, "20 apples", ""),
+           "60 a minute where the line says so; 1, 2, 100 anywhere, 0.01 with a percentage");
+    EXPECT(!differ("185 large rubber ducks", "185 large size ducks") &&
+               !differ("12 medium ones", "12 medium ceiling lights") && !differ("5 chairs", "5 red chairs") &&
+               !differ("6 ft", "6 feet") && !differ("180 guests", "180 people") &&
                !differ("120 pages", "120-page book") && !differ("5 more", "5 hours") && !differ("5", "5 hours") &&
                !differ("12 slices", "12"),
            "the same unit in other words, or nothing to compare");

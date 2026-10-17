@@ -37,11 +37,14 @@ Example (GSM8K train row 1):
    then "q1+(q1/2)". Every number in a calculation needs one clear source:
    a number of the question, a percentage as its hundredth ("0.3" for 30%),
    an earlier result, a number the question gives in words ("half",
-   "dozen"), or a usual constant (1, 2, 100; 0.01 with a percentage; 7, 12,
-   24, 52, 60, 365, 1000 only where the problem speaks of weeks, hours,
-   minutes...). A number from nowhere else is rejected: it is usually
-   arithmetic done in the head ("3 sets of 20 minutes" in an hour), which
-   would stay 3 when the 20 changes.
+   "dozen"), or a usual constant (1, 2, 100; 0.01 with a percentage). A
+   unit's number (7, 12, 24, 52, 60, 365, 1000) counts only as a
+   conversion: the problem names both units (minutes and hours for 60) and
+   the calculation's own line names one of them. A number from nowhere else
+   is rejected: it is usually arithmetic done in the head ("3 sets of 20
+   minutes" in an hour), which would stay 3 when the 20 changes; "$6 a
+   month" over "two months" is 12 worked out in the head, and no year is
+   named, so it is no 12 months a year.
 2. **What changes and what stays.** Some question numbers never change: 1, 2
    and 100, numbers the question also gives in words, unit facts ("60
    minutes", "a gallon is 8 pints"), ordinals ("3rd"), times and ratios
@@ -67,7 +70,8 @@ Example (GSM8K train row 1):
    number right after it are that note's). A number tied to a question
    number must name the same unit: "x 5 days" (the weekdays) is not the
    question's "5 hours" on Saturday (`units`, found in the hand check
-   below). Each note's result is what the calculator writes for the new
+   below). Words that only describe ("red", "large", "rubber") do not
+   count: "5 red cartons" is not "5 red cards". Each note's result is what the calculator writes for the new
    expression, and "a 8-hour shift" becomes "an 8-hour shift".
 5. **Checks on each variant, from its text alone.** Every calculation right
    by calc.h, as many as the original's (the failure labels' reading); the
@@ -75,7 +79,7 @@ Example (GSM8K train row 1):
    is masked; the "####" answer is the formula's value; and self-train's
    re-draw check (`trace_try`, its own code path) accepts the original gold
    solution against the variants. That last check cannot read a percentage
-   used as its hundredth, so it runs on 3,471 of the 3,658 variants. A
+   used as its hundredth, so it runs on 3,456 of the 3,642 variants. A
    variant failing any check stops the run with an error: none does.
 
 Input: `data/gsm8k-notes/gsm8k-train.txt`, GSM8K train without the 500 dev
@@ -95,8 +99,8 @@ Writes `train.txt` (a problems file, task `gsm8k-redraw`), `train.jsonl`
 
 ## Results (seed 1)
 
-**3,658 of 6,966 problems convert (52.5%)**, one variant each. With
-`--versions 3`: 10,849 variants of 3,669 problems (a few problems have only
+**3,642 of 6,966 problems convert (52.3%)**, one variant each. With
+`--versions 3`: 10,803 variants of 3,653 problems (a few problems have only
 one or two possible variants). Of the 22,198 numbers in the problems read,
 4,906 stay fixed. Converted problems change 1 to 8 numbers (most often 2
 or 3).
@@ -105,17 +109,17 @@ Why the rest do not:
 
 | reason | problems | what it means |
 |---|---:|---|
-| constant | 1,057 | a number in a calculation comes from nowhere: mostly arithmetic done in the head (4, 3, 5, 6 are the most common: "4 weeks", "3 sets of 20 minutes") |
-| ambiguous | 935 | a number in a calculation could be two things (16 slices, and 2 x 8 = 16) |
-| nothing | 220 | no number can change (all are 1, 2, 100, words, units...) |
-| unused | 209 | a question number that could change is used by no calculation |
+| constant | 1,085 | a number in a calculation comes from nowhere: mostly arithmetic done in the head (4, 3, 5, 6 are the most common: "4 weeks", "3 sets of 20 minutes") |
+| ambiguous | 932 | a number in a calculation could be two things (16 slices, and 2 x 8 = 16) |
+| nothing | 218 | no number can change (all are 1, 2, 100, words, units...) |
+| unused | 204 | a question number that could change is used by no calculation |
 | unreadable | 199 | an "=" the calculator cannot check (197: algebra "X + 278 = 536", mixed numbers "8 x 1 1/2 = 12", fractions "= 2/3 pound"), a digit that is no number (2) |
-| answer | 196 | no calculation gives the gold answer (142: a last step the labels cannot read, "3 + 1 + 1= 5", "* 100% = 25%", or a rounding up: 137.33 hours, so 138), or two different ones do (54) |
-| units | 122 | a solution number tied to a question number by value names another unit ("5 days" for "5 hours") |
+| answer | 195 | no calculation gives the gold answer (141: a last step the labels cannot read, "3 + 1 + 1= 5", "* 100% = 25%", or a rounding up: 137.33 hours, so 138), or two different ones do (54) |
+| units | 121 | a solution number tied to a question number by value names another unit ("5 days" for "5 hours") |
 | words | 96 | the solution writes a changing number in words ("his five friends") |
-| text_ambiguous | 73 | a number of the solution's text could stand for two things |
+| text_ambiguous | 72 | a number of the solution's text could stand for two things |
 | no_calcs | 70 | no calculation at all |
-| text_unsourced | 52 | a number of the solution's text comes from nowhere |
+| text_unsourced | 53 | a number of the solution's text comes from nowhere |
 | wrong | 47 | a gold calculation is wrong (or below zero) |
 | no_draw | 32 | no draw of new numbers kept every result whole and positive |
 
@@ -170,6 +174,13 @@ The last rule, 0.01 as a constant where the problem speaks of percent,
 came after the third round: it added 60 variants (3,598 to 3,658) and
 changed none of the others. No round saw those 60; 3 of them were read and
 are right.
+
+Codex's review of PR #86 found two holes, both fixed after the third
+round: a unit's number was accepted wherever its unit appeared in the
+problem (now only as a conversion, above), and a shared describing word
+("red") hid two different units. The fixes lost 19 variants (mostly
+conversions whose line names neither unit, "2000*52") and gained 3 (read,
+right); none of the 30 hand-checked variants changed.
 
 What remains, from the third round:
 - **Odd but right.** New numbers can make a story lopsided: "290 campers in

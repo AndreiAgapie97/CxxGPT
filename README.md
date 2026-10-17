@@ -991,11 +991,11 @@ over the question's numbers (self-train's re-draw code); a problem is kept
 only if every number has one clear source, and every new result keeps its
 kind (whole, positive, at most two decimals). Every variant is checked
 again by calc.h and by self-train's re-draw check.
-- **Yield:** 3,658 of 6,966 problems (52.5%) from
+- **Yield:** 3,642 of 6,966 problems (52.3%) from
   `data/gsm8k-notes/gsm8k-train.txt` (dev and test held out; the tool
-  refuses a dev or test file); 10,849 variants with `--versions 3`. The
+  refuses a dev or test file); 10,803 variants with `--versions 3`. The
   rest are mostly arithmetic done in the head (a constant from nowhere,
-  1,057) and numbers that could stand for two things (935).
+  1,085) and numbers that could stand for two things (932).
 - **Leak check:** 0 of GSM8K dev and test share a 13-word run with the
   variants, or the same question with numbers masked.
 - **Hand checks:** three rounds of 30. Each round's findings became a rule

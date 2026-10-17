@@ -180,6 +180,40 @@ inline bool usual_constant(const Rational& v, const std::string& problem_lower) 
     return false;
 }
 
+// The line of `text` around position `at`, in lower case.
+inline std::string line_at(const std::string& text, size_t at) {
+    const size_t begin = at == 0 ? 0 : text.rfind('\n', at - 1), end = text.find('\n', at);
+    const size_t from = begin == std::string::npos || at == 0 ? 0 : begin + 1;
+    return lower(text.substr(from, (end == std::string::npos ? text.size() : end) - from));
+}
+
+// A constant from nowhere in the worked solution, on line `line`: 1, 2,
+// 100 and 0.01 as usual_constant has them; a unit's number (60, 12, 24...)
+// only as a conversion: the problem names both units (minutes and hours
+// for 60, months and years for 12) and the line names one of them. "6
+// apples a month" over "two months" makes 12, worked out in the head: no
+// year is named, so it is not 12 months a year.
+inline bool constant_here(const Rational& v, const std::string& problem_lower, const std::string& line) {
+    if ((v.num == 1 && v.den == 100) || (whole(v) && (v.num == 1 || v.num == 2 || v.num == 100)))
+        return usual_constant(v, problem_lower);
+    struct Conversion {
+        int64_t value;
+        const char *small, *big;
+    };
+    static const Conversion conversions[] = {
+        {7, "day", "week"},       {12, "month", "year"},    {12, "inch", "foot"},    {12, "inch", "feet"},
+        {24, "hour", "day"},      {52, "week", "year"},     {60, "minute", "hour"},  {60, "second", "minute"},
+        {365, "day", "year"},     {1000, "gram", "kilo"},   {1000, "meter", "kilo"}, {1000, "metre", "kilo"},
+        {1000, "milli", "liter"}, {1000, "milli", "litre"}, {1000, "ml", "liter"},   {1000, "ml", "litre"},
+        {1000, "gram", "kg"},     {1000, "meter", "km"}};
+    auto has = [](const std::string& text, const char* word) { return text.find(word) != std::string::npos; };
+    for (const Conversion& c : conversions)
+        if (whole(v) && v.num == c.value && has(problem_lower, c.small) && has(problem_lower, c.big) &&
+            (has(line, c.small) || has(line, c.big)))
+            return true;
+    return false;
+}
+
 // What a number of the question is: a number that can change (its
 // variable), or one that stays (-1).
 struct QuestionNumber {
@@ -227,16 +261,33 @@ inline bool same_unit(std::string a, std::string b) {
 }
 
 // The words after a solution's number and after the question's: the first
-// of either names a unit the other's three words do not (and neither is a
-// word without a unit: "5 more"). None to compare: no conflict.
+// word naming a thing on either side ("5 red cartons": "cartons") is
+// another unit than the other's three words name (and neither is a word
+// without a unit: "5 more"). None to compare: no conflict.
 inline bool units_differ(const std::vector<std::string>& solution, const std::vector<std::string>& question);
 
 // Words after a number that say nothing of its unit ("5 more", "5 times").
 inline bool no_unit(const std::string& w) {
-    static const char* const words[] = {"a",   "an",   "and",  "are",   "as",   "at",   "by",    "each", "every",
-                                        "for", "from", "in",   "is",    "it",   "less", "more",  "of",   "on",
-                                        "or",  "per",  "so",   "than",  "that", "the",  "then",  "this", "times",
-                                        "to",  "was",  "were", "which", "with", "x",    "total", "left", "fewer"};
+    static const char* const words[] = {
+        "a",     "an",   "and",  "are",  "as",    "at",   "by",  "each",  "every", "for",   "from", "in",   "is",
+        "it",    "less", "more", "of",   "on",    "or",   "per", "so",    "than",  "that",  "the",  "then", "this",
+        "times", "to",   "was",  "were", "which", "with", "x",   "total", "left",  "fewer", "one",  "ones"};
+    for (const char* x : words)
+        if (w == x) return true;
+    return false;
+}
+
+// Words that describe a thing without naming it ("5 red cards"): two
+// numbers sharing one of these may still count different things ("5 red
+// cartons").
+inline bool modifier(const std::string& w) {
+    static const char* const words[] = {
+        "red",    "blue",  "green", "yellow", "white",   "black",     "pink",   "purple", "orange",    "brown",
+        "gray",   "grey",  "gold",  "silver", "large",   "small",     "big",    "little", "huge",      "tiny",
+        "new",    "old",   "extra", "full",   "whole",   "empty",     "same",   "other",  "different", "regular",
+        "medium", "short", "long",  "tall",   "cheap",   "expensive", "free",   "first",  "second",    "third",
+        "last",   "next",  "more",  "less",   "special", "plastic",   "wooden", "paper",  "metal",     "glass",
+        "rubber", "size",  "sized", "cotton", "leather", "steel",     "stone",  "frozen", "fresh",     "dark"};
     for (const char* x : words)
         if (w == x) return true;
     return false;
@@ -244,10 +295,19 @@ inline bool no_unit(const std::string& w) {
 
 inline bool units_differ(const std::vector<std::string>& solution, const std::vector<std::string>& question) {
     if (solution.empty() || question.empty() || no_unit(solution[0]) || no_unit(question[0])) return false;
+    // The first word that names a thing on each side ("cartons" in "5 red
+    // cartons"); none: nothing to compare.
+    auto noun = [](const std::vector<std::string>& words) -> std::string {
+        for (const std::string& w : words)
+            if (!modifier(w)) return w;
+        return "";
+    };
+    const std::string s = noun(solution), q = noun(question);
+    if (s.empty() || q.empty() || no_unit(s) || no_unit(q)) return false;
     for (const std::string& w : question)
-        if (same_unit(solution[0], w)) return false;
+        if (!modifier(w) && same_unit(s, w)) return false;
     for (const std::string& w : solution)
-        if (same_unit(question[0], w)) return false;
+        if (!modifier(w) && same_unit(q, w)) return false;
     return true;
 }
 
@@ -577,6 +637,16 @@ inline Analysis analyze(const Problem& p) {
     for (const QuestionNumber& q : a.question) taken.push_back(q.n.value);
     a.probe = primes_avoiding(a.variables.size(), taken);
 
+    // Where each calculation's "=" is in the worked solution.
+    const std::string& s = p.steps;
+    const std::vector<size_t> where = work_positions(s);
+    std::vector<size_t> equals_at;
+    for (const labels::Calculation& c : a.label.calcs) {
+        if (c.at >= where.size() || s[where[c.at]] != '=')
+            return reject(Reason::unreadable, "a calculation not found: " + c.text);
+        equals_at.push_back(where[c.at]);
+    }
+
     // The formulas, on the original numbers and the probe: two sources are
     // told apart by their probe values.
     const std::vector<std::vector<Rational>> sets = {a.variables, a.probe};
@@ -588,6 +658,7 @@ inline Analysis analyze(const Problem& p) {
         if (a.question[i].percent) percents.push_back(i);
     std::vector<bool> used(a.variables.size(), false);
     std::vector<Rational> probe_results;
+    std::set<std::string> constants_seen;
     for (size_t k = 0; k < calcs.size(); ++k) {
         const auto& c = calcs[k];
         const std::string& text = a.label.calcs[k].text;
@@ -595,9 +666,14 @@ inline Analysis analyze(const Problem& p) {
         if (!c.readable || c.readings.size() != 1) return reject(Reason::unreadable, "not followed: " + text);
         const auto& r = c.readings[0];
         if (r.formula.ends_with("...")) return reject(Reason::unreadable, "formula too long: " + text);
+        // A formula carries the constants of the results it uses: each is
+        // judged once, on the line of the calculation that uses it first.
         for (const std::string& k_text : r.constants) {
+            if (constants_seen.count(k_text)) continue;
             const auto v = labels::detail::value_of(k_text);
-            if (!v || !usual_constant(*v, problem_lower)) return reject(Reason::constant, k_text + " in " + text);
+            if (!v || !constant_here(*v, problem_lower, line_at(s, equals_at[k])))
+                return reject(Reason::constant, k_text + " in " + text);
+            constants_seen.insert(k_text);
         }
         for (size_t i = 0; i + 1 < r.formula.size(); ++i)
             if (r.formula[i] == 'q' && labels::detail::digit(r.formula[i + 1])) {
@@ -659,20 +735,12 @@ inline Analysis analyze(const Problem& p) {
     for (const Rational& w : a.words) sources.push_back({w, w, Slot::kept, -1});
     for (size_t k = 0; k < a.results.size(); ++k)
         sources.push_back({a.results[k], probe_results[k], Slot::result, int(k)});
-    const std::string& s = p.steps;
     // The notes, in order, are the calculations the labels read from notes
     // (their text ends with the note): a note's result, and the number
     // written right after it, is that calculation's result.
     // A number can only stand for a result already worked out, or worked
     // out on its own line ("He eats 32 because 2 x 16 = 32"): one whose "="
-    // comes before the end of its line.
-    const std::vector<size_t> where = work_positions(s);
-    std::vector<size_t> equals_at;
-    for (const labels::Calculation& c : a.label.calcs) {
-        if (c.at >= where.size() || s[where[c.at]] != '=')
-            return reject(Reason::unreadable, "a calculation not found: " + c.text);
-        equals_at.push_back(where[c.at]);
-    }
+    // (equals_at) comes before the end of its line.
     std::vector<size_t> note_calcs;
     for (size_t k = 0; k < a.label.calcs.size(); ++k)
         if (a.label.calcs[k].text.ends_with(">>")) note_calcs.push_back(k);
@@ -714,7 +782,7 @@ inline Analysis analyze(const Problem& p) {
             !after_note && usual_constant(n.value, problem_lower))
             return reject(Reason::text_ambiguous, n.written + " in: " + labels::detail::around(s, n.at, n.end));
         if (!found) {
-            if (!usual_constant(n.value, problem_lower))
+            if (!constant_here(n.value, problem_lower, line_at(s, n.at)))
                 return reject(Reason::text_unsourced, n.written + " in: " + labels::detail::around(s, n.at, n.end));
             slot.kind = Slot::kept;
         } else {
