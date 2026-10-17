@@ -282,7 +282,11 @@ Math problem-solving accuracy is the first evaluation focus.
   keeps the try if one choice passes), no formula or no versions is
   `unchecked` (`--keep-unchecked`). The generators' own solutions: with
   one reading 36-67% pass (the rest ambiguous), with every reading
-  895 of 896. Tests: `tests/test_redraw.h`, `tests/test_self_train.h`.
+  895 of 896. On rp1 (README): no lucky try (it writes the generators'
+  solutions), 35-67% of right tries ambiguous with one reading, 0-1%
+  with every reading; the failure labels now read "30% of 270 is
+  270*30/100 = 81" (`after_word`), which was 195 false failures. Tests:
+  `tests/test_redraw.h`, `tests/test_self_train.h`.
 - `src/cxxgpt.cpp`: the CLI (train, sample, eval, data prep, benchmarks).
 - `scripts/get_data.py`: downloads GSM8K into `data/gsm8k/` as JSON Lines
   (for `prep-qa`), with the 500 dev problems held out of train (the same

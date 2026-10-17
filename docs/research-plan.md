@@ -512,7 +512,16 @@ are right by construction, so every one they drop is a false drop):
   of 300 fractions pass. With every reading tried (`--every-reading`, the
   option the owner was offered), 895 of 896 pass. The default stays the
   approved one (drop ambiguous tries); every run counts how many
-  ambiguous tries one reading would pass, for the owner to decide.
+  ambiguous tries one reading would pass, for the owner to decide;
+- on rp1 (README, "The re-draw check"): no lucky try among 2,163 right
+  ones (rp1 writes the generators' own solutions), and with one reading
+  35-67% of them ambiguous, with every reading 0-1%. The first run also
+  found two false failures, both fixed: plain arithmetic after a word
+  ("30% of 270 is 270*30/100 = 81") was not read, and a result with too
+  many readings was taken for a constant.
+- The decision for the owner: keep the strict default, or make
+  `--every-reading` the default. The check's real test comes with a
+  model that writes its own solutions instead of the generators'.
 
 *The problem.* `self-train` keeps a try when its final answer and every
 written calculation are right. A wrong plan that lands on the right

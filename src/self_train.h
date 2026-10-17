@@ -256,8 +256,8 @@ struct Reading {
 
 struct Calc {
     Rational value;  // as the calculator found it
-    bool readable = false, ambiguous = false;
-    std::vector<Reading> readings;
+    bool has_value = false, readable = false, ambiguous = false;
+    std::vector<Reading> readings;  // none: not followed (unreadable, or too many readings)
 };
 
 // More combinations of readings than this per calculation are not
@@ -309,7 +309,7 @@ inline std::vector<Calc> read_calcs(const std::vector<std::vector<Rational>>& nu
         Calc calc;
         const auto value = calc::Parser(c.exact).parse();
         calc.readable = value.has_value() && !c.expression.empty();
-        if (value) calc.value = *value;
+        if (value) calc.value = *value, calc.has_value = true;
         // A chain's link: its left side is the previous link ("24 + 2").
         if (k > 0 && calc.readable && labels::detail::whole_calculation(label.calcs[k - 1].wrote) == c.expression) {
             Calc link = out[k - 1];
@@ -337,16 +337,25 @@ inline std::vector<Calc> read_calcs(const std::vector<std::vector<Rational>>& nu
                 for (size_t j = 0; j < sets; ++j) r.values.push_back(q < numbers[j].size() ? numbers[j][q] : Rational{});
                 add_reading(sources, r);
             }
+            // An earlier result that was not followed (too many readings, or
+            // an expression not read) may be this number's source: then
+            // nothing is known about it, and it is no constant.
+            bool lost = false;
             for (size_t e = 0; e < k; ++e) {
-                if (!out[e].readable || !same_value(out[e].value, n.value)) continue;
+                if (!out[e].has_value || !same_value(out[e].value, n.value)) continue;
                 calc.ambiguous |= out[e].ambiguous;
+                lost |= out[e].readings.empty();
                 for (const Reading& r : out[e].readings) add_reading(sources, {r.values, "(" + r.formula + ")", r.constants});
+            }
+            if (lost) {
+                calc.ambiguous = true;
+                sources.clear();
             }
             // A constant: given in words, one of the usual ones (1, 2, 100,
             // as the failure labels allow them), or from nowhere else.
             const bool in_words = labels::detail::contains(words, n.value);
             const bool usual = labels::detail::contains(kUsualConstants, n.value);
-            if (in_words || usual || sources.empty())
+            if (!lost && (in_words || usual || sources.empty()))
                 add_reading(sources, {std::vector<Rational>(sets, n.value), n.written,
                                       in_words ? std::vector<std::string>() : std::vector<std::string>{n.written}});
             if (sources.size() > 1) calc.ambiguous = true;
@@ -416,7 +425,7 @@ inline Trace trace_try(const Problem& p, const labels::AnswerLabel& label, const
     std::vector<Reading> readings;
     bool found = false;
     for (size_t k = calcs.size(); k-- > 0;)
-        if (calcs[k].readable && same_value(calcs[k].value, *answers[0])) {
+        if (calcs[k].has_value && same_value(calcs[k].value, *answers[0])) {
             found = true;
             for (const Reading& r : calcs[k].readings) add_reading(readings, r);
             t.ambiguous |= calcs[k].ambiguous;

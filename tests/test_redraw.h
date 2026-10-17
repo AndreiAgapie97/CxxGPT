@@ -71,7 +71,7 @@ inline void test_redraw_versions() {
         if (name == "word") problems = make_word_problems(11, 80, {2, 8, true, true, topic.test}, &recipes);
         else if (name == "equations") problems = make_equation_problems(11, 80, {true, true, topic.test}, &recipes);
         else problems = make_fraction_problems(11, 80, {true, true, topic.test}, &recipes);
-        size_t full = 0, strict = 0, passed = 0;
+        size_t full = 0, strict = 0, passed = 0, plain_passed = 0;
         for (size_t i = 0; i < problems.size(); ++i) {
             const Problem& p = problems[i];
             const redraw::Versions v = redraw::versions_of(recipes[i], p, 3, 1000 + i);
@@ -97,10 +97,22 @@ inline void test_redraw_versions() {
             if (!t.passed && name != "fractions")
                 std::printf("  %s %zu: the gold solution misses a version (%s, %zu readings):\n%s\n", topic.name, i,
                             t.formula.c_str(), t.readings, p.completion().c_str());
+            // The same solution without its notes ("--notes off", and how rp1
+            // writes): plain arithmetic, some of it after a word ("30% of 270
+            // is 270*30/100 = 81"), must be followed as well.
+            Problem plain = p;
+            plain.steps = math_detail::without_notes(p.steps);
+            const self_train::Trace tp = self_train::trace_try(p, labels::label_answer(p, plain.completion()), v.versions);
+            plain_passed += tp.passed;
+            if (!tp.passed && t.passed)
+                std::printf("  %s %zu: passes with notes, not without (%s):\n%s\n", topic.name, i, tp.formula.c_str(),
+                            plain.completion().c_str());
         }
         std::printf("  %s (%s): %zu of %zu problems with 3 versions; gold solutions passing: %zu with one "
-                    "reading, %zu with every reading tried\n",
-                    topic.name, topic.test ? "test" : "train", full, problems.size(), strict, passed);
+                    "reading, %zu with every reading tried, %zu without notes\n",
+                    topic.name, topic.test ? "test" : "train", full, problems.size(), strict, passed, plain_passed);
+        EXPECT(plain_passed == passed, "%s: %zu gold solutions pass with notes, %zu without", topic.name, passed,
+               plain_passed);
         EXPECT(full * 10 >= problems.size() * 9, "%s: only %zu of %zu problems got 3 versions", topic.name, full,
                problems.size());
         // Word problems and equations: every gold solution has a reading

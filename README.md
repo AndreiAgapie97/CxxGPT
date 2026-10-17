@@ -402,7 +402,31 @@ On the generators' own solutions (300 problems per topic,
 296 equations and 202 of 300 fractions pass, the rest being ambiguous
 (their questions repeat small numbers); with every reading tried, all
 word problems and equations pass, and 299 of 300 fractions (one with more
-combinations than are followed).
+combinations than are followed). Without their `<<...>>` notes (as `--notes
+off` writes them, and as rp1 writes) they pass as often.
+
+On rp1 (2026-10-17, `runs/rp1.night1.ckpt`, 100 new problems per topic, 8
+tries, `--temp 0.7 --seed 1`, then `--recheck` with `--keep-gold`, so that
+every right try reaches the check):
+
+| problems | right tries | redraw | ambiguous | ambiguous, `--every-reading` | unchecked |
+|---|---|---|---|---|---|
+| `gen-word` | 793 | 0 | 534 | 6 | 0 |
+| `gen-math` equations | 741 | 0 | 336 | 8 | 32 |
+| `gen-math` fractions | 629 | 0 | 218 | 0 | 0 |
+
+- No lucky try: rp1 writes the generators' own solutions (by default they
+  are all `gold_copy`), so the run shows what the check costs on right
+  work, not what it catches; the tests show what it catches.
+- What it cost on the first run, all fixed since: 195 fraction tries
+  failed because "30% of 270 is 270*30/100 = 81" was not read as a
+  calculation (the labels read it now: `labels::detail::after_word`), and
+  6 word tries because a result with too many readings was taken for a
+  constant (it makes the try ambiguous now).
+- With one reading, 35-67% of the right tries are ambiguous; with every
+  reading tried, 0-1%. The 32 unchecked tries are 4 age problems whose
+  plan ("3 - 2 = 1, so x + 16 = 32") holds for few other numbers: no 3
+  versions in 200 draws each.
 
 ### Generated word problems
 

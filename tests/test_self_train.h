@@ -399,6 +399,14 @@ inline void test_self_train_redraw() {
         every);
     run(twelve, {{"3 * 4 = 12\n12 + 5 = 17\n#### 17\n", Verdict::kept, "the pens' 12 is one reading"}}, every);
     run(eats, {{"6 / 2 = 3\n#### 3\n", Verdict::redraw, "every reading changes nothing here"}}, every);
+    // An earlier result that cannot be followed (".5" is not read as a
+    // number of the formula) is no constant: a number equal to it has an
+    // unknown source, so the try is ambiguous, never a false "redraw".
+    const auto rope = with_versions("A rope of 3 meters is cut in half and 5 meters are added. How long is it?", "6.5",
+                                    {{"A rope of 8 meters is cut in half and 2 meters are added. How long is it?", "6"}});
+    run(rope, {{"3 * .5 = 1.5\n1.5 + 5 = 6.5\n#### 6.5\n", Verdict::ambiguous, "1.5 from an unfollowed calculation"}},
+        o);
+    run(rope, {{"3 * .5 = 1.5\n1.5 + 5 = 6.5\n#### 6.5\n", Verdict::ambiguous, "no reading to try"}}, every);
     // No versions (the story could not be drawn again): unchecked, or kept
     // with --keep-unchecked, as is an answer reached in prose.
     const std::pair<Problem, std::vector<Problem>> none{eats.first, {}};

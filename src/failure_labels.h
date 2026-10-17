@@ -23,8 +23,11 @@
 // ("half of 10 = 5") is not a calculation. A chain "6 * 4 + 2 = 24 + 2 = 26"
 // is checked link by link: "6 * 4 + 2 = 24 + 2", then "24 + 2 = 26" (a
 // link is the text up to the next " = " on the line, when all of it is
-// arithmetic). Every check is kept, so a label can be audited from its own
-// evidence.
+// arithmetic). A calculation right after a word that follows a number
+// ("30% of 270 is 270*30/100 = 81") is read too, unless the word is one
+// letter or an operator word ("2 times 3 + 4"): the calculator itself leaves
+// those alone (after_word). Every check is kept, so a label can be audited
+// from its own evidence.
 //
 // Flags, not labels (they also fire on right answers, so they are reported
 // for right and wrong answers separately):
@@ -243,6 +246,40 @@ inline std::optional<std::string> whole_calculation(std::string_view s) {
     return expr;
 }
 
+// The calculation at the end of `s` (the line up to " = "), when a word
+// stands right before it: "30% of 270 is 270*30/100". The calculator does
+// not read it there (a word after a number may join two numbers, as in
+// "2 X 3 + 4"), so the labels read it unless the word is one letter or
+// works as an operator ("2 times 3 + 4", "1/2 of 8 + 2").
+inline std::optional<std::string> after_word(std::string_view s) {
+    size_t begin = s.size();
+    while (begin > 0) {
+        const char c = s[begin - 1];
+        if (digit(c) || std::string_view(".+-*/() \t").find(c) != std::string_view::npos || c == '\xc3' ||
+            c == '\x97' || (c == 'x' && calc::times_sign(s, begin - 1)))
+            --begin;
+        else
+            break;
+    }
+    while (begin < s.size() && (s[begin] == ' ' || s[begin] == '\t')) ++begin;  // the run starts at its first sign
+    const std::string_view run = trim_blanks(s.substr(begin));
+    if (run.empty() || std::string_view("+-*/").find(run[0]) != std::string_view::npos) return {};
+    size_t end = begin;
+    while (end > 0 && (s[end - 1] == ' ' || s[end - 1] == '\t')) --end;
+    if (end == begin) return {};  // no space between the word and the calculation
+    auto letter = [](char c) { return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'); };
+    size_t w = end;
+    while (w > 0 && letter(s[w - 1])) --w;
+    if (end - w < 2) return {};
+    std::string word(s.substr(w, end - w));
+    for (char& c : word) c = char(c >= 'A' && c <= 'Z' ? c - 'A' + 'a' : c);
+    static const char* const operators[] = {"times", "plus", "minus", "over", "by", "divided", "multiplied",
+                                            "less",  "more", "into",  "mod",  "per", "of"};
+    for (const char* op : operators)
+        if (word == op) return {};
+    return whole_calculation(run);
+}
+
 // Every calculation in the work, checked: notes ("<<16-3-4=9>>") and plain
 // ("16 - 3 - 4 = 9", "$50 x 3 = $150"), found as the calculator finds its
 // calls, and chains ("6 * 4 + 2 = 24 + 2 = 26") link by link.
@@ -283,6 +320,13 @@ inline void check_calculations(std::string_view work, AnswerLabel& out) {
                     expression = *link;
                 }
         }
+        // "30% of 270 is 270*30/100 = 81": refused by the calculator only for
+        // the word before it (after_word).
+        if (r && r->empty())
+            if (const auto run = after_word(work.substr(line_begin, i - 1 - line_begin))) {
+                r = calc::evaluate(*run).value_or("");
+                expression = *run;
+            }
         if (!r) continue;  // not a calculation: "x = 5", "The total = ..."
         // The left side's value (a plain Rational and a flag, not an optional:
         // g++ -O3 then warns that the optional's value may be uninitialized).

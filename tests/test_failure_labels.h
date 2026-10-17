@@ -123,6 +123,29 @@ inline void test_failure_labels() {
         EXPECT(prose.calcs.size() == 1 && prose.calcs[0].ok && prose.calcs[0].wrote == "26",
                "26 apples, so ...: %zu calcs", prose.calcs.size());
     }
+    // A calculation after a word that comes right after a number (gen-math's
+    // fractions without notes, and rp1, write "30% of 270 is 270*30/100 =
+    // 81"): read and checked, as the calculator would read it at a clause's
+    // start; not after a one-letter or operator word, where the word may
+    // join two numbers.
+    {
+        const Problem marbles = problem("There are 270 marbles; 30% are given away. How many are left?", "189");
+        const auto right = label_answer(marbles, "30% of 270 is 270*30/100 = 81, so 270-81 = 189 are left.\n#### 189\n");
+        EXPECT(right.calcs.size() == 2 && right.wrong_calcs() == 0 && right.unreadable == 0 &&
+                   right.calcs[0].expression == "270*30/100" && right.calcs[0].exact == "81",
+               "after 'is': %zu calcs, %zu wrong, %zu unreadable", right.calcs.size(), right.wrong_calcs(),
+               right.unreadable);
+        const auto wrong = label_answer(marbles, "30% of 270 is 270*30/100 = 80, so 270-80 = 190.\n#### 190\n");
+        EXPECT(wrong.calcs.size() == 2 && wrong.wrong_calcs() == 1 && wrong.label == Label::arithmetic,
+               "a wrong one after 'is': %zu calcs, %zu wrong, %s", wrong.calcs.size(), wrong.wrong_calcs(),
+               labels::label_name(wrong.label));
+        for (const char* text : {"2 X 3 + 4 = 10\n#### 10\n", "2 times 3 + 4 = 10\n#### 10\n",
+                                 "1/2 of 8 + 2 = 6\n#### 6\n"}) {
+            const auto l = label_answer(marbles, text);
+            EXPECT(l.calcs.empty() && l.unreadable == 1, "'%s': %zu calcs, %zu unreadable", text, l.calcs.size(),
+                   l.unreadable);
+        }
+    }
     // Not calculations: an "=" after a bare number, or after words.
     {
         const auto l = label_answer(ducks, "Half of 10 = 5 and the total = 9.\n#### 9\n");
