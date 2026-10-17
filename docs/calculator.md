@@ -151,6 +151,18 @@ The checks:
   2 notes with `//` are left as they are.
 - **All of it is trained.** Every added token is an answer token.
 
-Training's exams have no `--tools` option yet, so the night's exam scores
-are without the calculator. The morning's `eval-reasoning --tools
-calc-notes` prints the score without and with it.
+## In training's exams
+
+`train --reason-tools calc-notes` (or `calc-plain`; default `none`) takes
+each `--reason-test` exam a second time, with the calculator, as
+`eval-reasoning --tools` does. The exam without it prints as before, and
+the dashboard and `scripts/report.sh` read that one. The second exam is one
+line of its own, which `report.sh` shows in a column "with calculator":
+
+    reasoning with calculator (calc-notes) at step 58866: 2.8% (7 / 250), calls 417 fired, 12 malformed (123.9 s)
+
+The CSV log gets `# reasoning step N with calculator: c/t`. On the night
+model (rp1 after 82 steps of night 2's mix with notes, 250 GSM8K dev
+problems on the GPU), the exam took 23 s and the one with the calculator
+124 s (why it is five times slower is not yet measured). With an exam
+every 500 steps that is about 1 minute in 18.

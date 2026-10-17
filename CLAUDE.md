@@ -66,7 +66,9 @@ Math problem-solving accuracy is the first evaluation focus.
   them (`operations/build_gsm8k_notes.py`, `build_targeted_math.py` and
   `build_gen_math.py --notes on`): the same problems as before, checked
   byte for byte with the notes removed, every note's result exact (docs/calculator.md,
-  "Notes in the training data").
+  "Notes in the training data"). `train --reason-tools calc-notes` takes
+  each training exam again with the calculator, on a line of its own
+  (docs/calculator.md, "In training's exams").
 - `eval-reasoning --tries N --temp T --seed S` (or `--effort
   low|medium|high`: 1/8/32 tries): samples each problem N times and votes
   on the final answer (maj@N, also pass@N and the first try's score). Each

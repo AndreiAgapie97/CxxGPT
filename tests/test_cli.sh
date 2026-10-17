@@ -152,7 +152,14 @@ grep -q 'expert load log header differs' "$TEST_DIR/load-invalid.log"
 # %.6g writes tiny shares in exponent form (5e-05); awk must still read them.
 mkdir -p "$TEST_DIR/report/scripts" "$TEST_DIR/report/runs"
 cp scripts/report.sh "$TEST_DIR/report/scripts/report.sh"
-printf 'model: tiny fixture\nstep 40 | loss 1.0 | 100 tok/s\n' > "$TEST_DIR/report/runs/fixture.log"
+cat > "$TEST_DIR/report/runs/fixture.log" <<'LOG'
+model: tiny fixture
+step 40 | loss 1.0 | 100 tok/s
+step 40 | val 2.5000
+reasoning eval at step 40 (1.0 s):
+overall 2.0% (5 / 250) (greedy)
+reasoning with calculator (calc-notes) at step 40: 3.2% (8 / 250), calls 31 fired, 2 malformed (1.1 s)
+LOG
 cat > "$TEST_DIR/report/runs/fixture.load.csv" <<'CSV'
 step,layer,expert_0,expert_1,max_load_ratio
 10,0,0.5,0.5,1
@@ -167,6 +174,7 @@ step,layer,expert_0,expert_1,max_load_ratio
 40,2,0.6,0.4,1.2
 CSV
 bash "$TEST_DIR/report/scripts/report.sh" fixture > "$TEST_DIR/report.txt"
+grep -Eq '^ +40 +2\.5000 +2\.0% \(5 / 250\) +3\.2% \(8 / 250\)$' "$TEST_DIR/report.txt"
 grep -Fq 'layer 0: final shares [0.4000 0.6000]; first under 1%: step 20' "$TEST_DIR/report.txt"
 grep -Fq 'layer 1: final shares [0.3000 0.7000]; first under 1%: step 10' "$TEST_DIR/report.txt"
 grep -Fq 'layer 2: final shares [0.6000 0.4000]; first under 1%: never' "$TEST_DIR/report.txt"
@@ -562,6 +570,23 @@ grep -q 'gold completions exceeding --max-new 2147483647: 0 / 1' "$TEST_DIR/cap-
 "$CXXGPT" train "${COMMON[@]}" --init "$TEST_DIR/audit.ckpt" --out "$TEST_DIR/cap.ckpt" \
     --reason-test "$TEST_DIR/audit.txt" --max-new 1 > "$TEST_DIR/train-cap.log"
 grep -q 'gold completions exceeding --max-new 1: 1 / 1' "$TEST_DIR/train-cap.log"
+# --reason-tools: each exam again with the calculator, on its own line (not
+# "overall ...", which report.sh and the dashboard read as the exam).
+"$CXXGPT" train "${COMMON[@]}" --init "$TEST_DIR/audit.ckpt" --out "$TEST_DIR/calc-exam.ckpt" \
+    --reason-test "$TEST_DIR/audit.txt" --reason-tools calc-notes > "$TEST_DIR/train-calc.log"
+grep -Eq '^reasoning with calculator \(calc-notes\) at step [0-9]+: [0-9.]+% \([0-9]+ / 1\), calls [0-9]+ fired, [0-9]+ malformed' \
+    "$TEST_DIR/train-calc.log"
+[[ $(grep -c '^overall ' "$TEST_DIR/train-calc.log") == $(grep -c '^reasoning with calculator ' "$TEST_DIR/train-calc.log") ]]
+status=0
+"$CXXGPT" train "${COMMON[@]}" --out "$TEST_DIR/calc-bad.ckpt" --reason-test "$TEST_DIR/audit.txt" \
+    --reason-tools calc > "$TEST_DIR/train-calc-bad.log" 2>&1 || status=$?
+[[ "$status" == 1 ]]
+grep -q -- '--reason-tools must be none, calc-notes or calc-plain' "$TEST_DIR/train-calc-bad.log"
+status=0
+"$CXXGPT" train "${COMMON[@]}" --out "$TEST_DIR/calc-alone.ckpt" --reason-tools calc-notes \
+    > "$TEST_DIR/train-calc-alone.log" 2>&1 || status=$?
+[[ "$status" == 1 ]]
+grep -q -- '--reason-tools requires --reason-test' "$TEST_DIR/train-calc-alone.log"
 status=0
 "$CXXGPT" eval-reasoning --ckpt "$TEST_DIR/audit.ckpt" --test "$TEST_DIR/audit.txt" --max-new 0 > "$TEST_DIR/bad-cap.log" 2>&1 || status=$?
 [[ "$status" == 1 ]]

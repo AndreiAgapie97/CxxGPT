@@ -764,10 +764,10 @@ void print_eval(const EvalResult& r, size_t show_failures) {
 }
 
 // Keep both entry points strict: a misspelled mode must not change a score silently.
-calc::Mode calculator_mode(Args& a) {
-    const std::string mode = a.str("tools", "none");
+calc::Mode calculator_mode(Args& a, const char* option = "tools") {
+    const std::string mode = a.str(option, "none");
     CHECK(mode == "none" || mode == "calc-notes" || mode == "calc-plain",
-          "--tools must be none, calc-notes or calc-plain");
+          "--%s must be none, calc-notes or calc-plain", option);
     return mode == "calc-notes" ? calc::Mode::notes :
            mode == "calc-plain" ? calc::Mode::plain : calc::Mode::none;
 }
@@ -1232,9 +1232,10 @@ struct Backend {
     // Brings the weights and optimizer state into the host Model and AdamW,
     // for checkpoints and evaluations.
     virtual void sync() = 0;
-    // The reasoning exam on the current weights: greedy, exact answers.
+    // The reasoning exam on the current weights: greedy, exact answers,
+    // with the calculator `tool` finishing the model's calculations or not.
     virtual EvalResult reason(const std::vector<Problem>& problems, const Tokenizer& tok, int max_new,
-                              bool keep_completions) = 0;
+                              bool keep_completions, calc::Mode tool) = 0;
     // Device memory held, for the GPU; 0 on the CPU.
     virtual size_t device_bytes() const { return 0; }
     // Unlikelihood training (#34). While it is on, forward() still returns
@@ -1308,8 +1309,8 @@ struct CpuBackend : Backend {
     double load_ratio() override { return load_; }
     void sync() override {}
     EvalResult reason(const std::vector<Problem>& problems, const Tokenizer& tok, int max_new,
-                      bool keep_completions) override {
-        return eval_reasoning(model, problems, tok, 64, max_new, 8, keep_completions);
+                      bool keep_completions, calc::Mode tool) override {
+        return eval_reasoning(model, problems, tok, 64, max_new, 8, keep_completions, {}, tool);
     }
 };
 
@@ -1372,7 +1373,7 @@ struct GpuBackend : Backend {
     // computes it (bf16 products by default), so a CPU eval-reasoning of
     // the checkpoint can differ by a problem or two.
     EvalResult reason(const std::vector<Problem>& problems, const Tokenizer& tok, int max_new,
-                      bool keep_completions) override {
+                      bool keep_completions, calc::Mode tool) override {
         const int batch = gpu.decode_capacity(64);
         if (batch == 0) {
             std::printf("reasoning eval skipped: the GPU decoder needs %zu MB per answer, and the gradient buffer "
@@ -1382,7 +1383,7 @@ struct GpuBackend : Backend {
         }
         std::printf("reasoning eval on the GPU, %d answers at a time\n", batch);
         GpuDecoder dec{model.cfg, gpu};
-        return eval_reasoning(dec, problems, tok, batch, max_new, 8, keep_completions);
+        return eval_reasoning(dec, problems, tok, batch, max_new, 8, keep_completions, {}, tool);
     }
     size_t device_bytes() const override { return gpu.device_bytes(); }
 };
@@ -1439,6 +1440,8 @@ int cmd_train(Args& a) {
             "        waits for); --moe-grouped or --moe-cublas picks one for any precision\n"
             "reason: --reason-test FILE --reason-every STEPS --reason-limit 300 --max-new 200\n"
             "        --reason-report PREFIX (optional answers/labels in PREFIX.step-N.jsonl)\n"
+            "        --reason-tools calc-notes|calc-plain: each exam again with the calculator (as\n"
+            "        eval-reasoning --tools), on a line of its own after the exam; default none\n"
             "Ctrl-C saves a checkpoint and stops; --resume continues from --out, and\n"
             "takes precedence over --init once --out exists.\n");
         return 0;
@@ -1497,6 +1500,8 @@ int cmd_train(Args& a) {
     const std::string reason_path = a.str("reason-test");
     const std::string reason_report_prefix = a.str("reason-report");
     CHECK(reason_report_prefix.empty() || !reason_path.empty(), "--reason-report requires --reason-test");
+    const calc::Mode reason_tool = calculator_mode(a, "reason-tools");
+    CHECK(reason_tool == calc::Mode::none || !reason_path.empty(), "--reason-tools requires --reason-test");
     const Tokenizer tok = load_tokenizer(a.str("bpe"));
     const int reason_every = a.integer_int("reason-every", 0), reason_limit = a.integer_int("reason-limit", 300);
     const int max_new = a.integer_int("max-new", 200);
@@ -1709,7 +1714,7 @@ int cmd_train(Args& a) {
     auto reason_eval = [&](long at_step) {
         if (reason_test.empty()) return;
         const double t0 = now_seconds();
-        const EvalResult r = be.reason(reason_test, tok, max_new, !reason_report_prefix.empty());
+        const EvalResult r = be.reason(reason_test, tok, max_new, !reason_report_prefix.empty(), calc::Mode::none);
         if (r.total == 0) return;  // skipped (no room on the GPU)
         std::printf("reasoning eval at step %ld (%.1f s):\n", at_step, now_seconds() - t0);
         print_eval(r, 1);  // one wrong answer, to see what the model writes
@@ -1725,6 +1730,20 @@ int cmd_train(Args& a) {
         }
         if (log) {
             std::fprintf(log, "# reasoning step %ld: %d/%d\n", at_step, r.correct, r.total);
+            std::fflush(log);
+        }
+        if (reason_tool == calc::Mode::none) return;
+        // The same problems again with the calculator, on one line of its own
+        // (not "overall ...", which the dashboard and report.sh read as the exam).
+        const double t1 = now_seconds();
+        const EvalResult c = be.reason(reason_test, tok, max_new, false, reason_tool);
+        if (c.total == 0) return;
+        std::printf("reasoning with calculator (%s) at step %ld: %.1f%% (%d / %d), calls %zu fired, %zu malformed "
+                    "(%.1f s)\n", reason_tool == calc::Mode::notes ? "calc-notes" : "calc-plain", at_step,
+                    100.0 * c.correct / std::max(1, c.total), c.correct, c.total, c.tool_calls.fired,
+                    c.tool_calls.malformed, now_seconds() - t1);
+        if (log) {
+            std::fprintf(log, "# reasoning step %ld with calculator: %d/%d\n", at_step, c.correct, c.total);
             std::fflush(log);
         }
     };

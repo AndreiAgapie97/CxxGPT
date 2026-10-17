@@ -22,12 +22,14 @@ awk '
   }
   /^reasoning eval at step / { at = $5 + 0 }
   /^overall / && at != "" { acc[at] = $2 " " $3 " " $4 " " $5; seen[at] = 1; at = "" }
+  # train --reason-tools: the same exam with the calculator, "... at step N: X% (c / t), calls ..."
+  /^reasoning with calculator / { n = $7 + 0; c = $8 " " $9 " " $10 " " $11; sub(/,$/, "", c); calc[n] = c; seen[n] = 1 }
   END {
-    printf "  %7s  %9s  %s\n", "step", "val loss", "exact answers"
-    for (n in seen) if (n in val || n in acc) steps[++k] = n + 0
+    printf "  %7s  %9s  %-28s  %s\n", "step", "val loss", "exact answers", "with calculator"
+    for (n in seen) if (n in val || n in acc || n in calc) steps[++k] = n + 0
     # insertion sort: the awk in every distro, no asort
     for (i = 2; i <= k; i++) { x = steps[i]; for (j = i - 1; j > 0 && steps[j] > x; j--) steps[j + 1] = steps[j]; steps[j + 1] = x }
-    for (i = 1; i <= k; i++) printf "  %7d  %9s  %s\n", steps[i], val[steps[i]], acc[steps[i]]
+    for (i = 1; i <= k; i++) printf "  %7d  %9s  %-28s  %s\n", steps[i], val[steps[i]], acc[steps[i]], calc[steps[i]]
     if (last != "") printf "\n  last logged: step %d, training loss %s, %s\n", last, train, speed
   }' "$log"
 load_log=runs/$RUN.load.csv
