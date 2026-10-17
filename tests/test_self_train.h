@@ -536,6 +536,7 @@ inline void test_self_train_strict() {
     const Problem bottles = self_train_problem("Valia brought 6 cases of 24 bottles. How many bottles?", "144");
     const Problem coat = self_train_problem("A coat costs $80 and is 25% off. What does it cost now?", "60");
     const Problem pens = self_train_problem("A shop sells 12 pens a day for 5 days. How many pens?", "60");
+    const Problem eggs = self_train_problem("A box holds 60 eggs and 12 break. How many are left?", "48");
     auto check = [](bool self_train::Options::*flag, const char* name, std::initializer_list<Case> cases) {
         self_train::Options off, on;
         on.*flag = true;
@@ -551,7 +552,14 @@ inline void test_self_train_strict() {
     check(&self_train::Options::strict_outside, "strict outside",
           {{&apples, "There are 3 groups of 4, and 12 - 4 = <<12-4=8>>8 are left.\n#### 8\n", Verdict::outside},
            {&apples, "He eats 4, so 12 - 4 = <<12-4=8>>8 are left.\n#### 8\n", Verdict::kept},
-           {&apples, "12 - 4 = <<12-4=8>>8 are left, 8 in all.\n#### 8\n", Verdict::kept}});
+           {&apples, "12 - 4 = <<12-4=8>>8 are left, 8 in all.\n#### 8\n", Verdict::kept},
+           // A decimal without its 0 is read (Codex's review of #83).
+           {&apples, "Use .731 as a ratio: 12 - 4 = <<12-4=8>>8 are left.\n#### 8\n", Verdict::outside},
+           // A negative result is a result.
+           {&apples, "Going back, 4 - 12 = <<4-12=-8>>-8, so 8 are left.\n#### 8\n", Verdict::kept},
+           // Only a percentage gives its hundredth: 0.6 is not given by 60 eggs, 0.25 is by 25%.
+           {&eggs, "60 - 12 = <<60-12=48>>48 eggs, 0.6 of a box.\n#### 48\n", Verdict::outside},
+           {&coat, "It is 80 * 0.25 = <<80*0.25=20>>20 off, so 80 - 20 = <<80-20=60>>60.\n#### 60\n", Verdict::kept}});
     check(&self_train::Options::check_dead, "dead calculations",
           {{&bottles, "6 + 24 = <<6+24=30>>30 and 6 * 24 = <<6*24=144>>144 bottles.\n#### 144\n", Verdict::dead},
            {&bottles, "6 * 24 = <<6*24=144>>144 bottles.\n#### 144\n", Verdict::kept},

@@ -716,7 +716,7 @@ grep -q '^held-out kept 181: ' "$TEST_DIR/score-unused.log"
 # The stricter checks (README "Stricter checks").
 "$CXXGPT" score-checks --strict > "$TEST_DIR/score-strict.log"
 grep -q '^tune     kept 72: clean 9 (12.5%), clean or minor 27 (37.5%); clean tries dropped: 0$' "$TEST_DIR/score-strict.log"
-grep -q '^held-out kept 58: clean 3 (5.2%), clean or minor 13 (22.4%); clean tries dropped: 0$' "$TEST_DIR/score-strict.log"
+grep -q '^held-out kept 59: clean 3 (5.1%), clean or minor 13 (22.0%); clean tries dropped: 0$' "$TEST_DIR/score-strict.log"
 "$CXXGPT" score-checks --check-dead --show kept:lucky > "$TEST_DIR/score-show.log"
 grep -q '^==== textbook: ' "$TEST_DIR/score-show.log"
 # The re-draw check: gen-word/gen-math --recipes writes one recipe per

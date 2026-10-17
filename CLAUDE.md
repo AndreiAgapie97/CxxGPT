@@ -318,8 +318,8 @@ Math problem-solving accuracy is the first evaluation focus.
   pins the numbers. Five stricter checks, off by default (`--strict` for
   all, on self-train and score-checks; README "Stricter checks",
   2026-10-17): `--strict-outside`, `--check-dead`, `--check-mismatch`,
-  `--check-broken`, `--check-computed`. Together: held-out 5.2% clean
-  (22.4% with minor), none clean dropped, but they drop 26% of GSM8K
+  `--check-broken`, `--check-computed`. Together: held-out 5.1% clean
+  (22.0% with minor), none clean dropped, but they drop 26% of GSM8K
   train's own solutions (13% today). What is left is right arithmetic on
   the wrong story, which no text check catches: the re-draw check is the
   way to tell.
