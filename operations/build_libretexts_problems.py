@@ -319,12 +319,14 @@ def main():
         'source': 'huggingface.co/datasets/common-pile/libretexts, 00000_libretext.json.gz',
         'source_sha256': sha256(args.pile),
         'builder': 'operations/build_libretexts_problems.py',
+        'builder_sha256': sha256(__file__),  # the script that ran, which can differ from the commit's
         'builder_commit': subprocess.run(['git', 'rev-parse', 'HEAD'], capture_output=True, text=True,
                                          check=True).stdout.strip(),
         'tokenizer_sha256': sha256(args.tok),
         'licences': dict(licences),
         'licence_note': "OpenStax's math books were CC BY 4.0 until 2026-04-23 (then CC BY-NC-SA 4.0); "
-                        'the LibreTexts copies used here were made under CC BY and keep it',
+                        'the LibreTexts copies used here were made under CC BY and keep it (Common Pile '
+                        'uploaded its LibreTexts file on 2025-03-17)',
         'use': 'evaluation and self-train only: final answers without worked solutions; LibreTexts is in '
                'the training mix (textbooks-libretexts), so this is not a held-out test',
         'counts': dict(stats),
