@@ -304,6 +304,13 @@ Math problem-solving accuracy is the first evaluation focus.
   in its mix; gen-word's in other sentence patterns, caught by outline),
   so nothing is kept; pass@8 is 3-4 points above the first try on
   gen-math. Self-generated data is in no mix: the owner decides.
+  Only clean solutions may be trained on (owner's rule, 2026-10-17):
+  `cxxgpt score-checks` (`src/score_checks.h`) runs the checks on 546
+  right tries of rp1 labelled by hand, blind (`tests/checker_labels.jsonl`:
+  clean, padded, minor or lucky; tune and held-out halves by problem;
+  README "How clean are the kept tries?"): on the held-out half 2.7% of
+  the kept tries are clean (11.7% with minor slips), none clean is
+  dropped. Try new checks on the tune half; `test_cli.sh` pins the numbers.
   The re-draw check (`src/redraw.h`, README "The re-draw check",
   2026-10-17): `gen-word`/`gen-math --recipes FILE` writes how to make
   each problem again (the problems unchanged, byte for byte: the

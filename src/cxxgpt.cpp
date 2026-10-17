@@ -50,6 +50,7 @@
 #include "reasoning.h"
 #include "reason_report.h"
 #include "redraw.h"
+#include "score_checks.h"
 #include "self_train.h"
 #include "tokenizer.h"
 #include "train.h"
@@ -1224,6 +1225,44 @@ int cmd_self_train(Args& a) {
     return 0;
 }
 
+// self-train's checks on tries labelled by hand (score_checks.h): of the
+// tries they keep, how many are clean, and which clean tries they drop.
+int cmd_score_checks(Args& a) {
+    const std::string path = a.str("labels", "tests/checker_labels.jsonl");
+    // The same switches as self-train's, to see what each check does.
+    self_train::Options o;
+    o.allow_loops = a.flag("allow-loops");
+    o.allow_outside = a.flag("allow-outside");
+    o.allow_unused = a.flag("allow-unused");
+    o.keep_gold = a.flag("keep-gold");
+    a.done();
+    using namespace score_checks;
+    const Score s = score(load(path), o);
+    auto pct = [](long part, long whole) { return 100.0 * double(part) / double(std::max(1L, whole)); };
+    // The tune and held-out halves of every set together, then each group.
+    for (const char* split : {"tune", "held-out"}) {
+        long kept = 0, kept_clean = 0, kept_minor = 0, dropped = 0;
+        for (size_t g = 0; g < s.groups.size(); ++g)
+            if (s.groups[g].second == split)
+                kept += s.kept_total(g), kept_clean += s.kept(g, clean), kept_minor += s.kept(g, minor),
+                    dropped += s.clean_dropped(g);
+        std::printf("%-8s kept %ld: clean %ld (%.1f%%), clean or minor %ld (%.1f%%); clean tries dropped: %ld\n",
+                    split, kept, kept_clean, pct(kept_clean, kept), kept_clean + kept_minor,
+                    pct(kept_clean + kept_minor, kept), dropped);
+    }
+    for (size_t g = 0; g < s.groups.size(); ++g) {
+        std::printf("\n%s, %s\n  %-12s", s.groups[g].first.c_str(), s.groups[g].second.c_str(), "verdict");
+        for (const char* name : kLabelNames) std::printf(" %7s", name);
+        std::printf("\n");
+        for (const auto& [v, c] : s.counts[g]) {
+            std::printf("  %-12s", self_train::verdict_name(v));
+            for (long n : c) std::printf(" %7ld", n);
+            std::printf("\n");
+        }
+    }
+    return 0;
+}
+
 // One training step's operations, on the CPU or the GPU.
 struct Backend {
     virtual ~Backend() = default;
@@ -2281,6 +2320,7 @@ int main(int argc, char** argv) {
         {"prep-qa", cmd_prep_qa, "turns question/answer JSON Lines into problems and token files"},
         {"eval-reasoning", cmd_eval_reasoning, "exact-answer accuracy on a problems file"},
         {"self-train", cmd_self_train, "keeps the model's own right, checked solutions as training tokens"},
+        {"score-checks", cmd_score_checks, "self-train's checks against hand-labelled tries: how many kept are clean"},
         {"eval-loss", cmd_eval_loss, "a checkpoint's loss on held-out token files"},
         {"bench-infer", cmd_bench_infer, "times the ternary inference engine against fp32 decoding"},
         {"leak-check", cmd_leak_check, "finds questions that share a 13-word run with training files"},

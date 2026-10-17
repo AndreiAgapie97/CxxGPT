@@ -26,6 +26,7 @@
 #include "test_reasoning_traces.h"
 #include "test_vote.h"
 #include "test_self_train.h"
+#include "test_score_checks.h"
 #include "test_redraw.h"
 #include "test_no_repeat.h"
 #include "test_qa_context.h"
@@ -67,6 +68,7 @@ int main(int argc, char** argv) {
         {"generated traces", test_reasoning_traces},
         {"vote", test_vote},
         {"self-train", test_self_train},
+        {"score checks", test_score_checks},
         {"re-draw", test_redraw},
         {"no-repeat block", test_no_repeat},
         {"qa context", test_qa_context},
