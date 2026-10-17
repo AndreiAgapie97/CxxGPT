@@ -85,6 +85,44 @@ inline void test_failure_labels() {
         EXPECT(l.label == Label::correct && l.calcs.size() == 3 && l.wrong_calcs() == 0,
                "plain: %s, %zu calcs, %zu wrong", labels::label_name(l.label), l.calcs.size(), l.wrong_calcs());
     }
+    // A chain, link by link: "6 * 4 + 2 = 24 + 2" and "24 + 2 = 26" (rp1
+    // wrote this one; it was read as "6 * 4 + 2 = 24", wrong, and the second
+    // link was unreadable).
+    {
+        const Problem bags = problem("Tom has 6 bags of 4 apples and 2 more apples. How many apples?", "26");
+        const auto l = label_answer(bags, "He has 6 * 4 + 2 = 24 + 2 = 26 apples.\n#### 26\n");
+        EXPECT(l.label == Label::correct && l.calcs.size() == 2 && l.wrong_calcs() == 0 && l.unreadable == 0,
+               "a right chain: %s, %zu calcs, %zu wrong, %zu unreadable", labels::label_name(l.label),
+               l.calcs.size(), l.wrong_calcs(), l.unreadable);
+        EXPECT(l.calcs.size() == 2 && l.calcs[0].wrote == "24 + 2" && l.calcs[0].exact == "26" &&
+                   l.calcs[1].wrote == "26" && l.calcs[1].exact == "26" &&
+                   l.calcs[1].text == "He has 6 * 4 + 2 = 24 + 2 = 26",
+               "a right chain's links");
+        // A wrong first link: 6 * 4 + 2 is not 25 + 2; 25 + 2 is 27.
+        const auto first = label_answer(bags, "6 * 4 + 2 = 25 + 2 = 27\n#### 27\n");
+        EXPECT(first.label == Label::arithmetic && first.calcs.size() == 2 && !first.calcs[0].ok &&
+                   first.calcs[0].exact == "26" && first.calcs[1].ok,
+               "a wrong first link: %s", labels::label_name(first.label));
+        // A wrong second link: 24 + 2 is not 28.
+        const auto second = label_answer(bags, "6 * 4 + 2 = 24 + 2 = 28\n#### 28\n");
+        EXPECT(second.label == Label::arithmetic && second.calcs.size() == 2 && second.calcs[0].ok &&
+                   !second.calcs[1].ok && second.calcs[1].exact == "26",
+               "a wrong second link: %s", labels::label_name(second.label));
+        // Three links, with "x" for times.
+        const auto three = label_answer(bags, "2 x 3 x 4 + 2 = 6 x 4 + 2 = 24 + 2 = 26\n#### 26\n");
+        EXPECT(three.label == Label::correct && three.calcs.size() == 3 && three.wrong_calcs() == 0 &&
+                   three.unreadable == 0,
+               "three links: %zu calcs, %zu wrong, %zu unreadable", three.calcs.size(), three.wrong_calcs(),
+               three.unreadable);
+        // After words, the first link is not a calculation, the second is.
+        const auto words = label_answer(bags, "The total = 24 + 2 = 26\n#### 26\n");
+        EXPECT(words.calcs.size() == 1 && words.calcs[0].ok && words.calcs[0].exact == "26" && words.unreadable == 0,
+               "the total = 24 + 2 = 26: %zu calcs, %zu unreadable", words.calcs.size(), words.unreadable);
+        // Text that is not all arithmetic is no link: the first number is read.
+        const auto prose = label_answer(bags, "6 * 4 + 2 = 26 apples, so 26 = 26\n#### 26\n");
+        EXPECT(prose.calcs.size() == 1 && prose.calcs[0].ok && prose.calcs[0].wrote == "26",
+               "26 apples, so ...: %zu calcs", prose.calcs.size());
+    }
     // Not calculations: an "=" after a bare number, or after words.
     {
         const auto l = label_answer(ducks, "Half of 10 = 5 and the total = 9.\n#### 9\n");
