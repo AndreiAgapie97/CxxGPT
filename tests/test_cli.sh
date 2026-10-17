@@ -516,7 +516,7 @@ for pair in 'min-steps 1' 'max-steps 9' 'min-steps 9' 'max-steps 2147483649' 'co
 done
 printf 'CLI: word generation, repeatability, text2tok, eval-reasoning and invalid options passed\n'
 # gen-math writes the same two files as gen-word, for each topic.
-for topic in equations fractions; do
+for topic in equations fractions number-theory; do
     for split in train test; do
         prefix="$TEST_DIR/math-$topic-$split"
         "$CXXGPT" gen-math --topic "$topic" --out "$prefix" --seed 73 --count 28 --split "$split" > "$prefix.log"
@@ -731,6 +731,9 @@ grep -q '^word distractors=1 test=0 steps=[2-8] shape=[0-5] state=' "$TEST_DIR/r
 "$CXXGPT" gen-math --topic fractions --out "$TEST_DIR/redraw-frac" --seed 5 --count 6 \
     --recipes "$TEST_DIR/redraw-frac.recipes" > /dev/null
 grep -q '^fractions distractors=1 test=0 steps=0 shape=[0-6] state=' "$TEST_DIR/redraw-frac.recipes"
+"$CXXGPT" gen-math --topic number-theory --out "$TEST_DIR/redraw-nt" --seed 5 --count 6     --recipes "$TEST_DIR/redraw-nt.recipes" > /dev/null
+grep -q '^number-theory distractors=1 test=0 steps=0 shape=[0-6] state=' "$TEST_DIR/redraw-nt.recipes"
+[[ $(grep -c '^number-theory ' "$TEST_DIR/redraw-nt.recipes") == 6 ]]
 "$CXXGPT" self-train --ckpt "$TEST_DIR/audit.ckpt" --problems "$TEST_DIR/redraw-word.txt" --out "$TEST_DIR/self-r" \
     --recipes "$TEST_DIR/redraw-word.recipes" --tries 2 --max-new 4 --threads 2 > "$TEST_DIR/self-r.log"
 grep -q '^re-draw check: 6 of 6 problems drawn again 3 times' "$TEST_DIR/self-r.log"

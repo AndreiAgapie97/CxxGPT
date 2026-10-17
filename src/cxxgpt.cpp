@@ -62,6 +62,7 @@
 #include "wordgen.h"
 #include "mathgen.h"
 #include "mathgen_fractions.h"
+#include "mathgen_number_theory.h"
 
 namespace {
 
@@ -644,7 +645,8 @@ int cmd_gen_word(Args& a) {
 }
 
 // Math problems built from a chosen answer, each solved again by a second
-// solver before it is written (src/mathgen.h, src/mathgen_fractions.h). The
+// solver before it is written (src/mathgen.h, src/mathgen_fractions.h,
+// src/mathgen_number_theory.h). The
 // same two files as gen-word.
 int cmd_gen_math(Args& a) {
     const std::string topic = a.str("topic", "equations");
@@ -657,7 +659,8 @@ int cmd_gen_math(Args& a) {
     // How to make each problem again, for self-train's re-draw check (redraw.h).
     const std::string recipes_path = a.str("recipes", "");
     a.done();
-    CHECK(topic == "equations" || topic == "fractions", "--topic must be equations or fractions");
+    CHECK(topic == "equations" || topic == "fractions" || topic == "number-theory",
+          "--topic must be equations, fractions or number-theory");
     CHECK(!out.empty(), "--out must be a nonempty prefix");
     CHECK(count >= 0 && seed >= 0, "--count and --seed must be nonnegative");
     CHECK(split == "train" || split == "test", "--split must be train or test");
@@ -667,8 +670,10 @@ int cmd_gen_math(Args& a) {
     if (!exclude.empty()) exclusions = std::make_unique<Exclusions>(exclude);
     const MathOptions options{distractors == "on", notes == "on", split == "test", exclusions.get()};
     std::vector<Recipe> recipes;
-    const auto problems = topic == "equations" ? make_equation_problems(uint64_t(seed), count, options, &recipes)
-                                               : make_fraction_problems(uint64_t(seed), count, options, &recipes);
+    const auto problems =
+        topic == "equations"   ? make_equation_problems(uint64_t(seed), count, options, &recipes)
+        : topic == "fractions" ? make_fraction_problems(uint64_t(seed), count, options, &recipes)
+                               : make_number_theory_problems(uint64_t(seed), count, options, &recipes);
     write_problem_files(out, problems);
     if (!recipes_path.empty()) redraw::save_recipes(recipes_path, recipes);
     std::printf("%s.txt and %s.text: %zu %s %s problems, each solved again by the checker\n", out.c_str(),
@@ -2445,7 +2450,7 @@ int main(int argc, char** argv) {
         {"sample", cmd_sample, "generates text from a prompt"},
         {"gen-reasoning", cmd_gen_reasoning, "writes the synthetic reasoning curriculum"},
         {"gen-word", cmd_gen_word, "writes exact word problems with held-out sentence patterns"},
-        {"gen-math", cmd_gen_math, "writes math problems (equations, fractions) that a second solver checks"},
+        {"gen-math", cmd_gen_math, "writes math problems (equations, fractions, number theory) that a second solver checks"},
         {"prep-qa", cmd_prep_qa, "turns question/answer JSON Lines into problems and token files"},
         {"eval-reasoning", cmd_eval_reasoning, "exact-answer accuracy on a problems file"},
         {"self-train", cmd_self_train, "keeps the model's own right, checked solutions as training tokens"},

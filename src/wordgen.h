@@ -61,7 +61,7 @@ private:
 // (word: the steps and the shape; gen-math: the kind, in `shape`) and the
 // random state its story was drawn from.
 struct Recipe {
-    std::string topic;  // "word", "equations" or "fractions"
+    std::string topic;  // "word", "equations", "fractions" or "number-theory"
     bool distractors = true, test = false;
     int steps = 0, shape = 0;
     uint64_t state[4] = {};

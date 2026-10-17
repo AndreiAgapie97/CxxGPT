@@ -221,8 +221,20 @@ Math problem-solving accuracy is the first evaluation focus.
   `fraction_check` works each story out again its own way. 120 patterns,
   40 held out. Both topics share `math_detail` (the story, distractor and
   text) and `math_check` (notes and the stated answer). Not in the
-  training mix (the owner decides). Next topics, in order: number theory,
-  counting (the answer format of probability needs a decision first).
+  training mix (the owner decides).
+  `src/mathgen_number_theory.h` (`--topic number-theory`, 2026-10-17):
+  remainders (boxes, vans), common multiples (buses, lights, packs),
+  common divisors (gift bags, ribbons), factor counts (equal rows),
+  multiples (tickets, every k-th, a range, even lockers), page digits and
+  digit puzzles, repeating patterns; whole answers. calc.h has only + - *
+  /, so a quotient is written as two products around the number
+  ("7*28 = 196 and 7*29 = 203 is more than 200"); `number_theory_check`
+  works every story out by brute force. 120 patterns, 40 held out; the
+  distractors naming numbered things are left out. `--exclude` draws 829
+  of 300k again, then 0 GSM8K test/dev leaks. `--recipes` works, but most
+  gold solutions fail the re-draw check (numbers no calculation makes
+  become constants). Not in the mix. Next topic: counting (the answer
+  format of probability needs a decision first).
 - `operations/build_libretexts_problems.py` (2026-10-17): 383 human-written
   word problems with their book answers (one number, no worked solution)
   from the CC BY math textbooks in Common Pile's LibreTexts (OpenStax 1e

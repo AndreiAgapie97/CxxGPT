@@ -242,10 +242,25 @@ enum class Place {
 
 // One irrelevant sentence, as in gen-word, from the split's own distractor
 // wordings. Drawn even when disabled, so toggling distractors changes no
-// other draw. Its number is never one the story or solution uses.
-inline void add_distractor(Story& s, const std::string& answer, Place place) {
+// other draw. Its number is never one the story or solution uses. Without
+// `labels`, the draw picks among the split's wordings that do not name a
+// numbered thing ("route 9", "parking space 14") or count chairs, ribbons
+// or lamps (the same draw, read another way): number theory's stories count
+// numbered tickets and lockers, chairs, ribbons and blinking lamps, where
+// such a sentence would read as part of the story.
+inline void add_distractor(Story& s, const std::string& answer, Place place, bool labels = true) {
     MathRecord& out = s.out;
-    const int extra = int(s.rng.below(12)) + (s.options.test ? 12 : 0);
+    int extra = int(s.rng.below(12)) + (s.options.test ? 12 : 0);
+    // Indices into word_detail::distractors: 0-11 train, 12-23 test.
+    static constexpr std::array<bool, 24> label = {false, false, false, false, true,  true,  true,  true,
+                                                   true,  true,  false, false, true,  true,  false, false,
+                                                   true,  true,  true,  true,  false, true,  false, false};
+    if (!labels) {
+        std::vector<int> plain;
+        for (int i = 0; i < 12; ++i)
+            if (!label[size_t(i + (s.options.test ? 12 : 0))]) plain.push_back(i + (s.options.test ? 12 : 0));
+        extra = plain[size_t(extra % 12) % plain.size()];
+    }
     // Every whole number in the story, the solution and the answer, down to an "x + 4".
     std::set<int64_t> used(out.inputs.begin(), out.inputs.end());
     std::string texts = answer;
