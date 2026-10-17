@@ -255,6 +255,7 @@ EXCLUDED = {
     # (the 2026-10-17 audit of the second build)
     'Two airplanes take off in different directions. One travels 300 mph': 'the key says 599.8; it is 292.4',
     'Find the linear speed of the moon': 'the key 2234 is 2234.65 cut short, not rounded',
+    'Someone lends you a tire jack': "the wrench's length is in the exercise before",
 }
 
 
