@@ -915,7 +915,7 @@ void eval_choice_on_gpu(const char* name, const Config& base, Matmul matmul, dou
         gpu.forward_losses(inp.data(), tgt.data(), B, Tn, l.data());
         return std::vector<double>(l.begin(), l.end());
     };
-    const std::vector<double> batched = score_rows(rows, 4, on_gpu);
+    const std::vector<double> batched = score_rows(rows, 64, on_gpu);
     std::vector<double> want(rows.size()), alone(rows.size());
     double worst = 0, worst_alone = 0;
     for (size_t k = 0; k < rows.size(); ++k) {

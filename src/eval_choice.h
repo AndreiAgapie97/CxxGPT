@@ -139,19 +139,20 @@ inline std::vector<Row> make_rows(const std::vector<Item>& items, const Tokenize
 using LossFn = std::function<std::vector<double>(const std::vector<int>& tokens, const std::vector<int>& targets,
                                                  int B, int Tn)>;
 
-// The summed log-probability of each row's option tokens, rows scored B at
-// a time. Rows are sorted longest first, so a batch is as long as its
-// longest row and the first batch is the largest (the model allocates once).
-inline std::vector<double> score_rows(const std::vector<Row>& rows, int B, const LossFn& losses) {
-    CHECK(B > 0, "the batch must be positive");
+// The summed log-probability of each row's option tokens. Rows are sorted
+// longest first and scored as many at a time as fit in max_tokens positions
+// (at least one): a batch is as long as its longest row, so short rows go
+// many to a forward, and the memory a forward needs stays about the same.
+inline std::vector<double> score_rows(const std::vector<Row>& rows, int max_tokens, const LossFn& losses) {
+    CHECK(max_tokens > 0, "the token budget must be positive");
     std::vector<size_t> order(rows.size());
     std::iota(order.begin(), order.end(), size_t(0));
     std::stable_sort(order.begin(), order.end(),
                      [&](size_t a, size_t b) { return rows[a].tokens.size() > rows[b].tokens.size(); });
     std::vector<double> logp(rows.size(), 0.0);
-    for (size_t at = 0; at < order.size(); at += size_t(B)) {
-        const size_t n = std::min(size_t(B), order.size() - at);
+    for (size_t at = 0, n = 0; at < order.size(); at += n) {
         const int Tn = int(rows[order[at]].tokens.size()) - 1;
+        n = std::min(size_t(std::max(1, max_tokens / Tn)), order.size() - at);
         std::vector<int> inp(n * size_t(Tn), 0), tgt(inp.size(), -1);
         for (size_t b = 0; b < n; ++b) {
             const Row& r = rows[order[at + b]];

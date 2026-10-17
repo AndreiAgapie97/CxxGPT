@@ -2262,7 +2262,8 @@ int cmd_eval_choice(Args& a) {
             "        a test: one JSON object a line, {\"id\", \"context\", \"options\": [...], \"gold\": index}\n"
             "        (scripts/get_choice_data.py writes them); each row is [BOS] context option, the two\n"
             "        tokenized apart, so an option starts with its space (\" Paris\")\n"
-            "        --batch 8 (rows a forward) --limit N (the first N questions of each test)\n"
+            "        --tokens 4096 (positions a forward: as many rows as fit; eval-loss's 8 x 512)\n"
+            "        --limit N (the first N questions of each test)\n"
             "        --skip a.hits[,b.hits...] (one per test: leak-check --hits; the scores again\n"
             "        without those questions)\n"
             "        --picks FILE.jsonl (each question's choices and option scores; with several tests,\n"
@@ -2275,9 +2276,9 @@ int cmd_eval_choice(Args& a) {
     const std::string ckpt = a.str("ckpt", "model.ckpt"), test_arg = a.str("test"), bpe = a.str("bpe");
     const std::string skip_arg = a.str("skip"), picks = a.str("picks");
     CHECK(!test_arg.empty(), "usage: cxxgpt eval-choice --ckpt FILE --test a.jsonl[,b.jsonl...] --bpe tok.bpe");
-    const int B = a.integer_int("batch", 8);
+    const int max_tokens = a.integer_int("tokens", 4096);
     const long limit = a.integer("limit", 0);
-    CHECK(B > 0, "--batch must be positive");
+    CHECK(max_tokens > 0, "--tokens must be positive");
     CHECK(limit >= 0, "--limit must be 0 (all) or positive");
     const bool use_gpu = a.flag("gpu");
     CHECK(use_gpu || !a.has("matmul"), "--matmul needs --gpu");
@@ -2337,7 +2338,7 @@ int cmd_eval_choice(Args& a) {
         const double t0 = now_seconds();
         size_t cut = 0;
         const std::vector<eval_choice::Row> rows = eval_choice::make_rows(items, tok, model.cfg.seq_len, &cut);
-        const std::vector<double> logp = eval_choice::score_rows(rows, B, losses);
+        const std::vector<double> logp = eval_choice::score_rows(rows, max_tokens, losses);
         const eval_choice::Result all = eval_choice::tally(items, rows, logp);
         std::printf("%s: %zu questions, %zu options (%.2f a question), %zu contexts cut to fit %d tokens, %.1f s\n",
                     path.c_str(), all.questions, all.rows, double(all.rows) / double(all.questions), cut,

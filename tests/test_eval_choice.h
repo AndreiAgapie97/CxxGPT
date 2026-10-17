@@ -51,7 +51,7 @@ inline void test_eval_choice() {
         }
         return l;
     };
-    const std::vector<double> logp = score_rows(rows, 2, fake);
+    const std::vector<double> logp = score_rows(rows, 11, fake);  // two rows a forward
     // " ab" 0.1 + 1 + 1, " c" 0.1 + 0.9, " dd" 0.1 + 0.5 + 0.5; " e" 0.1 + 0.2.
     const std::vector<double> want = {-2.1, -1.0, -1.1, -0.3, -2.1};
     double worst = 0;
@@ -92,8 +92,8 @@ inline void test_eval_choice() {
     EXPECT(p.id == "7" && p.context == "Q: 2+2?\nA:" && p.options.size() == 2 && p.options[1] == " 4" && p.gold == 1,
            "parse_item: id %s, gold %d", p.id.c_str(), p.gold);
 
-    // A real model in double: options scored in batches of 3 rows of mixed
-    // lengths (padded on the right) give each option's score alone, and that
+    // A real model in double: options scored in batches of mixed lengths
+    // (padded on the right) give each option's score alone, and that
     // score is the summed loss Model::forward reports for the option.
     Config cfg;
     cfg.vocab = 256;
@@ -114,7 +114,7 @@ inline void test_eval_choice() {
                                      {"b", "1 2 3", {" 4", " 5 6 7 8 9 10"}, 0},
                                      {"c", "", {"x", "yy"}, 1}};
     const std::vector<Row> mrows = make_rows(mixed, tok, cfg.seq_len);
-    const std::vector<double> batched = score_rows(mrows, 3, model_losses);
+    const std::vector<double> batched = score_rows(mrows, 40, model_losses);
     double gap = 0;
     for (size_t k = 0; k < mrows.size(); ++k) {
         const Row& row = mrows[k];

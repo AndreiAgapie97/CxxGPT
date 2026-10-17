@@ -97,7 +97,7 @@ cat > "$TEST_DIR/choice.jsonl" <<'JSONL'
 {"id": "q3", "context": "x", "options": ["y", "z", "w"], "gold": 2}
 JSONL
 printf '2\n' > "$TEST_DIR/choice.hits"
-"$CXXGPT" eval-choice --ckpt "$TEST_DIR/model.ckpt" --test "$TEST_DIR/choice.jsonl" --batch 2 --threads 2 \
+"$CXXGPT" eval-choice --ckpt "$TEST_DIR/model.ckpt" --test "$TEST_DIR/choice.jsonl" --tokens 14 --threads 2 \
     --skip "$TEST_DIR/choice.hits" --picks "$TEST_DIR/choice.picks.jsonl" > "$TEST_DIR/choice.log"
 grep -q 'choice.jsonl: 3 questions, 7 options (2.33 a question), 1 contexts cut to fit 8 tokens' "$TEST_DIR/choice.log"
 grep -q 'chance 44.4%; always option 1: 33.3%' "$TEST_DIR/choice.log"
