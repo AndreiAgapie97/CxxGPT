@@ -194,7 +194,7 @@ Math problem-solving accuracy is the first evaluation focus.
   plan varies, not only its wording (backward problems, questions about
   middle quantities, distractor quantities, plans held out by hash), after
   iGSM (Physics of Language Models, Part 2.1); a second solver, the
-  re-draw check, the gates before any mix, a first version of about 3 days.
+  re-draw check, the gates before any mix, a first version of about 4 days.
 - `src/wordgen.h` (`cxxgpt gen-word`): GSM8K-style word problems with exact
   answers and worked solutions (with or without calculator notes). Six
   story shapes (a running quantity, comparisons, totals over people,

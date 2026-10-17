@@ -191,11 +191,13 @@ below). The "first version" column is the smallest useful version
    then the other leaves, and work out the stated quantity from them. The
    whole draw is thrown away and made again (never adjusted) if any value
    is 0 or 1 ("1 cards"), fractional where it must be whole, outside its
-   kind's realistic range or above 1,000,000, or if two numbers of the
-   question are equal, or one equals 1, 2 or 100. The last rule is new:
-   repeated small numbers are what makes the re-draw check's tries
-   ambiguous today (README, "The re-draw check": a third to two thirds of
-   right tries with one reading).
+   kind's realistic range or above 1,000,000, or if two quantities of the
+   problem have the same value (stated or worked out), or one equals 2 or
+   100. The last rule is new. It lets the second solver match each note's
+   numbers to quantities without guessing (below), and repeated small
+   numbers are what makes the re-draw check's tries ambiguous today
+   (README, "The re-draw check": a third to two thirds of right tries
+   with one reading).
 
 ### Two ways to solve a backward problem
 
@@ -213,18 +215,35 @@ The generator writes whichever a person would:
 The point of this generator is the plan, so its test split must hold
 plans out. iGSM does this with a hash of the solution template (below).
 Here:
-- each problem's **plan signature** is its solution with names, wordings
-  and numbers removed: the relations in order, which earlier result or
-  stated number each one takes, and the direction (forward, undo, let-x);
+- each problem's **plan signature** describes the graph the solution
+  needs, not the order the solution happens to be written in: the needed
+  relations (kind, and for a sequence its length), which quantity feeds
+  which, which quantity is asked, which is the hidden unknown, and the
+  direction (forward, undo, let-x). Names, wordings, numbers and the
+  distractor relations are left out;
+- the signature is made **canonical** before hashing, so one graph always
+  gets one hash: the inputs of a relation that does not care about their
+  order (a sum, "each": `n*p` is `p*n`) are sorted, and the graph is
+  written out in every order that respects its arrows (at most 8
+  operations, so at most 8! = 40,320 orders, usually a handful) and the
+  smallest of those writings, compared as text, is the signature. A test
+  draws one graph in every solution order and every sentence order and
+  checks it gets one hash;
 - a signature whose hash (mod 23) is 17 or more is a **test plan**
-  (about a quarter); the training split never makes one, the test split
-  only makes them. iGSM uses the same rule;
+  (about a quarter), the rest are training plans. iGSM uses the same rule;
 - sentence wordings are split as in the other generators (some frames for
   train, the others for test).
 
-So the test split has plans the training split never made, in wordings
-it never used. With three test files (new plan in seen wording, seen plan
-in new wording, both new), an exam tells which of the two transfers.
+The two splits are chosen apart: `--plans train|test` and `--wording
+train|test` (`--split` sets both, so training data is `--split train`:
+training plans in training wordings). Both go into each problem's recipe
+(`plans=` next to `test=`, read by `redraw::parse_recipe`), so a re-drawn
+version is made in the same split. Three test files then tell which of
+the two transfers:
+- new plans in seen wordings: `--plans test --wording train`;
+- seen plans in new wordings: `--plans train --wording test` (the plans'
+  shapes were trained, these problems were not);
+- both new: `--split test`.
 Few plans exist at 2-3 operations, so there the split is mostly by
 wording; held-out plans are real evidence from 4 operations on. The
 README already says that success on held-out wording alone is no
@@ -300,13 +319,23 @@ As every generator here has: `plan_check`, in its own file
 (`src/plan_check.h`), sharing no code with the generator. If it disagrees,
 the program stops instead of writing the problem.
 
-- **Input.** The generator gives it the stated facts: for each stated
-  relation its kind, the quantities it links and its number, and which
-  quantity is asked. A test checks that these numbers are exactly the
-  question's numbers, in order (read from the text with the labels'
-  number reader, `labels::detail::numbers_in`), so the facts cannot
-  drift from the text.
-- **Forward problems.** It works the facts out by itself: again and again,
+- **It reads the question itself.** Checking only that the generator's
+  facts carry the question's numbers would not be enough: a renderer bug
+  that writes "fewer" for "more", or "three times" for "twice", keeps the
+  digits and would pass. So the checker does not take the relations from
+  the generator: it reads them from the question's sentences with its own
+  reader, keyed on each relation's words ("more than", "fewer than",
+  "times as many", "twice", "half", "each", "per", "shared equally
+  among", "in all", "together", "the one before"), its own table of
+  number words ("twice" is 2, "three weekends" three terms) and the
+  owners and objects named in the sentence. What it reads is a list of
+  facts: relation, quantities, number. It must equal the generator's
+  own list, fact for fact; a sentence it cannot read, or reads as
+  something else, stops the program. Every frame is therefore written so
+  that this reader reads it, and a test fills every frame of both splits
+  and checks what the reader makes of it. The frames are the generator's
+  data; the reader is the checker's own code.
+- **Forward problems.** It works its facts out by itself: again and again,
   any fact whose inputs are known gives its result, until nothing more
   can be worked out. The asked quantity must be known by then, and equal
   the written answer.
@@ -314,15 +343,33 @@ the program stops instead of writing the problem.
   value (for money, every cent) the unknown's range allows, works every
   fact out forward for each, and exactly one value must satisfy every
   stated number: the written answer. This is `equation_check`'s method.
-- **The solution.** Every note must check by calc.h, and every note's
-  result must be a value the checker worked out for some quantity (or a
-  coefficient of the unknown). That also gives exact labels for each step
-  (research plan, idea E) for free.
+- **The solution, step by step.** From its facts the checker finds the
+  steps the question needs by itself (the facts the asked quantity
+  depends on) and, for each, the operation and the quantities it takes.
+  Each line of the worked solution must then be one of those steps: its
+  note's operation is the step's operation, and its operands are the
+  values of the step's own input quantities, in the right order for `-`
+  and `/`. Every needed step appears exactly once, after the steps it
+  depends on, and no line uses a quantity off the path (a distractor).
+  Matching a result alone would not do: an expected `10/2` and a written
+  `2+3` both give 5. For let-x lines the same holds for the coefficients
+  (`1+3+9` must be the sum of the sequence's multipliers) and the last
+  line (`(stated - b) / a`). Every note must also check by calc.h. This
+  gives exact labels for each step (research plan, idea E) for free.
+- **One value, one quantity.** To match operands to quantities by value
+  without guessing, every quantity of a problem gets a different value,
+  worked-out ones included, and none equals 1, 2 or 100 (step 6 of
+  "Building a graph" throws such draws away). This also helps the
+  re-draw check, whose ambiguity comes from repeated values. How many
+  draws this throws away is measured in Gate 0; if too many, the rule
+  can be narrowed to the needed quantities and the stated numbers.
 - **Every stated number used.** Each stated number must belong to some
   fact: no number in the story without a quantity behind it.
 - **Tests show it catches mistakes**: a changed number, a wrong answer, a
-  wrong note, a backward problem with two solutions, a distractor used in
-  the solution.
+  wrong note, a note with the right result from the wrong operands, a
+  "more" rendered as "fewer", a "twice" rendered as "three times", a
+  backward problem with two solutions, a distractor used in the
+  solution.
 - **`--exclude`**, as `gen-math`: a problem sharing a 13-word run, or its
   numbers and answer, with a GSM8K test or dev question is drawn again.
   Both `gen-math` topics needed it; this one, built to look like GSM8K,
@@ -491,14 +538,17 @@ For scale: the equations and fractions topics were both built in one day
 by one session (2026-10-16, about 700-1,000 lines of generator, 200-300 of tests, CLI
 tests and a README section), and the number theory topic (PR #87) in one
 session. This generator is bigger: a graph, a backward solver, story
-rendering from the graph, and plans held out.
+rendering from the graph, plans held out, and a checker that reads the
+question and matches the solution step by step.
 
-**First version, about 3 days of work.** Counts and money; the relations
+**First version, about 4 days of work.** Counts and money; the relations
 marked "yes" in the table (given, sum, more/fewer, how many more,
 multiple, each, equal share, a sequence of 2-4 terms); 2-6 operations;
 forward and backward (undo and let-x); questions about middle quantities;
-one or two real distractor relations; four to six worlds; the plan split
-and the wording split; `plan_check`; recipes and the re-draw check;
+one or two real distractor relations; four to six worlds; the canonical
+plan signature, and the plan and wording splits chosen apart;
+`plan_check` with its own reader (about a day of the four); recipes and
+the re-draw check;
 `--exclude`; tests, CLI tests, a README section; Gate 0. As a `gen-math`
 topic (`gen-math --topic plans`, `src/mathgen_plans.h`), it reuses the
 command's options, files and `--exclude`.
