@@ -13,6 +13,7 @@
 
 #include "common.h"
 #include "reasoning.h"
+#include "tokenizer.h"
 
 namespace leak_check {
 
@@ -119,6 +120,34 @@ public:
         });
         return hit;
     }
+};
+
+// A token file read as its text: an input stream that decodes `chunk`
+// tokens at a time, so a training shard of 100M tokens scans without its
+// text ever held whole. A run of words split across two chunks is still one
+// run: Index::scan reads the stream as one text.
+class TokenText : public std::streambuf {
+    const std::vector<uint16_t>& tokens_;
+    const Tokenizer& tok_;
+    size_t next_ = 0, chunk_;
+    std::string text_;
+
+    int_type underflow() override {
+        text_.clear();
+        while (text_.empty() && next_ < tokens_.size()) {
+            const size_t end = std::min(tokens_.size(), next_ + chunk_);
+            text_ = tok_.decode(std::vector<int>(tokens_.begin() + std::ptrdiff_t(next_), tokens_.begin() +
+                                                                                          std::ptrdiff_t(end)));
+            next_ = end;
+        }
+        if (text_.empty()) return traits_type::eof();
+        setg(text_.data(), text_.data(), text_.data() + text_.size());
+        return traits_type::to_int_type(text_[0]);
+    }
+
+public:
+    TokenText(const std::vector<uint16_t>& tokens, const Tokenizer& tok, size_t chunk = size_t(1) << 20)
+        : tokens_(tokens), tok_(tok), chunk_(std::max<size_t>(chunk, 1)) {}
 };
 
 // Accept prep-qa's five-column problems files, or one plain question per line.

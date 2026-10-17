@@ -286,7 +286,19 @@ Math problem-solving accuracy is the first evaluation focus.
 - GSM8K dev set: `scripts/get_data.py` holds out 500 GSM8K train problems
   (the 500 questions with the smallest sha256); `DEV=1 scripts/night.sh`
   validates on it instead of the test set. `cxxgpt leak-check` finds
-  questions sharing a 13-word run with training files.
+  questions sharing a 13-word run with training files (token files too,
+  with `--bpe`; `--hits` lists them).
+- `cxxgpt eval-choice` (`src/eval_choice.h`, 2026-10-17; README "General
+  knowledge tests"): what the general text buys, on multiple-choice tests
+  scored by likelihood (each option's summed log-probability after the
+  context; no generation), CPU or `--gpu` (`GpuTrainer::forward_losses`,
+  checked against the fp64 reference in `test_gpu`). Accuracy by the sum,
+  per token and per character (lm-eval's acc_norm), each with its standard
+  error, chance and the always-one-option rate. The owner chose PIQA
+  (1,838, chance 50%), PubMedQA (500, 33.3%; always "yes" 55.2%) and BoolQ
+  (3,270, 50%; always "yes" 62.2%): `scripts/get_choice_data.py` (pinned
+  sha256) into `data/choice/`; evaluation only. ARC and SciQ are out
+  (licences), HellaSwag too (DMCA takedown, GPT-written endings).
 - `cxxgpt qa-context` (`src/qa_context.h`, #15): for every trained answer
   token, the exact share of `sample_batch`'s random windows that show its
   whole question, part of it, or none. At `--seq 512` (2026-10-15): GSM8K

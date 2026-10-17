@@ -162,7 +162,8 @@ patterns for inspection and do not establish the cause of a wrong answer.
 | `self-train` | samples a model's own solutions to training problems and keeps only the ones with the right answer and right arithmetic, as a masked token file (below) |
 | `sample` | generates text from a prompt (`--tools` as for `eval-reasoning`); `--gpu` (with `cxxgpt-gpu`) chooses every token on the GPU, the same text as the CPU's |
 | `bench-infer` | times the ternary inference engine against an fp32 baseline |
-| `leak-check` | finds questions (such as the GSM8K dev set) that share a run of 13 words with training files |
+| `eval-choice` | multiple-choice tests (PIQA, PubMedQA, BoolQ) scored by likelihood: accuracy by the sum, per token and per character, with its standard error and chance ("General knowledge tests", below); `--gpu` with `cxxgpt-gpu` |
+| `leak-check` | finds questions (such as the GSM8K dev set) that share a run of 13 words with training files (text or, with `--bpe`, token files); `--hits` lists them |
 | `qa-context` | how often random training windows train an answer without its question in view (`--data A.tok,B.tok --seq 512`) |
 
 ### How answers are scored
@@ -1338,6 +1339,77 @@ it ends 6% lower (0.0070), at the same validation loss (2.1001 against
 2.0993). That is one seed on a small model; whether it removes loops in
 the answers is the experiment in issue #34.
 
+### General knowledge tests
+
+About 80% of the training mix is general text (arXiv, DOAB books, PubMed
+articles). Its held-out loss falls, but a loss does not say what the text
+teaches. `cxxgpt eval-choice` measures that on multiple-choice tests, the
+standard way for models too small to answer in their own words: for each
+question the model reads the context once per answer option, the
+log-probabilities of the option's tokens are added up, and the most likely
+option is the model's answer. Nothing is generated.
+
+```
+python3 scripts/get_choice_data.py all     # PIQA, PubMedQA, BoolQ into data/choice/
+build/cxxgpt-gpu eval-choice --gpu --ckpt runs/rp1.ckpt --bpe data/licensed-10b/tok.bpe \
+    --test data/choice/piqa.jsonl,data/choice/pubmedqa.jsonl,data/choice/boolq.jsonl
+```
+
+The tests, chosen by the owner on 2026-10-17 from a licence check at each
+source (none was written by an AI model; all are for evaluation only and
+never go into a mix):
+
+| test | what it asks | questions | options | chance | always "yes" | licence |
+|---|---|---|---|---|---|---|
+| PIQA (validation) | how to do an everyday thing: which of two solutions works | 1,838 | 2 | 50% | - | Academic Free License 3.0 |
+| PubMedQA (the 500 expert-labelled test questions) | a PubMed abstract without its conclusion, and a yes/no/maybe question on it | 500 | 3 | 33.3% | 55.2% | MIT |
+| BoolQ (dev) | a Wikipedia passage and a yes/no question on it | 3,270 | 2 | 50% | 62.2% | CC BY-SA 3.0 |
+
+Left out: ARC and SciQ (licences that forbid commercial use or
+redistribution, or contradict each other), HellaSwag (taken down from
+GitHub after a copyright claim; its wrong endings were written by a GPT
+model), MedMCQA (no stable download outside Hugging Face's parquet files),
+LAMBADA (not multiple choice).
+
+How to read a score:
+- **Three scores per test.** "by the sum" compares the options' summed
+  log-probabilities (lm-eval's `acc`); a long option collects more
+  negative log-probability, so this favours short options. "per token"
+  and "per character" divide by the option's length; per character is
+  lm-eval's `acc_norm`, the number most tables of small models report. A
+  tie counts as wrong.
+- **The ± is one standard error**, sqrt(p (1 - p) / n). Two of them each
+  side is where 95% of repeats on new questions of the same kind would
+  land. On PubMedQA's 500 questions one error is about 2.2 points, so two
+  checkpoints 4 points apart there may not differ at all.
+- **Chance, and "always option N".** Chance is one over the number of
+  options. "always option N" is what always picking the same option
+  scores: on BoolQ always answering "yes" gets 62.2%, and models of
+  100-400M parameters score below that (Pythia-160M 59.5, Pythia-410M
+  55.3); on PubMedQA always "yes" gets 55.2%. A score is worth something
+  only above both lines.
+- What small public models score (lm-eval, zero-shot, by the sum / per
+  character): PIQA Pythia-160M 62.7 / 61.6, Pythia-410M 66.8 / 67.1. No
+  checked number exists for PubMedQA at this size; expect about the
+  "yes" rate.
+
+Each row is `[BOS] context option`, with the context and the option
+tokenized apart (each option starts with its space, `" yes"`), so an
+option is cut into the same tokens after any context. A context too long
+for the model loses its start, never the option (the command says how
+many were cut). Rows go to the GPU longest first, as many as fit in
+`--tokens 4096` positions. `--picks FILE.jsonl` writes every question's
+chosen options and option scores.
+
+**Leaks.** Common Pile text can contain a test's questions: PubMedQA's
+abstracts come from papers that may be in our PubMed Central shards, with
+their conclusions, which give the answer. `get_choice_data.py` writes
+`data/choice/NAME.questions.txt`; `cxxgpt leak-check --questions FILE
+--train $(cat data/mix-...txt) --bpe data/licensed-10b/tok.bpe --hits
+NAME.hits` finds the questions that share a 13-word run with a training
+file (it reads token files as their text), and `eval-choice --skip
+a.hits,b.hits,...` prints the scores again without them.
+
 ## Reproducible research
 
 ```sh
@@ -1367,6 +1439,7 @@ The research CUDA stable-loss and masked-accumulation tests require
 | `src/attention_tc.cuh` | the same on the tensor cores, for TF32/bf16 training (tested on the GPU) |
 | `src/tokenizer.h` | byte-level BPE |
 | `src/reasoning.h` | the reasoning curriculum and its evaluation |
+| `src/eval_choice.h` | multiple-choice tests scored by likelihood (`eval-choice`) |
 | `src/calc.h` | the exact calculator used during generation (`--tools`) |
 | `src/no_repeat.h`, `src/unlikelihood.h` | repeated runs of tokens: blocked when decoding (`--no-repeat`), pushed down in training (`--unlikelihood`) |
 | `src/ternary.h`, `src/infer.h` | bitplane int8 kernels and the ternary inference engine |

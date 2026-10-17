@@ -23,8 +23,8 @@
 // Then decoding: the GPU's KV-cache decoder against the reference's whole
 // forward on each prefix (ReferenceDecoder), and eval_reasoning() on it
 // (eval-reasoning --gpu), greedy, with a vote, the calculator and the
-// no-repeat block. Unlikelihood training (#34) runs the same comparison with
-// the term on, plus a saturated row and a term that never fires. The GPU's
+// no-repeat block, and eval-choice's option scores. Unlikelihood training
+// (#34) runs the same comparison with the term on, plus a saturated row and a term that never fires. The GPU's
 // ternary codes must be the CPU's, code for code (#40). A last check trains
 // on the GPU alone, with TF32 and with bf16, until a toy pattern is learned.
 #include <algorithm>
@@ -36,6 +36,7 @@
 #include <string>
 #include <vector>
 
+#include "../src/eval_choice.h"
 #include "../src/generate.h"
 #include "../src/gpu.h"
 #include "../src/gpu_ref.h"
@@ -879,6 +880,73 @@ void eval_on_gpu() {
     EXPECT(oc == og && rc.next() == rg.next(), "shared-generator sampling differs between the reference and the GPU");
 }
 
+// eval-choice --gpu (eval_choice.h on GpuTrainer::forward_losses): every
+// option's summed log-probability, scored in padded batches of mixed rows,
+// against the reference's log-softmax in double on that row alone; then the
+// same rows on the GPU alone (a batch must not change a row's score), and
+// the chosen options. Exact fp32 products and bf16 ones, as the CLI's
+// --matmul offers, on an MoE model with a shared expert and on experts
+// only, top-1, in bf16 (the night model's kind). With bf16 a near tie may
+// turn either way, so only exact products must choose as the reference.
+void eval_choice_on_gpu(const char* name, const Config& base, Matmul matmul, double tol) {
+    using namespace eval_choice;
+    Config cfg = base;
+    cfg.vocab = 256;  // the byte tokenizer's
+    Model<float> host(cfg);  // the layout and a copy of the weights
+    GpuTrainer gpu(cfg, host.infos, matmul, true, /*inference=*/true);
+    gpu.init_params(13);
+    gpu.get_params(host.params.data());
+    Rng rng(14);
+    for (auto& layer : host.router_bias)
+        for (auto& b : layer) b = float(0.01 * rng.normal());
+    gpu.set_router_bias(host.router_bias);
+    GpuReference ref(cfg, host.infos);
+    ref.set_params(host.params.data());
+    ref.set_router_bias(host.router_bias);
+    const Tokenizer tok;  // bytes
+    std::vector<Item> items = {{"a", "The cat sat on the", {" mat", " moon", " a"}, 0},
+                               {"b", "1 2 3", {" 4", " 5 6 7 8 9 10", " 4 5"}, 0},
+                               {"c", "", {"x", "yy"}, 1},
+                               {"d", "A rather long context, cut to fit the window of this small model.", {" Yes", " No"}, 0}};
+    size_t cut = 0;
+    const std::vector<Row> rows = make_rows(items, tok, cfg.seq_len, &cut);
+    const LossFn on_gpu = [&](const std::vector<int>& inp, const std::vector<int>& tgt, int B, int Tn) {
+        std::vector<float> l(inp.size());
+        gpu.forward_losses(inp.data(), tgt.data(), B, Tn, l.data());
+        return std::vector<double>(l.begin(), l.end());
+    };
+    const std::vector<double> batched = score_rows(rows, 64, on_gpu);
+    std::vector<double> want(rows.size()), alone(rows.size());
+    double worst = 0, worst_alone = 0;
+    for (size_t k = 0; k < rows.size(); ++k) {
+        const Row& r = rows[k];
+        const int Tn = int(r.tokens.size()) - 1, V = cfg.vocab;
+        ref.forward(r.tokens.data(), nullptr, 1, Tn);
+        const std::vector<double> lg = ref.logits();
+        double s = 0;
+        for (int t = r.option_start - 1; t < Tn; ++t) {
+            const double* z = &lg[size_t(t) * V];
+            const double mx = *std::max_element(z, z + V);
+            double e = 0;
+            for (int v = 0; v < V; ++v) e += std::exp(z[v] - mx);
+            s += z[r.tokens[size_t(t + 1)]] - mx - std::log(e);
+        }
+        want[k] = s;
+        alone[k] = score_rows({r}, 1, on_gpu)[0];
+        worst = std::max(worst, std::abs(batched[k] - s) / (1 + std::abs(s)));
+        worst_alone = std::max(worst_alone, std::abs(batched[k] - alone[k]) / (1 + std::abs(s)));
+    }
+    const Result g = tally(items, rows, batched), c = tally(items, rows, want);
+    std::printf("  eval-choice %-14s option scores %.1e from the reference, %.1e from rows alone\n", name, worst,
+                worst_alone);
+    EXPECT(cut == 1, "eval-choice %s: %zu contexts cut, want 1", name, cut);
+    EXPECT(worst <= tol && worst_alone <= tol, "eval-choice %s: scores differ by %g (reference), %g (alone)", name,
+           worst, worst_alone);
+    if (matmul == Matmul::fp32)
+        EXPECT(g.pick_sum == c.pick_sum && g.pick_token == c.pick_token && g.pick_char == c.pick_char,
+               "eval-choice %s: the GPU chose other options than the reference", name);
+}
+
 }  // namespace
 
 // The reference against the CPU engine in double, while the CPU engine still
@@ -1558,6 +1626,8 @@ int main() {
     decode("moe top-1 bf16", moe1, 1e-2, Matmul::bf16);  // measured 2.9e-3
     decode("ternary moe bf16", ours, 1e-2, Matmul::bf16);  // measured 1.9e-3
     eval_on_gpu();
+    eval_choice_on_gpu("moe+shared", moe, Matmul::fp32, 1e-5);
+    eval_choice_on_gpu("moe top-1 bf16", moe1, Matmul::bf16, 1e-2);
 
     learns_pattern(false);
     learns_pattern(true);

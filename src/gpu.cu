@@ -2725,6 +2725,11 @@ void GpuTrainer::set_router_bias(const std::vector<std::vector<float>>& bias) {
 double GpuTrainer::forward(const int* tokens, const int* targets, int B, int Tn, bool training) {
     return impl_->forward(tokens, targets, B, Tn, training);
 }
+void GpuTrainer::forward_losses(const int* tokens, const int* targets, int B, int Tn, float* losses) {
+    Impl& m = *impl_;
+    m.forward(tokens, targets, B, Tn, false);
+    to_host(losses, m.losses.p, size_t(B) * Tn);
+}
 void GpuTrainer::backward(double loss_scale) { impl_->backward(loss_scale); }
 void GpuTrainer::set_unlikelihood(double alpha, int ngram) {
     CHECK(alpha >= 0 && ngram >= 2, "unlikelihood: alpha %g, ngram %d", alpha, ngram);

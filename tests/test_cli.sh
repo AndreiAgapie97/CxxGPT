@@ -89,6 +89,32 @@ status=0
     > "$TEST_DIR/eval-loss.log" 2>&1 || status=$?
 [[ "$status" == 1 ]] && grep -q 'check failed' "$TEST_DIR/eval-loss.log"
 printf 'CLI: eval-loss matches the last validation, with random windows and with --all\n'
+# eval-choice on the same model: three questions, one context cut to fit
+# the 8-token window; --limit, --skip (leak-check --hits' format) and --picks.
+cat > "$TEST_DIR/choice.jsonl" <<'JSONL'
+{"id": "q1", "context": "abc", "options": [" d", " e"], "gold": 0}
+{"id": "q2", "context": "abcdefghijkl", "options": ["m", "nn"], "gold": 1}
+{"id": "q3", "context": "x", "options": ["y", "z", "w"], "gold": 2}
+JSONL
+printf '2\n' > "$TEST_DIR/choice.hits"
+"$CXXGPT" eval-choice --ckpt "$TEST_DIR/model.ckpt" --test "$TEST_DIR/choice.jsonl" --tokens 14 --threads 2 \
+    --skip "$TEST_DIR/choice.hits" --picks "$TEST_DIR/choice.picks.jsonl" > "$TEST_DIR/choice.log"
+grep -q 'choice.jsonl: 3 questions, 7 options (2.33 a question), 1 contexts cut to fit 8 tokens' "$TEST_DIR/choice.log"
+grep -q 'chance 44.4%; always option 1: 33.3%' "$TEST_DIR/choice.log"
+grep -Eq 'per character \(acc_norm\) +[0-9.]+% \+- [0-9.]+  \([0-3] / 3\)' "$TEST_DIR/choice.log"
+grep -q 'without the 1 questions in .*choice.hits (2 left):' "$TEST_DIR/choice.log"
+[[ $(wc -l < "$TEST_DIR/choice.picks.jsonl") == 3 ]] && grep -q '^{"id":"q2","gold":1,' "$TEST_DIR/choice.picks.jsonl"
+"$CXXGPT" eval-choice --ckpt "$TEST_DIR/model.ckpt" --test "$TEST_DIR/choice.jsonl" --limit 2 --threads 2 \
+    > "$TEST_DIR/choice.log"
+grep -q 'choice.jsonl: 2 questions, 4 options' "$TEST_DIR/choice.log"
+for bad in '{"context": "a", "options": [" b"], "gold": 0}' '{"context": "a", "options": [" b", " c"], "gold": 2}'; do
+    printf '%s\n' "$bad" > "$TEST_DIR/choice-bad.jsonl"
+    status=0
+    "$CXXGPT" eval-choice --ckpt "$TEST_DIR/model.ckpt" --test "$TEST_DIR/choice-bad.jsonl" \
+        > "$TEST_DIR/choice.log" 2>&1 || status=$?
+    [[ "$status" == 1 ]] && grep -q 'check failed' "$TEST_DIR/choice.log"
+done
+printf 'CLI: eval-choice scores, cuts, skips and writes picks\n'
 for option in dim heads experts shared ffn ehidden topk batch accum log-every eval-batches nope-every; do
     value=-1
     if [[ "$option" == dim || "$option" == heads || "$option" == topk || "$option" == batch || "$option" == accum || "$option" == log-every || "$option" == eval-batches ]]; then value=0; fi
@@ -1098,6 +1124,14 @@ grep -q 'leak-miss.txt: 0 / 1' "$TEST_DIR/leak.log"
 grep -q 'leak-answer.txt: 0 / 1' "$TEST_DIR/leak.log"
 grep -q 'leak-escaped.txt: 1 / 1' "$TEST_DIR/leak.log"
 grep -q 'question 1: One two' "$TEST_DIR/leak.log"
+# --hits lists the questions found in any training file (eval-choice --skip).
+"$CXXGPT" leak-check --questions "$TEST_DIR/leak-questions.txt" \
+    --train "$TEST_DIR/leak-miss.txt,$TEST_DIR/leak-hit.txt" --hits "$TEST_DIR/leak.hits" > "$TEST_DIR/leak.log"
+[[ "$(cat "$TEST_DIR/leak.hits")" == 1 ]] && grep -q '1 / 1 questions in any training file' "$TEST_DIR/leak.log"
+# A token file is read as its text (a mix's *N repeat once).
+"$CXXGPT" text2tok --in "$TEST_DIR/leak-hit.txt" --out "$TEST_DIR/leak-hit.tok" > /dev/null
+"$CXXGPT" leak-check --questions "$TEST_DIR/leak-questions.txt" --train "$TEST_DIR/leak-hit.tok*8" > "$TEST_DIR/leak.log"
+grep -q 'leak-hit.tok: 1 / 1' "$TEST_DIR/leak.log"
 # The example is cut at 240 bytes without splitting a UTF-8 character: here
 # bytes 239-240 are one two-byte character, so the cut moves back to 239.
 printf 'One two three four five six seven eight nine ten eleven twelve 13 %s\xc3\xa9 end\n' \
@@ -1179,10 +1213,13 @@ MOCK_ARGS="$TEST_DIR/night.args" DATA="$TEST_DIR/night-data" RUN="$run" TOKS=100
 grep -q "validation by source: no $math/word-dev.tok, left out" "$TEST_DIR/night-mix.log"
 [[ $(awk '$0=="--val-sources" {getline; print}' "$TEST_DIR/night.args") == "gsm8k-test=$corpus/gsm8k-test.tok" ]]
 : > "$math/word-dev.tok"
-for s in textbooks-libretexts-0000 doab-doab-0000 arxiv-arxiv-papers-0000; do : > "$corpus/blocks/$s/val-0000.tok"; done
+for s in textbooks-libretexts-0000 doab-doab-0000 arxiv-arxiv-papers-0000 pubmed-licensed_pubmed-0000; do
+    mkdir -p "$corpus/blocks/$s"
+    : > "$corpus/blocks/$s/val-0000.tok"
+done
 MOCK_ARGS="$TEST_DIR/night.args" DATA="$TEST_DIR/night-data" RUN="$run" TOKS=100 DEV=1 \
     CX="$TEST_DIR/night-mock" bash scripts/night.sh > "$TEST_DIR/night-mix.log"
-[[ $(awk '$0=="--val-sources" {getline; print}' "$TEST_DIR/night.args") == "gsm8k-dev=$corpus/gsm8k-dev.tok,word-dev=$math/word-dev.tok,textbooks=$corpus/blocks/textbooks-libretexts-0000/val-0000.tok,doab=$corpus/blocks/doab-doab-0000/val-0000.tok,arxiv=$corpus/blocks/arxiv-arxiv-papers-0000/val-0000.tok" ]]
+[[ $(awk '$0=="--val-sources" {getline; print}' "$TEST_DIR/night.args") == "gsm8k-dev=$corpus/gsm8k-dev.tok,word-dev=$math/word-dev.tok,textbooks=$corpus/blocks/textbooks-libretexts-0000/val-0000.tok,doab=$corpus/blocks/doab-doab-0000/val-0000.tok,arxiv=$corpus/blocks/arxiv-arxiv-papers-0000/val-0000.tok,pubmed=$corpus/blocks/pubmed-licensed_pubmed-0000/val-0000.tok" ]]
 [[ $(awk '$0=="--val-log" {getline; print}' "$TEST_DIR/night.args") == "runs/$run.val.csv" ]]
 MOCK_ARGS="$TEST_DIR/night.args" DATA="$TEST_DIR/night-data" RUN="$run" TOKS=100 VAL_SOURCES= \
     CX="$TEST_DIR/night-mock" bash scripts/night.sh > "$TEST_DIR/night-mix.log"

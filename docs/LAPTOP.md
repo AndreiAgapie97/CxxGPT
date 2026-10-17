@@ -104,7 +104,8 @@ One validation number hides which part of the mix improves, so night.sh
 also scores held-out files one by one (`train --val-sources`, `VAL_SOURCES`
 in night.sh): at the start and with every validation, the GSM8K
 validation set, the word problems' dev split (`data/targeted-math/word-dev.tok`)
-and a val shard each of textbooks, DOAB books and arXiv papers. A file of
+and a val shard each of textbooks, DOAB books, arXiv papers and PubMed
+articles. A file of
 questions and answers gives two numbers: its answers' loss, and its final
 answers' (the tokens after `####`, what the exam scores). The log has one
 line each time (`val sources at step N`), and `runs/$RUN.val.csv` a row

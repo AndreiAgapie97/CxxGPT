@@ -40,8 +40,8 @@
 #        --val-sources: GSM8K's answers and final answers apart, each part of
 #        the mix on its own; runs/$RUN.val.csv, the dashboard's chart). By
 #        default the GSM8K validation file, the word problems' dev split and
-#        a val shard each of textbooks, DOAB and arXiv; a default file that
-#        is missing is left out. VAL_SOURCES= turns it off.
+#        a val shard each of textbooks, DOAB, arXiv and PubMed; a default
+#        file that is missing is left out. VAL_SOURCES= turns it off.
 # Validation defaults to the GSM8K test set, which training never sees: the loss
 # on its worked solutions every 500 steps, and exact answers every 500 too
 # (on the GPU an exam of 250 problems takes about 16 s).
@@ -94,7 +94,8 @@ if [ -z "${VAL_SOURCES+set}" ]; then
   VAL_SOURCES=""
   for source in "gsm8k-$validation=$CORPUS/gsm8k-$validation.tok" "word-dev=$MATH/word-dev.tok" \
     "textbooks=$CORPUS/blocks/textbooks-libretexts-0000/val-0000.tok" \
-    "doab=$CORPUS/blocks/doab-doab-0000/val-0000.tok" "arxiv=$CORPUS/blocks/arxiv-arxiv-papers-0000/val-0000.tok"; do
+    "doab=$CORPUS/blocks/doab-doab-0000/val-0000.tok" "arxiv=$CORPUS/blocks/arxiv-arxiv-papers-0000/val-0000.tok" \
+    "pubmed=$CORPUS/blocks/pubmed-licensed_pubmed-0000/val-0000.tok"; do
     if [ -f "${source#*=}" ]; then
       VAL_SOURCES+="${VAL_SOURCES:+,}$source"
     else

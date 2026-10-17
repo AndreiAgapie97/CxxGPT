@@ -158,3 +158,4 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: python3 scripts/get_data.py --check gsm8k
+      - run: python3 scripts/get_choice_data.py --check all
