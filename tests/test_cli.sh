@@ -433,6 +433,19 @@ assert [l["problem"] for l in lines[1:]] == list(range(int(sys.argv[2])))
 labels = {"correct", "unfinished", "format", "arithmetic", "passed_gold", "other"}
 assert all(l["label"] in labels for l in lines[1:])
 PY
+# With a calculator, the run with it is labelled too, in a file of its own.
+rm -f "$TEST_DIR/labels.jsonl"
+"$CXXGPT" eval-reasoning --ckpt "$TEST_DIR/audit.ckpt" --test "$TEST_DIR/audit.txt" --max-new 4 \
+    --threads 2 --tools calc-notes --labels "$TEST_DIR/labels.jsonl" > "$TEST_DIR/labels.log"
+[[ $(grep -c '^failure labels (first tries' "$TEST_DIR/labels.log") == 2 ]]
+grep -q "^labels: $TEST_DIR/labels.calc-notes.jsonl$" "$TEST_DIR/labels.log"
+python3 - "$TEST_DIR/labels.jsonl" "$TEST_DIR/labels.calc-notes.jsonl" "$problems" <<'PY'
+import json, sys
+for path, tool in [(sys.argv[1], "none"), (sys.argv[2], "calc-notes")]:
+    lines = [json.loads(l) for l in open(path, encoding="utf-8")]
+    assert lines[0]["tool"] == tool, (path, lines[0])
+    assert [l["problem"] for l in lines[1:]] == list(range(int(sys.argv[3])))
+PY
 printf 'CLI: failure labels passed\n'
 for command in sample eval-reasoning; do
     "$CXXGPT" "$command" --help > "$TEST_DIR/calc-help.log"

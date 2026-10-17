@@ -249,8 +249,12 @@ judge differently.
   each label can be audited. The flags count loops (a line written twice,
   or a run of 8 tokens repeated) and numbers from outside the question;
   they fire on right answers too, so the summary reports them for right
-  and wrong answers apart. Labels describe the run without the
-  calculator.
+  and wrong answers apart. `FILE.jsonl` describes the run without the
+  calculator. With `--tools calc-notes`, the run with it is labelled
+  too, in `FILE.calc-notes.jsonl` (the same problems, line for line, to
+  compare the two problem by problem); there the notes' results are the
+  calculator's, so its `arithmetic` labels come from the model's other
+  calculations.
 
 ### The model's own checked solutions (self-train)
 
