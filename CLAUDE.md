@@ -230,12 +230,24 @@ Math problem-solving accuracy is the first evaluation focus.
   `data/libretexts-problems/`, with each page's licence and address
   (second build: `data/libretexts-problems-2/`, 475, 93 new, with "Answer:"
   layouts, fractions in questions and nursing dosage problems; the
-  LibreTexts file holds about 1,000 such problems at most). Kept
-  out: GSM8K dev/test overlaps, copies, unclear pairings
+  LibreTexts file holds about 1,000 such problems at most; third build,
+  the one to use: `data/libretexts-problems-3/`, 469, none new, without
+  four wrong keys and two two-answer questions that OpenStax's 2e books
+  exposed, PR #80). Kept
+  out: GSM8K dev/test overlaps, copies, unclear pairings, `EXCLUDED`
+  (matched in any punctuation or case)
   (`tests/test_libretexts_problems.py`). 100 checked by hand; the books'
   own keys are wrong a few percent of the time. For self-train and
   evaluation, not the mix; not held out (LibreTexts is in training)
   (README, "Textbook word problems with answer keys").
+  `operations/build_openstax_problems.py` (2026-10-17): 233 more, none in
+  the LibreTexts sets, from OpenStax's own CNXML on GitHub (inline
+  `<solution>` answers) at the last commit of each `osbooks-*` repository
+  before it went CC BY-NC-SA (pinned and checked in the script; the owner
+  decided such a commit counts as CC BY), into `data/openstax-problems/`
+  (raw: `data/openstax-raw/`, `--fetch`). 50 checked by hand: 4 bad in the
+  first draw, all right after four rules; the cross-check found 4 wrong
+  keys in the LibreTexts sets (README). Same use as LibreTexts'.
 - `cxxgpt redraw-qa` (`src/redraw_qa.h`, 2026-10-17, docs/redraw-qa.md):
   GSM8K train's human questions with new numbers and exact answers. The
   gold notes become a formula over the question's numbers (self-train's

@@ -34,8 +34,10 @@ line after a lone "-" or on the "- 340 yd" line itself, where
     words), its copies all give the same answer, it shares no 13-word run
     with GSM8K dev or test (heldout.jsonl), and it does not have a GSM8K
     dev/test question's numbers and answer (build_targeted_math.py's rules);
-  - it is not one of the problems the hand audit found wrong in the book
-    (EXCLUDED), nor an angle answered in radians the question never asks for.
+  - it is not one of the problems found wrong or unclear in the book (EXCLUDED:
+    by the hand audits, and by the cross-check against OpenStax's own 2e
+    books, operations/build_openstax_problems.py), nor an angle answered in
+    radians the question never asks for.
 Each problem keeps its page's title, address, book and licence. The
 audit-sample.txt it writes holds the 100 problems with the smallest sha256
 of the question, for checking by hand (--audit-note puts the result in the
@@ -51,12 +53,14 @@ held-out test. Usage, from the repository root:
 
   python -I operations/build_libretexts_problems.py --pile data/libretexts-raw/00000_libretext.json.gz \\
       --heldout data/targeted-math/heldout.jsonl --cxxgpt build/cxxgpt.exe \\
-      --tok data/licensed-10b/tok.bpe --out data/libretexts-problems-2 \\
-      --previous data/libretexts-problems/problems.jsonl
+      --tok data/licensed-10b/tok.bpe --out data/libretexts-problems-3 \\
+      --previous data/libretexts-problems-2/problems.jsonl
 
 data/libretexts-problems (2026-10-17, 383 problems) was built before the
 "Answer:" layouts, the medicine pages, fractions and degrees in questions,
-"per" and a sentence's full stop after the answer ("The number is 4.").
+"per" and a sentence's full stop after the answer ("The number is 4.");
+data/libretexts-problems-2 (475) before the six exclusions the OpenStax 2e
+cross-check found (four wrong keys, two questions with two right answers).
 """
 import argparse
 import collections
@@ -257,7 +261,22 @@ EXCLUDED = {
     'Two airplanes take off in different directions. One travels 300 mph': 'the key says 599.8; it is 292.4',
     'Find the linear speed of the moon': 'the key 2234 is 2234.65 cut short, not rounded',
     'Someone lends you a tire jack': "the wrench's length is in the exercise before",
+    # (the 2026-10-17 cross-check against OpenStax's 2e books, where these keys differ)
+    'Tipping At the campus coffee cart, a medium coffee costs $1.65. MaryAnne': 'the key says 17.5; it is 21.2 (0.35/1.65)',
+    'The number of tickets for a music fundraiser varies inversely': 'the key says 97; it is 9 (12*6/8)',
+    'Researchers recorded that a certain bacteria population declined from 700,000 to 400,000':
+        'the key says 5870061; it is about 47,700 (700,000 * (4/7)^(24/5))',
+    'College roommates John and David were driving home': "11 hours of David's driving, or 12 from John's start "
+                                                          '(2e): two right answers',
+    'Felecia left her home to visit her daughter': "1.5 hours of her husband's driving, or 1.83 from her start "
+                                                   '(2e): two right answers',
 }
+
+
+def excluded(q):
+    """Whether the question starts as one in EXCLUDED does, in any punctuation or case: course copies
+    write "21-ounce" or "21 ounce"."""
+    return any(key(q).startswith(key(start)) for start in EXCLUDED)
 
 
 def radians(q, a):
@@ -311,8 +330,8 @@ def main():
             stats['answers not usable'] += dropped
             for q, a in pairs:
                 stats['found'] += 1
-                if any(q.startswith(start) for start in EXCLUDED):
-                    stats['dropped: wrong in the book (hand audit)'] += 1
+                if excluded(q):
+                    stats['dropped: wrong or unclear in the book (EXCLUDED)'] += 1
                     continue
                 if radians(q, a):
                     stats['dropped: an angle in radians nobody asked for'] += 1

@@ -969,6 +969,18 @@ a GSM8K dev or test question.
   "problem 78", two wrong book keys), fixed by two rules and excluded by
   name; all 50 right after. 0 of GSM8K test and dev share a 13-word run
   with it (`cxxgpt leak-check`).
+- **Third build (2026-10-17), `data/libretexts-problems-3/`: 469
+  problems, none new.** OpenStax's own 2e books
+  (`operations/build_openstax_problems.py`, PR #80) give a second answer
+  key for the problems both editions have. Where the keys differ, four
+  LibreTexts keys are wrong: a coffee tip ($0.35 on $1.65: 17.5% for
+  21.2%), tickets varying inversely with price (97 for 9), a bacteria
+  decay (5,870,061 for about 47,700) and Rachael's shake (1161 for 1126;
+  the first build's exclusion was written "21-ounce", the copy kept says
+  "21 ounce", so exclusions now ignore punctuation and case). Two more
+  have two right answers, depending on whose clock (David's 11 hours of
+  driving or 12 from John's start; 1.5 or 1.83 hours): dropped as
+  unclear. These six are the only change from the second build.
 - **Why not thousands.** A survey of the whole LibreTexts file (18,099
   math, statistics and medicine pages): about 44,000 answer keys, of which
   some 1,000 belong to a one-paragraph word problem with a one-number
@@ -980,6 +992,60 @@ a GSM8K dev or test question.
   and `data/licensed-10b` holds no raw text (token files only; DOAB's math
   titles are research books). Thousands more would need another source;
   that is the owner's call on licences.
+- **OpenStax's own sources (2026-10-17), `data/openstax-problems/`: 233
+  problems, none in the LibreTexts sets.** OpenStax keeps its books on
+  GitHub (`github.com/openstax/osbooks-*`) as CNXML, and there many
+  exercises carry their answer inline ("There were 308 students.").
+  `operations/build_openstax_problems.py` reads seven repositories
+  (Prealgebra 2e, Elementary and Intermediate Algebra 2e, College Algebra
+  2e, Algebra and Trigonometry 2e, Precalculus 2e, Contemporary Mathematics,
+  Introductory and Introductory Business Statistics 2e, Statistics,
+  Principles of Finance, Algebra 1), each at the last commit before its
+  LICENSE file became CC BY-NC-SA (pinned in the script, which checks that
+  LICENSE and every book's `md:license` say CC BY 4.0 there). The owner
+  decided on 2026-10-17 that such a commit counts as CC BY for this
+  project; never read a later one. `--fetch` downloads only the CNXML and
+  the book lists (one commit deep, no images, about 90 MB) into
+  `data/openstax-raw/`. Each problem keeps its repository, commit, module,
+  books and licence, and a link to the file at that commit.
+  - The same rules as the LibreTexts builder, plus: the problem and its
+    answer are one paragraph each, holding only text and plain numbers in
+    math (a variable, a power, a list, a figure or a link drops it); the
+    instructions before a group of exercises point at no table,
+    distribution or other exercise; the answer is no bound ("More than
+    $42,857.14"); a rounding instruction of the group is added to the
+    question; compound interest, growth, probability or trigonometry with
+    a decimal answer needs a stated rounding (11.6 years for 11.58...);
+    circles and cones need the question to say 3.14 or pi (Prealgebra
+    keys them with 3.14). `tests/test_openstax_problems.py` checks each
+    rule.
+  - Of 52,250 exercises, 32,258 have an answer; 710 pass. 291 of those
+    are already in the LibreTexts sets (LibreTexts holds the first
+    editions; same numbers and most words, whatever the key) and are
+    dropped, 166 are copies within OpenStax (one of them disagreeing on
+    the answer), and 20 fail the exclusions, the radians check or the
+    GSM8K dev/test filters: 233 are left, 217 of them from the Prealgebra
+    bundle. Algebra 1's quiz layout ("Correct! ... The
+    correct answer is 160") is not read (about 20 more, mostly copies of
+    Elementary Algebra's); Contemporary Mathematics and Principles of
+    Finance key only their worked examples.
+  - Audit: 50 problems worked out by hand. The first draw had 4 bad (8%:
+    a cone keyed with 3.14 unsaid, a probability needing the instructions'
+    distribution, two "average rate of return for the values that follow",
+    one of whose series keys is wrong) and 3 rounded without saying (11.6,
+    0.03, 0.648); four rules and one exclusion followed. After them all 50
+    keys are right, with 3 caveats: 21.57 rounded without saying, 91 in
+    centimeters the question does not name, 1921 for a growth taken as
+    exponential. 0 of GSM8K test and dev share a 13-word run.
+  - The 291 copies in LibreTexts cross-check both: 8 have another key.
+    Four LibreTexts keys are wrong (MaryAnne's tip 17.5 for 21.2,
+    Madelyn's tickets 97 for 9, the bacteria decay 5870061 for about
+    47,700, and the "21 ounce" Rachael shake 1161 for 1126, a wording
+    EXCLUDED misses), two ask whose travel time (11 or 12 hours, 1.5 or
+    1.83), one is another question (median, not mean), and one OpenStax 2e
+    key is wrong (Christa's fence, 240 feet for 24).
+  - Use: as the LibreTexts sets, for evaluation and self-train only, and
+    not a held-out test (the first editions are in the training data).
 
 **GSM8K train with new numbers (2026-10-17, `cxxgpt redraw-qa`).** GSM8K
 train's human questions, each with its numbers swapped for new ones and an
