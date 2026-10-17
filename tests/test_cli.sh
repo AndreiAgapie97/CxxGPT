@@ -551,6 +551,18 @@ require_absent -q '<<' "$TEST_DIR/plain-math.text"
 awk -F '\t' 'NF != 5 || $1 != "equations" {exit 1} END {if (NR != 4) exit 1}' "$TEST_DIR/plain-math.txt"
 "$CXXGPT" gen-math --out "$TEST_DIR/empty-math" --count 0 > /dev/null
 [[ ! -s "$TEST_DIR/empty-math.txt" && ! -s "$TEST_DIR/empty-math.text" ]]
+# --skip-kinds: number theory only, and only its kinds' names.
+"$CXXGPT" gen-math --topic number-theory --out "$TEST_DIR/math-skip" --count 40 --skip-kinds factors,digits > /dev/null
+if grep -q 'such a product\|can be written as\|products that work\|digits' "$TEST_DIR/math-skip.txt"; then
+    printf 'gen-math --skip-kinds wrote a skipped kind\n' >&2
+    exit 1
+fi
+for options in '--skip-kinds factors' '--topic number-theory --skip-kinds primes'; do
+    status=0
+    "$CXXGPT" gen-math --out "$TEST_DIR/invalid-math" $options > "$TEST_DIR/invalid-math.log" 2>&1 || status=$?
+    [[ "$status" == 1 && ! -e "$TEST_DIR/invalid-math.txt" ]]
+    grep -q 'check failed' "$TEST_DIR/invalid-math.log"
+done
 for pair in 'topic algebra' 'count -1' 'seed -1' 'split dev' 'notes maybe' 'distractors maybe'; do
     read -r option value <<< "$pair"
     status=0

@@ -626,6 +626,8 @@ int cmd_gen_word(Args& a) {
     const std::string distractors = a.str("distractors", "on"), notes = a.str("notes", "on");
     // How to make each problem again, for self-train's re-draw check (redraw.h).
     const std::string recipes_path = a.str("recipes", "");
+    // Number-theory kinds never to draw, by name ("factors,digits").
+    const std::string skip_kinds = a.str("skip-kinds", "");
     a.done();
     CHECK(!out.empty(), "--out must be a nonempty prefix");
     CHECK(count >= 0 && seed >= 0, "--count and --seed must be nonnegative");
@@ -658,6 +660,8 @@ int cmd_gen_math(Args& a) {
     const std::string exclude = a.str("exclude", "");
     // How to make each problem again, for self-train's re-draw check (redraw.h).
     const std::string recipes_path = a.str("recipes", "");
+    // Number-theory kinds never to draw, by name ("factors,digits").
+    const std::string skip_kinds = a.str("skip-kinds", "");
     a.done();
     CHECK(topic == "equations" || topic == "fractions" || topic == "number-theory",
           "--topic must be equations, fractions or number-theory");
@@ -668,7 +672,16 @@ int cmd_gen_math(Args& a) {
     CHECK(notes == "on" || notes == "off", "--notes must be on or off");
     std::unique_ptr<Exclusions> exclusions;
     if (!exclude.empty()) exclusions = std::make_unique<Exclusions>(exclude);
-    const MathOptions options{distractors == "on", notes == "on", split == "test", exclusions.get()};
+    uint32_t skip = 0;
+    std::istringstream kinds(skip_kinds);
+    for (std::string name; std::getline(kinds, name, ',');) {
+        if (name.empty()) continue;
+        CHECK(topic == "number-theory", "--skip-kinds is for --topic number-theory");
+        const auto at = std::find(number_theory_kinds.begin(), number_theory_kinds.end(), name);
+        CHECK(at != number_theory_kinds.end(), "--skip-kinds: no number-theory kind %s", name.c_str());
+        skip |= 1u << (at - number_theory_kinds.begin());
+    }
+    const MathOptions options{distractors == "on", notes == "on", split == "test", exclusions.get(), skip};
     std::vector<Recipe> recipes;
     const auto problems =
         topic == "equations"   ? make_equation_problems(uint64_t(seed), count, options, &recipes)

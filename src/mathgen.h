@@ -149,6 +149,7 @@ public:
 struct MathOptions {
     bool distractors = true, notes = true, test = false;
     Exclusions* exclude = nullptr;  // questions not to repeat, or none
+    uint32_t skip_kinds = 0;        // number theory: kinds never drawn, one bit per kind (gen-math --skip-kinds)
 };
 
 // What every topic's problem records: the text, and the story's own numbers,

@@ -125,8 +125,8 @@ inline void test_redraw_versions() {
         // that passes. Fractions: a long run of halves can have more
         // combinations than are followed (counted ambiguous). Number
         // theory: most solutions write a number the calculations do not
-        // make (the 28 of "7*28 = 196 and 7*29 = 203 is more than 200",
-        // a common multiple found by counting up, the first even locker),
+        // make (the 20 and the 8 of a long division, "7*20 = 140 ... 7*8 =
+        // 56", a common multiple found by counting up, the first even locker),
         // which the formula keeps as a constant, so other numbers give
         // another answer; only the plain sums pass (README, gen-math
         // number theory).

@@ -30,11 +30,15 @@
 //              days off
 //
 // The calculator knows only + - * / and parentheses, so a whole-number
-// quotient is written as two products around the number: "7*28 =
-// <<7*28=196>>196 and 7*29 = <<7*29=203>>203 is more than 200, so 28
-// tickets win." A least common multiple is found by counting up by the
-// larger number, a greatest common divisor from the smaller number's
-// factors, as a pupil would.
+// quotient is found as in long division (owner's decision, 2026-10-17):
+// the biggest hundreds, tens and ones of the divisor that fit are taken
+// away in turn, every step a plain GSM8K note, until less than the divisor
+// is left: "7*20 = <<7*20=140>>140, and taking that away leaves 200-140 =
+// <<200-140=60>>60. 7*8 = <<7*8=56>>56, which leaves 60-56 = <<60-56=4>>4.
+// 4 is less than 7, so 7 goes into 200 20+8 = <<20+8=28>>28 times." A
+// least common multiple is found by counting up by the larger number, a
+// greatest common divisor from the smaller number's factors, as a pupil
+// would.
 //
 // Against a templated look, the questions and solution lines have three
 // wordings each (one held out for the test split), and each setting has
@@ -46,6 +50,10 @@
 struct NumberTheoryProblem : MathRecord {
     enum Kind { remainder, lcm, gcd, factors, multiples, digits, pattern, kind_count } kind = remainder;
 };
+
+// The kinds' names, for gen-math --skip-kinds.
+inline constexpr std::array<const char*, NumberTheoryProblem::kind_count> number_theory_kinds = {
+    "remainder", "lcm", "gcd", "factors", "multiples", "digits", "pattern"};
 
 namespace number_detail {
 
@@ -286,7 +294,7 @@ inline Setting setting_of(NumberTheoryProblem::Kind kind, int context) {
 }
 
 // Questions (q_) and solution lines (s_), three wordings each with the
-// same meaning and the same calculator notes ({p1}, {p2}, {fits}): 0-1
+// same meaning and the same calculator notes ({p1}, {p2}): 0-1
 // train, 2 test, as different people would write them. Like the story
 // sentences, none says "it" or "they" for something a sentence before
 // named. A line that states the answer never starts with it (math_check
@@ -294,7 +302,7 @@ inline Setting setting_of(NumberTheoryProblem::Kind kind, int context) {
 enum Phrase { q_pack_full, q_pack_left, q_pack_need, q_pack_more, q_seat_full, q_seat_left, q_seat_need, q_seat_empty,
               q_bus_when, q_light_when, q_visit_when, q_bus_times, q_light_times, q_visit_times, q_packs, q_packs_count,
               q_bags, q_bag_each, q_piece_length, q_pieces, q_rows, q_teams, q_tickets, q_every, q_both, q_range,
-              q_lockers, q_digits, q_pages, q_number, q_beads, q_days, s_fits, s_count_up, s_first_both, s_factors,
+              q_lockers, q_digits, q_pages, q_number, q_beads, q_days, s_divide_intro, s_divide_step, s_divide_end, s_count_up, s_first_both, s_factors,
               s_largest, s_full_pack, s_full_seat, s_left_over, s_need_left, s_need_pack, s_need_seat, s_more_left,
               s_more_pack, s_more_seat, s_cycle_intro, s_cycle_when, s_cycle_every, s_cycle_span, s_cycle_times,
               s_packs_intro, s_packs_buy, s_packs_end, s_kits_intro, s_ribbon_intro, s_bags, s_bag_each, s_piece,
@@ -402,10 +410,16 @@ inline constexpr std::array<std::array<const char*, 3>, phrase_count> phrases = 
     {{"How many of the first {n} days are {asked}?",
       "Of the first {n} days, how many are {asked}?",
       "How many {asked} are there in the first {n} days?"}},
-    // s_fits: the two products around n (fits()).
-    {{"{p1} and {p2} is more than {n}",
-      "{p1}, while {p2} is already more than {n}",
-      "{p1}, but {p2} would be more than {n}"}},
+    // Long division (divide()).
+    {{"Now find how many times {k} goes into {n}.",
+      "Next, see how many {k}s fit into {n}.",
+      "To divide {n} by {k}, take away {k}s in big groups first."}},
+    {{"{p1}, and taking that away leaves {p2}.",
+      "{p1}, which leaves {p2}.",
+      "Taking away {p1} leaves {p2}."}},
+    {{"{r} is less than {k}, so {k} goes into {n} {sum} times.",
+      "Since {r} is less than {k}, {k} fits into {n} {sum} times.",
+      "Only {r} is left, less than {k}, so {n} holds {sum} groups of {k}."}},
     {{"Counting up by {big}: {list}.",
       "The multiples of {big} are {list}.",
       "Listing the multiples of {big}: {list}."}},
@@ -419,27 +433,27 @@ inline constexpr std::array<std::array<const char*, 3>, phrase_count> phrases = 
       "Of these, the largest that also divides {big} is {g}: {p1} and {p2}.",
       "The biggest one that goes into {big} as well is {g}: {p1} and {p2}."}},
     // Remainders.
-    {{"{fits}, so {name} can fill {q} {holders} completely.",
-      "{fits}, so {q} {holders} get filled all the way.",
-      "{fits}: {name} fills {q} {holders}."}},
-    {{"{fits}, so {q} {holders} can be filled completely.",
-      "{fits}, so {q} {holders} are full.",
-      "{fits}: {q} {holders} fill up."}},
-    {{"So {p1} {things} are left over.",
-      "That leaves {p1} {things}.",
-      "So {p1} {things} remain."}},
-    {{"That leaves {p1} {things}, which need one more {holder}.",
-      "There are {p1} {things} still to go, and they need one more {holder}.",
-      "The other {p1} {things} need one more {holder}."}},
+    {{"So {name} can fill {q} {holders} completely.",
+      "That means {q} {holders} get filled all the way.",
+      "So {name} fills {q} {holders}."}},
+    {{"So {q} {holders} can be filled completely.",
+      "That means {q} {holders} are full.",
+      "So {q} {holders} fill up."}},
+    {{"So {r} {things} are left over.",
+      "That leaves {r} {things}.",
+      "So {r} {things} remain."}},
+    {{"The {r} {things} left over need one more {holder}.",
+      "There are {r} {things} still to go, and they need one more {holder}.",
+      "The other {r} {things} need one more {holder}."}},
     {{"So {name} needs {p1} {holders}.",
       "In all {name} needs {p1} {holders}.",
       "That makes {p1} {holders} for {name}."}},
     {{"So {p1} {holders} are needed.",
       "In all, {p1} {holders} are needed.",
       "That makes {p1} {holders} in all."}},
-    {{"That leaves {p1} {things} for the next {holder}.",
-      "The next {holder} gets the other {p1} {things}.",
-      "Then {p1} {things} go into the next {holder}."}},
+    {{"The next {holder} gets the {r} {things} left over.",
+      "That puts {r} {things} in the next {holder}.",
+      "Then {r} {things} go into the next {holder}."}},
     {{"So {name} would need {p1} more {things}.",
       "To fill the next {holder}, {name} needs {p1} more {things}.",
       "So {name} is short {p1} {things} for one more full {holder}."}},
@@ -459,9 +473,9 @@ inline constexpr std::array<std::array<const char*, 3>, phrase_count> phrases = 
     {{"The next {span} {long_unit} are {p1} {unit}.",
       "In {unit}, the next {span} {long_unit} are {p1}.",
       "That span of {span} {long_unit} is {p1} {unit}."}},
-    {{"{fits}, so {both} {meet} {count} times.",
-      "{fits}: that is {count} times.",
-      "{fits}, so it happens {count} times."}},
+    {{"So {both} {meet} {count} times.",
+      "That is {count} times.",
+      "So it happens {count} times."}},
     {{"The number of {first} is a multiple of {a} and the number of {second} a multiple of {b}, so the smallest equal number is the first multiple of both.",
       "Whole packs give a multiple of {a} {first} and a multiple of {b} {second}, so the equal number must be a multiple of both {a} and {b}.",
       "Buying whole packs, the {first} come {a} at a time and the {second} {b} at a time, so the smallest equal number is the first one both {a} and {b} divide."}},
@@ -510,30 +524,30 @@ inline constexpr std::array<std::array<const char*, 3>, phrase_count> phrases = 
     {{"The winning numbers are the multiples of {k} up to {n}.",
       "A ticket wins if its number is a multiple of {k}, so count the multiples up to {n}.",
       "Only multiples of {k} win, from {k} up to at most {n}."}},
-    {{"{fits}, so {q} tickets win.",
-      "{fits}: {q} tickets win.",
-      "{fits}, so {q} of the tickets are winners."}},
+    {{"So {q} tickets win.",
+      "That means {q} tickets win.",
+      "So {q} of the tickets are winners."}},
     {{"The people who get a {gift} are those whose place in line is a multiple of {k}, up to {n}.",
       "A {gift} goes to the people at places {k}, {k2}, {k3} and so on, up to {n}.",
       "Every place in line that is a multiple of {k} gets a {gift}, up to {n}."}},
-    {{"{fits}, so {q} people get a {gift}.",
-      "{fits}: {q} {gift}s are given out.",
-      "{fits}, so {q} people receive a {gift}."}},
+    {{"So {q} people get a {gift}.",
+      "That is {q} {gift}s given out.",
+      "So {q} people receive a {gift}."}},
     {{"A person gets both when their place in the count is a multiple of both {a} and {b}.",
       "Only people whose place is a multiple of {a} and of {b} get both.",
       "To get both, a person's place must be a multiple of {a} and also of {b}."}},
     {{"So every {lcmth} person gets both.",
       "That means every {lcmth} person gets both.",
       "So both go to every {lcmth} person."}},
-    {{"{fits}, so {q} people get both.",
-      "{fits}: {q} people get both.",
-      "{fits}, so {q} people end up with both."}},
-    {{"The first multiple of {k} from {a} on is {p1}, since {p2} is less than {a}.",
-      "Since {p2} is less than {a}, the first multiple of {k} from {a} on is {p1}.",
-      "Starting at {a}, the first multiple of {k} is {p1}, because {p2} is too small."}},
-    {{"The last one up to {b} is {p1}, since {p2} is more than {b}.",
-      "Since {p2} is more than {b}, the last one up to {b} is {p1}.",
-      "The last multiple of {k} up to {b} is {p1}, because {p2} is too big."}},
+    {{"So {q} people get both.",
+      "That means {q} people get both.",
+      "So {q} people end up with both."}},
+    {{"The next whole number is {p0}, so the first multiple of {k} from {a} on is {p1}.",
+      "Adding one, {p0}, so the first multiple of {k} from {a} on is {p1}.",
+      "One more than that is {p0}, and the first multiple of {k} from {a} on is {p1}."}},
+    {{"So the last one up to {b} is {p1}.",
+      "The last one up to {b} is then {p1}.",
+      "So the last multiple of {k} up to {b} is {p1}."}},
     {{"So the multiples are {k} times {i} up to {k} times {j}: {p1} numbers.",
       "That is {k} times each number from {i} to {j}: {p1} numbers.",
       "So they run from {k} times {i} to {k} times {j}, which is {p1} numbers."}},
@@ -585,9 +599,9 @@ inline constexpr std::array<std::array<const char*, 3>, phrase_count> phrases = 
     {{"One round of the pattern is {p1} {unit}.",
       "Each round of the pattern has {p1} {unit}.",
       "The pattern repeats every {p1} {unit}."}},
-    {{"{fits}, so there are {rounds} full rounds and {p1} {unit} more.",
-      "{fits}: that is {rounds} full rounds, with {p1} {unit} left.",
-      "{fits}, so {rounds} full rounds fit, plus {p1} {unit}."}},
+    {{"So there are {rounds} full rounds and {extra} {unit} more.",
+      "That is {rounds} full rounds, with {extra} {unit} left.",
+      "So {rounds} full rounds fit, plus {extra} {unit}."}},
     {{"The full rounds have {p1} {asked}.",
       "In the full rounds there are {p1} {asked}.",
       "The {rounds} full rounds give {p1} {asked}."}},
@@ -600,8 +614,8 @@ inline constexpr std::array<std::array<const char*, 3>, phrase_count> phrases = 
     {{"The {extra} {unit} more start the pattern again, so none of them are {second}.",
       "The last {extra} {unit} start a new round and are all {first}.",
       "A new round starts with the last {extra} {unit}, which are all {first}."}},
-    {{"The {extra} {unit} more start the pattern again: the first {r} are {first} and {p1} are {second}, so {p2}.",
-      "The last {extra} {unit} start a new round: after {r} {first}, {p1} are {second}, so {p2}.",
+    {{"The {extra} {unit} more start the pattern again: the first {r} are {first}, and the rest are {second}: {p1}, so {p2}.",
+      "The last {extra} {unit} start a new round, {r} {first} first and then {second}: {p1}, so {p2}.",
       "A new round starts with the last {extra} {unit}; after {r} {first}, the rest are {second}: {p1}, so {p2}."}},
     {{"So there are {total} {asked}.",
       "That is {total} {asked} in all.",
@@ -631,13 +645,38 @@ inline std::string listing(const std::vector<std::string>& values) {
     return out;
 }
 
-// How many whole times k goes into n, written as two products around n:
-// "7*28 = <<7*28=196>>196 and 7*29 = <<7*29=203>>203 is more than 200".
-// The caller has made sure n is not a multiple of k.
-inline std::string fits(Story& s, int64_t k, int64_t n) {
-    const int64_t q = n / k;
-    const std::string below = s.calc(str(k) + "*" + str(q), k * q), above = s.calc(str(k) + "*" + str(q + 1), k * (q + 1));
-    return say(s, s_fits, {{"{p1}", below}, {"{p2}", above}, {"{n}", str(n)}});
+// How many whole times k goes into n, found as in long division (owner's
+// decision, 2026-10-17): the biggest hundreds, tens and ones of k that fit
+// are taken away in turn until less than k is left, every step a plain
+// GSM8K note (calc.h has no whole division):
+//   "Now find how many times 7 goes into 200.
+//    7*20 = <<7*20=140>>140, and taking that away leaves 200-140 = <<200-140=60>>60.
+//    7*8 = <<7*8=56>>56, which leaves 60-56 = <<60-56=4>>4.
+//    4 is less than 7, so 7 goes into 200 20+8 = <<20+8=28>>28 times."
+// "Less than k is left" is the check that the quotient is the largest.
+// The caller has made sure n is not a multiple of k (so something is
+// left) and that the quotient is under 1000.
+inline void divide(Story& s, int64_t k, int64_t n) {
+    CHECK(n % k != 0 && n / k < 1000, "divide() is for %lld / %lld", (long long)n, (long long)k);
+    const Fills sizes = {{"{k}", str(k)}, {"{n}", str(n)}};
+    s.line(say(s, s_divide_intro, sizes));
+    int64_t left = n;
+    std::vector<int64_t> parts;
+    for (const int64_t place : {100, 10, 1}) {
+        const int64_t part = left / (k * place) * place;
+        if (part == 0) continue;
+        const std::string taken = s.calc(str(k) + "*" + str(part), k * part);
+        const std::string rest = s.calc(str(left) + "-" + str(k * part), left - k * part);
+        s.line(say(s, s_divide_step, {{"{p1}", taken}, {"{p2}", rest}}));
+        left -= k * part;
+        parts.push_back(part);
+    }
+    std::string sum = str(parts[0]);
+    for (size_t i = 1; i < parts.size(); ++i) sum += "+" + str(parts[i]);
+    if (parts.size() > 1) sum = s.calc(sum, n / k);
+    Fills ending = sizes;
+    ending.insert(ending.end(), {{"{r}", str(left)}, {"{sum}", sum}});
+    s.line(say(s, s_divide_end, ending));
 }
 
 // The most numbers a solution lists: counting up to a common multiple, and
@@ -701,23 +740,23 @@ inline bool remainder_story(Story& s, std::string& answer, Place& place, Fills& 
         more.insert(more.end(), words.begin(), words.end());
         return more;
     };
-    s.line(say(s, context == 0 ? s_full_pack : s_full_seat, with({{"{fits}", fits(s, k, n)}, {"{q}", str(q)}})));
+    divide(s, k, n);
+    s.line(say(s, context == 0 ? s_full_pack : s_full_seat, with({{"{q}", str(q)}})));
     place = Place::anywhere;
     if (s.out.asked == 0) {
         answer = str(q);
         return true;
     }
-    const std::string left = s.calc(str(n) + "-" + str(k * q), r);
     if (s.out.asked == 1) {
-        s.line(say(s, s_left_over, with({{"{p1}", left}})));
+        s.line(say(s, s_left_over, with({{"{r}", str(r)}})));
         answer = str(r);
     } else if (s.out.asked == 2) {
-        s.line(say(s, s_need_left, with({{"{p1}", left}})));
+        s.line(say(s, s_need_left, with({{"{r}", str(r)}})));
         const std::string needed = s.calc(str(q) + "+1", q + 1);
         s.line(say(s, context == 0 ? s_need_pack : s_need_seat, with({{"{p1}", needed}})));
         answer = str(q + 1);
     } else {
-        s.line(say(s, s_more_left, with({{"{p1}", left}})));
+        s.line(say(s, s_more_left, with({{"{r}", str(r)}})));
         const std::string more = s.calc(str(k) + "-" + str(r), k - r);
         s.line(say(s, context == 0 ? s_more_pack : s_more_seat, with({{"{p1}", more}})));
         answer = str(k - r);
@@ -789,8 +828,8 @@ inline bool lcm_story(Story& s, std::string& answer, Place& place, Fills& words)
             spanned.push_back({"{p1}", s.calc(str(span) + "*60", whole)});
             s.line(say(s, s_cycle_span, spanned));
         }
+        divide(s, both, whole);
         Fills counted = meeting;
-        counted.insert(counted.begin(), {"{fits}", fits(s, both, whole)});
         counted.push_back({"{count}", str(whole / both)});
         s.line(say(s, s_cycle_times, counted));
         answer = str(whole / both);
@@ -923,7 +962,7 @@ inline bool multiples_story(Story& s, std::string& answer, Place& place, Fills& 
                        {"{gift}", gift}, {"{q}", str(q)}};
         s.question = say(s, context == 0 ? q_tickets : q_every, sizes);
         s.line(say(s, context == 0 ? s_tickets_intro : s_every_intro, sizes));
-        sizes.insert(sizes.begin(), {"{fits}", fits(s, k, n)});
+        divide(s, k, n);
         s.line(say(s, context == 0 ? s_tickets : s_every, sizes));
         answer = str(q);
         return true;
@@ -940,28 +979,31 @@ inline bool multiples_story(Story& s, std::string& answer, Place& place, Fills& 
         s.line(say(s, s_both_intro, sizes));
         common_multiple(s, a, b);
         s.line(say(s, s_both_every, sizes));
-        sizes.insert(sizes.begin(), {"{fits}", fits(s, both, n)});
+        divide(s, both, n);
         s.line(say(s, s_both, sizes));
         answer = str(n / both);
         return true;
     }
     if (context == 3) {
         const int64_t k = s.draw(3, 15), a = s.draw(10, 200), b = a + s.draw(30, 300);
-        // a and b are not multiples, so the first and last are found the same way.
-        if (a <= k || a % k == 0 || b % k == 0) return false;
+        // a and b are not multiples, so the first and last are found the same
+        // way, and k goes into a at least twice ("1 times" reads badly).
+        if (a / k < 2 || a % k == 0 || b % k == 0) return false;
         const int64_t i = a / k + 1, j = b / k, count = j - i + 1;
         if (count < 2) return false;
         s.out.inputs = {a, b, k};
         s.sentence(mult_range, {{"{a}", str(a)}, {"{b}", str(b)}, {"{k}", str(k)}});
         const Fills sizes = {{"{a}", str(a)}, {"{b}", str(b)}, {"{k}", str(k)}, {"{i}", str(i)}, {"{j}", str(j)}};
         s.question = say(s, q_range, sizes);
-        const std::string first = s.calc(str(k) + "*" + str(i), k * i), before = s.calc(str(k) + "*" + str(i - 1), k * (i - 1));
+        // The quotient for a, one more, times k; the quotient for b, times k.
+        divide(s, k, a);
+        const std::string next = s.calc(str(i - 1) + "+1", i), first = s.calc(str(k) + "*" + str(i), k * i);
         Fills starts = sizes;
-        starts.insert(starts.end(), {{"{p1}", first}, {"{p2}", before}});
+        starts.insert(starts.end(), {{"{p0}", next}, {"{p1}", first}});
         s.line(say(s, s_range_first, starts));
-        const std::string last = s.calc(str(k) + "*" + str(j), k * j), after = s.calc(str(k) + "*" + str(j + 1), k * (j + 1));
+        divide(s, k, b);
         Fills ends = sizes;
-        ends.insert(ends.end(), {{"{p1}", last}, {"{p2}", after}});
+        ends.push_back({"{p1}", s.calc(str(k) + "*" + str(j), k * j)});
         s.line(say(s, s_range_last, ends));
         Fills counted = sizes;
         counted.push_back({"{p1}", s.calc(str(j) + "-" + str(i) + "+1", count)});
@@ -1090,8 +1132,8 @@ inline bool pattern_story(Story& s, std::string& answer, Place& place, Fills&) {
     };
     s.question = say(s, context == 0 ? q_beads : q_days, sizes);
     s.line(say(s, s_round, with({{"{p1}", s.calc(str(r) + "+" + str(b), cycle)}})));
-    const std::string whole = fits(s, cycle, n), left = s.calc(str(n) + "-" + str(cycle * rounds), extra);
-    s.line(say(s, s_rounds, with({{"{fits}", whole}, {"{p1}", left}})));
+    divide(s, cycle, n);
+    s.line(say(s, s_rounds, sizes));
     s.line(say(s, s_round_own, with({{"{p1}", s.calc(str(rounds) + "*" + str(own), rounds * own)}})));
     int64_t total = rounds * own;
     if (s.out.asked == 0) {
@@ -1299,12 +1341,19 @@ inline std::string problems_with(const NumberTheoryProblem& p) {
 // patterns, 2,000 digit stories and only about 300 factor stories.
 inline constexpr std::array<int, NumberTheoryProblem::kind_count> number_theory_weights = {8, 6, 4, 1, 8, 2, 4};
 
-// One problem; every one is checked by number_theory_check before it is returned.
+// One problem; every one is checked by number_theory_check before it is
+// returned. A kind in options.skip_kinds is never drawn; without any, the
+// draws are as they always were.
 inline NumberTheoryProblem make_number_theory_problem(Rng& rng, const MathOptions& options = {}) {
+    std::array<int, NumberTheoryProblem::kind_count> weights = number_theory_weights;
     int total = 0;
-    for (int w : number_theory_weights) total += w;
+    for (size_t i = 0; i < weights.size(); ++i) {
+        if (options.skip_kinds >> i & 1) weights[i] = 0;
+        total += weights[i];
+    }
+    CHECK(total > 0, "every number-theory kind is skipped");
     int pick = int(rng.below(uint64_t(total))), k = 0;
-    while (pick >= number_theory_weights[size_t(k)]) pick -= number_theory_weights[size_t(k++)];
+    while (pick >= weights[size_t(k)]) pick -= weights[size_t(k++)];
     const auto kind = NumberTheoryProblem::Kind(k);
     for (int attempt = 0; attempt < 10000; ++attempt) {
         NumberTheoryProblem result;

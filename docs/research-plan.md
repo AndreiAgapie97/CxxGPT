@@ -266,6 +266,21 @@ whether the next is worth building:
    help?" without live machinery. A live mix (new weights between batches
    without a restart) only if that test wins.
 
+**The next nights (owner's decision, 2026-10-17).**
+1. Night 3 tests one change: GSM8K train's own questions with new numbers
+   and exact answers (`cxxgpt redraw-qa`, PR #86) in the mix, measured
+   against night 2 on the dev set.
+2. After that, `gen-math --topic number-theory` (PR #87) at a small share,
+   about 1-2% of the mix, taken from gen-word's share at the same total
+   tokens (`operations/build_gen_math.py --topics number-theory --notes
+   on`; its factor-counting kind is left out, about 300 stories), tested
+   first on a copy of the checkpoint against the dev set before any night.
+3. Self-train on number theory waits until the re-draw check can follow
+   its solutions (today 8 and 7 of 80 gold solutions pass, on the train
+   and test wordings): a quotient's parts, a common multiple found by
+   counting up and the first even locker are numbers its formulas keep as
+   constants.
+
 **Rules for any controller.**
 - It decides on its own problems, generated fresh, never on the dev or test
   sets: a controller tuned on the dev set makes the dev score meaningless.

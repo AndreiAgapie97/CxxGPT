@@ -41,6 +41,10 @@ inline void check_problem(const NumberTheoryProblem& p, bool notes) {
     EXPECT(!q.answer.empty() && q.answer.find_first_not_of("0123456789") == std::string::npos && q.answer[0] != '0',
            "answer is not a positive whole number: %s", q.answer.c_str());
     check_inputs_written(p);
+    // "1 are" reads as badly as "1 boxes" (a result of 1, "3-2 = 1 are").
+    const std::string text = q.question + " " + q.steps;
+    for (size_t at = text.find("1 are "); at != std::string::npos; at = text.find("1 are ", at + 1))
+        EXPECT(at > 0 && text[at - 1] >= '0' && text[at - 1] <= '9', "\"1 are\" in: %s", text.c_str());
     // A person the question names is in the story before it.
     const size_t asked_at = q.question.rfind(". ");
     const std::string story = q.question.substr(0, asked_at), asked = q.question.substr(asked_at);
@@ -188,7 +192,7 @@ inline void test_mathgen_number_theory() {
         }
     }
     // Most story numbers moved by one change the answer; in a few problems
-    // (6 of 800 with this seed) no such change does.
+    // (9 of 800 with this seed) no such change does.
     EXPECT(caught * 3 >= changed * 2 && unchanged * 50 <= 800,
            "the checker caught only %d of %d story numbers moved by one; none in %d of 800 problems", caught, changed,
            unchanged);
@@ -232,6 +236,16 @@ inline void test_mathgen_number_theory() {
                                              : quiet.problem.question.size() < plain.problem.question.size()),
                    "distractors changed the math");
         }
+    }
+    // --skip-kinds: a skipped kind is never drawn, the others still are.
+    {
+        MathOptions skipping;
+        skipping.skip_kinds = 1u << K::factors;
+        Rng rng(5);
+        std::set<int> kinds;
+        for (int i = 0; i < 500; ++i) kinds.insert(make_number_theory_problem(rng, skipping).kind);
+        EXPECT(!kinds.count(K::factors) && kinds.size() == size_t(K::kind_count) - 1,
+               "skipping factors drew %zu kinds", kinds.size());
     }
     const auto a = make_number_theory_problems(31, 200), b = make_number_theory_problems(31, 200);
     bool same = a.size() == b.size();
