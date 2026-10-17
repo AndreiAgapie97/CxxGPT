@@ -24,6 +24,15 @@
 //     common constants (kConstants: 7 days a week, 60 minutes an hour,
 //     ...), unless outside numbers are allowed: an invented quantity is a
 //     wrong plan even when the answer comes out right;
+//   - it uses every number of the question (but 1, and a percentage may be
+//     used as its hundredth: "30%" as 0.3), unless unused numbers are
+//     allowed or the re-draw check runs: rp1's lucky answers on the textbook
+//     problems ignore one ("7 x 7 = 49" for a triangle of base 14, height
+//     7). On GSM8K dev it drops 57% of the right tries that reach under
+//     half the gold's results and 3% of those that reach all of them; 8%
+//     of GSM8K's own train solutions leave a number unused ("a 2008
+//     study"). Generated problems add numbers on purpose (a distractor
+//     sentence), so their re-draw check replaces this one;
 //   - it is not the problem file's own solution: a model that has learned
 //     its training problems, or a generator's templates, by heart writes
 //     those back, and they teach it nothing new;
@@ -82,6 +91,7 @@ enum class Verdict {
     arithmetic,   // the right answer, but a calculation in the work is wrong
     loop,         // the right answer, but a line repeats
     outside,      // the right answer, but a number comes from outside the question
+    unused,       // the right answer, but a number of the question is never used
     gold_copy,    // the problem file's own solution (outline or text): nothing new
     ambiguous,    // a number on the answer's path could come from two places
     unchecked,    // the re-draw check could not run: no formula for the answer, or no versions
@@ -89,7 +99,7 @@ enum class Verdict {
     duplicate,    // the same solution as an earlier kept try of the problem
     over_cap,     // the problem already has `keep` kept tries
 };
-inline constexpr int kVerdicts = 15;
+inline constexpr int kVerdicts = 16;
 
 inline const char* verdict_name(Verdict v) {
     switch (v) {
@@ -102,6 +112,7 @@ inline const char* verdict_name(Verdict v) {
         case Verdict::arithmetic: return "arithmetic";
         case Verdict::loop: return "loop";
         case Verdict::outside: return "outside";
+        case Verdict::unused: return "unused";
         case Verdict::gold_copy: return "gold_copy";
         case Verdict::ambiguous: return "ambiguous";
         case Verdict::unchecked: return "unchecked";
@@ -119,6 +130,7 @@ struct Options {
     int keep = 0;               // kept tries per problem at most; 0: all
     bool allow_loops = false;   // keep right tries that repeat a line
     bool allow_outside = false; // keep right tries with numbers from outside the question
+    bool allow_unused = false;  // keep right tries that leave a number of the question unused
     bool keep_gold = false;     // keep tries that are the problem's own solution
     Same same = Same::outline;
     bool keep_unchecked = false;  // keep tries the re-draw check cannot check
@@ -132,6 +144,33 @@ inline constexpr int64_t kConstants[] = {7, 12, 24, 52, 60, 365, 1000};
 
 inline bool is_constant(const calc::Rational& v) {
     return v.den == 1 && std::find(std::begin(kConstants), std::end(kConstants), v.num) != std::end(kConstants);
+}
+
+// The question's numbers the work never writes: digits only, "$" and
+// digit-grouping commas dropped (as the labels read numbers), 1 aside (the
+// unit in "1 hour each day"), and a percentage written as its hundredth
+// counts ("30%" used as 0.3). In the order of the question.
+inline std::vector<std::string> unused_numbers(const Problem& p, const std::string& work) {
+    auto clean = [](std::string s) {
+        s = strip_digit_commas(s);
+        s.erase(std::remove(s.begin(), s.end(), '$'), s.end());
+        return s;
+    };
+    std::vector<calc::Rational> written;
+    for (const auto& n : labels::detail::numbers_in(clean(work))) written.push_back(n.value);
+    auto has = [&](const calc::Rational& v) {
+        return std::any_of(written.begin(), written.end(), [&](const calc::Rational& w) { return labels::detail::same(w, v); });
+    };
+    std::vector<std::string> out;
+    const std::string question = clean(p.question);
+    for (const auto& n : labels::detail::numbers_in(question)) {
+        if (n.value.num == n.value.den) continue;
+        const std::string_view rest = std::string_view(question).substr(n.end);
+        const bool percent = rest.starts_with("%") || rest.starts_with(" percent");
+        const auto hundredth = calc::times(n.value, calc::Rational{1, 100});
+        if (!has(n.value) && !(percent && hundredth && has(*hundredth))) out.push_back(n.written);
+    }
+    return out;
 }
 
 // The outside numbers that are not common constants: the failure labels'
@@ -511,6 +550,7 @@ inline Trace trace_try(const Problem& p, const labels::AnswerLabel& label, const
 struct TryInfo {
     std::string key;                   // solution_key, for a try that passed every check
     std::vector<std::string> outside;  // numbers from outside the question (constants aside)
+    std::vector<std::string> unused;   // numbers of the question the work never writes (1 aside)
     size_t calcs = 0, unreadable = 0;  // calculations, and those the calculator could not read
     Trace trace;                       // the re-draw check's record, if it ran
 };
@@ -549,6 +589,12 @@ inline Verdict check_try(const Problem& p, const std::string& text, const Option
         const std::string gold = trim(p.steps);
         if (work == gold || in.key == solution_key(labels::label_answer(p, p.completion()), gold, o.same))
             return Verdict::gold_copy;
+    }
+    // Generated problems' distractor numbers are left out on purpose: there
+    // the re-draw check below tells method from luck.
+    if (!versions) {
+        in.unused = unused_numbers(p, work);
+        if (!in.unused.empty() && !o.allow_unused) return Verdict::unused;
     }
     if (versions) {
         in.trace = trace_try(p, label, *versions);
@@ -595,6 +641,11 @@ inline Result keep_checked(const std::vector<Problem>& problems, const std::vect
     CHECK(!versions || versions->size() == problems.size(), "%zu problems but versions for %zu", problems.size(),
           versions->size());
     CHECK(o.keep >= 0, "--keep must not be negative");
+    // With recipes the problems are generated, and generated problems add
+    // numbers on purpose (a distractor sentence): no try need use them all,
+    // not even one of a problem without a recipe of its own.
+    Options checks = o;
+    if (versions) checks.allow_unused = true;
     Result r;
     r.problems = problems.size();
     r.verdicts.resize(problems.size());
@@ -608,7 +659,7 @@ inline Result keep_checked(const std::vector<Problem>& problems, const std::vect
             const std::string& text = texts[i][t];
             const std::vector<Problem>* redrawn = versions && (*versions)[i] ? &*(*versions)[i] : nullptr;
             TryInfo info;
-            Verdict v = check_try(p, text, o, &info, redrawn);
+            Verdict v = check_try(p, text, checks, &info, redrawn);
             r.calcs += info.calcs;
             r.unreadable += info.unreadable;
             r.outside.back().push_back(info.outside);

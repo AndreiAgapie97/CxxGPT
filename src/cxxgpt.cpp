@@ -966,6 +966,10 @@ int cmd_self_train(Args& a) {
     opts.allow_loops = a.flag("allow-loops");
     // Keep tries with numbers from outside the question (constants aside).
     opts.allow_outside = a.flag("allow-outside");
+    // Keep tries that leave a number of the question unused (1 aside). Off
+    // with --recipes: generated problems add numbers on purpose, and the
+    // re-draw check tells method from luck there.
+    opts.allow_unused = a.flag("allow-unused");
     // Keep tries that are the problem file's own solution.
     opts.keep_gold = a.flag("keep-gold");
     // The re-draw check (redraw.h): each generated problem's story written
@@ -1161,7 +1165,8 @@ int cmd_self_train(Args& a) {
                        str(tool == calc::Mode::notes ? "calc-notes" : tool == calc::Mode::plain ? "calc-plain" : "none") +
                        ",\"keep\":" + std::to_string(opts.keep) + ",\"allow_loops\":" +
                        (opts.allow_loops ? "true" : "false") + ",\"allow_outside\":" +
-                       (opts.allow_outside ? "true" : "false") + ",\"same\":" + str(same) + ",\"keep_gold\":" +
+                       (opts.allow_outside ? "true" : "false") + ",\"allow_unused\":" +
+                       (opts.allow_unused ? "true" : "false") + ",\"same\":" + str(same) + ",\"keep_gold\":" +
                        (opts.keep_gold ? "true" : "false") + ",\"recipes\":" + str(recipes_path) +
                        ",\"redraws\":" + std::to_string(redraws) + ",\"keep_unchecked\":" +
                        (opts.keep_unchecked ? "true" : "false") + ",\"every_reading\":" +
