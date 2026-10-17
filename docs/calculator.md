@@ -52,7 +52,32 @@ fractions throughout: `7/2*2` is `7`, and even `1/3*3` is `1`. Answers have
 no trailing decimal zeros. A final repeating decimal such as `1/3` is
 rejected because there is no exact finite decimal to insert.
 
-There are no variables, exponentiation, thousands separators, percentages,
+Digit-grouping commas are read as part of the number (since 2026-10-17):
+`<<24*600,000=` is finished as `14400000>>`. The model copies numbers
+from the question with their commas ('24*600,000', '100,000*30'); on
+2026-10-17, 13 of the 75 refused notes on the 383 textbook problems were
+this. Only a strict group counts: a number that starts with 1-3 digits,
+the first not 0 and with no digit or `.` right before it, then one or more
+`,ddd`, and no digit right after (`1,000`, `24,600,000`, `1,234.5`). Any
+other comma stays and the call is malformed: `1,2345`, `1,2`, `2,3+4` (a
+list), `1234,567`, `1,234,56`, `1.5,000`, `0,125` (a decimal comma in some
+countries), `1, 000`. The result is written without commas, as always.
+`calc::ungroup` removes the commas before the parser sees the expression;
+`operations/build_gsm8k_notes.py`'s `ungroup` is the same rule as a regular
+expression, and `tests/test_calc_notes.py` checks the two agree. No note
+in the training data has a comma (GSM8K's 28,000 train and test notes, the
+generated note files), so the note builders and checker give the same
+files and counts as before. The failure labels (`--labels`) already read
+the work without grouping commas (`strip_digit_commas`, a looser rule: it
+also drops the comma of `1234,567`), so they read these notes as before.
+
+Plain mode keeps its rule: a comma ends the expression there, so
+`1,000 * 2 = ` and `24 * 600,000 = ` stay malformed (see below). Plain
+mode has no `<<` to say where the expression starts, and reading through
+a comma would have to tell `8,000 * 2` from a list such as `8,000 and
+8 * 2`, `3, 8 * 2` or `2,3 * 2`; notes mode does not have that problem.
+
+There are no variables, exponentiation, percentages,
 units inside expressions, LaTeX commands or implicit multiplication. Invalid
 calls remain unchanged, letting the model continue. Numeric overflow and
 division by zero also count as malformed. Reduced numerators and denominators
@@ -78,8 +103,8 @@ The expression may start where a clause starts: at the start of the text,
 right after a newline, `:` or `$`, or after one of `. , ; ! ?` followed by
 whitespace. So `He has 3 bags. 16 * 7 = `, `So, 16 * 7 = ` and
 `8, and 8 * 2 = ` compute `16 * 7` and `8 * 2`. Without the whitespace the
-punctuation is no boundary (`1,000 * 2 = ` is rejected, `3.5 * 2 = ` is
-`7`). A side effect: in `16 * 7. = ` the `. ` reads as a sentence end, so
+punctuation is no boundary (`1,000 * 2 = ` is rejected: plain mode reads
+no grouping commas; `3.5 * 2 = ` is `7`). A side effect: in `16 * 7. = ` the `. ` reads as a sentence end, so
 it is no call.
 
 A leading unary sign must be attached to its number where a clause starts,

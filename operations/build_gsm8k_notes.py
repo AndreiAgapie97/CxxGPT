@@ -79,10 +79,23 @@ def literal(text):
     return fractions.Fraction(text)
 
 
+# A digit-grouping comma, as calc.h's ungroup() reads one: a number of 1-3 digits (the
+# first not 0, no digit or "." before it), then one or more ",ddd", no digit after.
+GROUPED = re.compile(r'(?<![0-9.])[1-9][0-9]{0,2}(?:,[0-9]{3})+(?![0-9])')  # ASCII digits only, as is_digit
+
+
+def ungroup(expression):
+    """The expression without its digit-grouping commas ("600,000" is 600000); every other
+    comma stays, so evaluate() refuses it ("1,2345", "2,3+4")."""
+    return GROUPED.sub(lambda m: m.group(0).replace(',', ''), expression)
+
+
 def evaluate(expression):
     """The exact value of + - * / ( ) over decimal numbers as src/calc.h computes it, or None
     if it is anything else or calc.h would reject it (a number or a step outside 64 bits,
-    over 4096 bytes, over 128 nested parentheses and signs)."""
+    over 4096 bytes, over 128 nested parentheses and signs). Digit-grouping commas are
+    dropped first, as calc.h drops them (ungroup)."""
+    expression = ungroup(expression)
     if len(expression) > 4096:
         return None
     tokens, pos = [], 0

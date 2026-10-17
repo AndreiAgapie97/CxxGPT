@@ -142,8 +142,40 @@ public:
     }
 };
 
+inline bool is_digit(char c) { return c >= '0' && c <= '9'; }
+
+// The expression without its digit-grouping commas: "24*600,000" is
+// "24*600000". Only a strict group counts: a number that starts with 1-3
+// digits, the first not 0, with no digit or "." right before it, then one
+// or more ",ddd", and no digit right after. Every other comma stays, so
+// the parser refuses it: "1,2345", "1,2", "2,3+4" (a list), "1234,567",
+// "1.5,000", and "0,125" (a decimal comma in some countries).
+// (operations/build_gsm8k_notes.py's ungroup() is the same rule as a regex.)
+inline std::string ungroup(std::string_view text) {
+    std::string out;
+    size_t i = 0;
+    while (i < text.size()) {
+        const bool starts = is_digit(text[i]) && text[i] != '0' && (i == 0 || (!is_digit(text[i - 1]) && text[i - 1] != '.'));
+        if (!starts) { out += text[i++]; continue; }
+        size_t end = i;
+        while (end < text.size() && is_digit(text[end])) ++end;
+        std::string number(text.substr(i, end - i));
+        if (end - i <= 3) {
+            // A group is "," and three digits, and no digit after them.
+            while (end + 3 < text.size() && text[end] == ',' && is_digit(text[end + 1]) && is_digit(text[end + 2]) &&
+                   is_digit(text[end + 3]) && (end + 4 == text.size() || !is_digit(text[end + 4]))) {
+                number += text.substr(end + 1, 3);
+                end += 4;
+            }
+        }
+        out += number;
+        i = end;
+    }
+    return out;
+}
+
 inline std::optional<std::string> evaluate(std::string_view expression) {
-    const auto r = Parser(expression).parse();
+    const auto r = Parser(ungroup(expression)).parse();
     if (!r) return {};
     int64_t d = r->den;
     while (d % 2 == 0) d /= 2;
@@ -173,7 +205,6 @@ inline std::optional<std::string> evaluate(std::string_view expression) {
 enum class Mode { none, notes, plain };
 struct Counts { size_t fired = 0, malformed = 0; };
 
-inline bool is_digit(char c) { return c >= '0' && c <= '9'; }
 inline bool is_blank(char c) { return c == ' ' || c == '\t' || c == '\n' || c == '\r'; }
 
 // In plain mode "x" means times only as in "16 x 7": a space on each side,
@@ -203,6 +234,9 @@ inline std::optional<std::string> response(std::string_view text, Mode mode, std
         // ("<<5/0=unknown ...") was already counted as malformed there;
         // a later "=" must not count it again.
         if (expr.find('=') != std::string::npos) return {};
+        // "<<24*600,000=": the model copies the question's numbers with
+        // their commas. Worked out (and reported) without them.
+        expr = ungroup(expr);
     } else {
         // " = $" is a trigger too: in "$50 x 3 = $150" the number goes
         // after the "$".
