@@ -205,15 +205,16 @@ def problems_of(text):
             start = i - 1  # OpenStax's "Try It" exercises lost their header: the paragraph before the answer
         # "- Answer" or "- Answer:" (the colon in a multivariable calculus remix and Precalculus 1e), not
         # "- Answer a", one part of several.
-        if start is None or m.group(1).strip() not in ('', ':') or i + 2 >= len(lines):
+        if start is None or m.group(1).strip() not in ('', ':') or i + 1 >= len(lines):
             dropped += 1
             start = None
             continue
         # The answer is one line: the next paragraph is already the next exercise or the book's text.
-        # It is the line after a lone "-", or the rest of a "- 340 yd" line.
-        if lines[i + 1].strip() == '-':
-            ans = lines[i + 2]
-        elif re.match(r'^- \S', lines[i + 1]) and not lines[i + 2].startswith('-'):
+        # It is the line after a lone "-", or the rest of a "- 340 yd" line (which may end the page).
+        after = lines[i + 2] if i + 2 < len(lines) else ''
+        if lines[i + 1].strip() == '-' and i + 2 < len(lines):
+            ans = after
+        elif re.match(r'^- \S', lines[i + 1]) and not after.startswith('-'):
             ans = lines[i + 1][2:]  # (a second "- " line would be the key's second part)
         else:
             dropped += 1

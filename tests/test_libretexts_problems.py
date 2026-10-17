@@ -109,6 +109,11 @@ class Pages(unittest.TestCase):
         self.assertEqual([a for _, a in found], ['35838.76', '340'])
         self.assertEqual(dropped, 3)  # "Answer a", "Answer b" (parts of one exercise), the unlabeled pair
 
+    def test_answer_on_the_dash_line_can_end_the_page(self):
+        q = 'Lindsay drove for 5 hours at 60 miles per hour on the highway. How much distance did she travel in miles?'
+        self.assertEqual(B.problems_of('\n'.join([q, '- Answer', '- 300 miles'])), ([(q, '300')], 0))
+        self.assertEqual(B.problems_of('\n'.join([q, '- Answer', '-'])), ([], 1))  # a lone dash, no answer
+
     def test_unanswered_exercise_does_not_take_the_next_answer(self):
         page = '\n'.join([
             '4. There are \\(18\\) Cub Scouts in Troop 645, three more than five times the number of leaders. How many leaders are there?',
