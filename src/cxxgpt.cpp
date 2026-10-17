@@ -11,6 +11,7 @@
 //                                      sample N tries per problem; the headline becomes their maj@N vote
 //       [--no-repeat N]                never write a run of N tokens twice (also on sample)
 //       [--labels FILE.jsonl]          why each first try is wrong, one JSON line per problem
+//                                      (with --tools, the calculator's run too: FILE.calc-notes.jsonl)
 //   cxxgpt self-train --ckpt model.ckpt --problems FILE --out PREFIX  the model's own checked solutions
 //       [--tries 8] [--temp 0.7] [--keep K] -> PREFIX.txt, PREFIX.tok (masked), PREFIX.json
 //   cxxgpt eval-loss --ckpt model.ckpt --data a.tok,b.tok [--all]  loss on held-out text
@@ -889,32 +890,45 @@ int cmd_eval_reasoning(Args& a) {
                     pct(all.any_correct, all.total), double(all.distinct_answers) / std::max(1, all.total),
                     vote.tries, vote.tries);
     };
+    // Each run's first tries labelled, one JSON line per problem, each
+    // problem numbered by its place in the file. The run without the
+    // calculator labels the model's own arithmetic. The run with it goes to
+    // a file of its own (labels.jsonl -> labels.calc-notes.jsonl), to
+    // compare the two problem by problem; there the notes' results are the
+    // calculator's, so its "arithmetic" labels are the model's other sums.
+    auto write_labels = [&](const EvalResult& res, calc::Mode t, const std::string& path) {
+        std::vector<size_t> ids = vote.problem_ids;
+        for (size_t i = ids.size(); i < test.size(); ++i) ids.push_back(i);
+        auto str = [](const std::string& s) { return "\"" + labels::json_escape(s) + "\""; };
+        const char* name = t == calc::Mode::notes ? "calc-notes" : t == calc::Mode::plain ? "calc-plain" : "none";
+        const std::string settings = "{\"ckpt\":" + str(ckpt) + ",\"test\":" + str(test_path) +
+                                     ",\"effort\":" + str(res.effort) + ",\"max_new\":" + std::to_string(max_new) +
+                                     ",\"tool\":" + str(name) + ",\"as_engine\":" + (as_engine ? "true" : "false") +
+                                     ",\"gpu\":" + (use_gpu ? "true" : "false") + ",\"matmul\":" + str(matmul) +
+                                     ",\"labelled\":\"first try\"}";
+        const labels::LabelSummary s = labels::write_labels(path, settings, test, res.completions, ids,
+                                                            [&](const std::string& c) { return tok.encode(c); });
+        s.print(labels::kRunTokens);
+        std::printf("labels: %s\n", path.c_str());
+    };
     // With a calculator, the same problems twice: without it, then with it.
     const EvalResult r = evaluate(calc::Mode::none);
     if (tool != calc::Mode::none) std::printf("without tool:\n");
     report(r);
-    if (!labels_path.empty()) {
-        // The run without the calculator: its results would stand in for the
-        // model's own arithmetic. Each problem keeps its place in the file.
-        std::vector<size_t> ids = vote.problem_ids;
-        for (size_t i = ids.size(); i < test.size(); ++i) ids.push_back(i);
-        auto str = [](const std::string& s) { return "\"" + labels::json_escape(s) + "\""; };
-        const std::string settings = "{\"ckpt\":" + str(ckpt) + ",\"test\":" + str(test_path) +
-                                     ",\"effort\":" + str(r.effort) + ",\"max_new\":" + std::to_string(max_new) +
-                                     ",\"tool\":\"none\",\"as_engine\":" + (as_engine ? "true" : "false") +
-                                     ",\"gpu\":" + (use_gpu ? "true" : "false") + ",\"matmul\":" + str(matmul) +
-                                     ",\"labelled\":\"first try\"}";
-        const labels::LabelSummary s = labels::write_labels(labels_path, settings, test, r.completions, ids,
-                                                            [&](const std::string& c) { return tok.encode(c); });
-        s.print(labels::kRunTokens);
-        std::printf("labels: %s\n", labels_path.c_str());
-    }
+    if (!labels_path.empty()) write_labels(r, calc::Mode::none, labels_path);
     if (tool != calc::Mode::none) {
         const EvalResult assisted = evaluate(tool);
         std::printf("with calculator:\n");
         report(assisted);
         std::printf("calculator calls: %zu fired, %zu malformed\n",
                     assisted.tool_calls.fired, assisted.tool_calls.malformed);
+        if (!labels_path.empty()) {
+            std::string path = labels_path;
+            const std::string suffix = tool == calc::Mode::notes ? ".calc-notes" : ".calc-plain";
+            if (path.ends_with(".jsonl")) path.insert(path.size() - 6, suffix);
+            else path += suffix;
+            write_labels(assisted, tool, path);
+        }
     }
     std::printf("(%.1f s)\n", now_seconds() - t0);
     return 0;
