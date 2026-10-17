@@ -187,20 +187,32 @@ inline std::vector<std::string> unused_numbers(const Problem& p, const std::stri
     return out;
 }
 
+// Decimals written without their 0 (".4 liters", "60 x .75") with it, so
+// that numbers_in reads them (it skips a number right after a "."). For
+// reading values only: positions move.
+inline std::string with_zeros(std::string s) {
+    for (size_t i = 0; i + 1 < s.size(); ++i)
+        if (s[i] == '.' && labels::detail::digit(s[i + 1]) && (i == 0 || !labels::detail::digit(s[i - 1])))
+            s.insert(i, "0"), ++i;
+    return s;
+}
+
 // The work's numbers that nothing gives it, a stricter outside check: a
 // number must be in the question (in digits or words, a fraction word as
-// its parts, "four-fifths" giving 4 and 5, and a percentage as its
-// hundredth too), 1, 2, 100 or a constant, the result of a calculation
-// (right after "="), or written earlier in the work. The outside check
-// also lets in a number one + - * / away from those, which lets in almost
-// any small number (4 is 2 * 2); rp1's lucky tries use that ("12/4 = 3,
-// 12*3 = 36" for the LCM of 9 and 12). In the order of the work.
+// its parts, "four-fifths" giving 4 and 5; a percentage or an amount in
+// cents, "25%", "25 percent", "14 cents", as its hundredth too), 1, 2, 100,
+// a half, 0.01, a constant, the result of a calculation (right after "=",
+// with its sign: "<<6-15=-9>>-9"), or written earlier in the work.
+// Decimals without their 0 (".731") are read. The outside check also lets
+// in a number one + - * / away from those, which lets in almost any small
+// number (4 is 2 * 2); rp1's lucky tries use that ("12/4 = 3, 12*3 = 36"
+// for the LCM of 9 and 12). In the order of the work.
 inline std::vector<std::string> unearned_numbers(const Problem& p, const std::string& work) {
     using namespace labels::detail;
     auto clean = [](std::string s) {
         s = strip_digit_commas(s);
         s.erase(std::remove(s.begin(), s.end(), '$'), s.end());
-        return s;
+        return with_zeros(s);
     };
     const std::string question = clean(p.question);
     std::vector<calc::Rational> given = number_words(question);
@@ -212,13 +224,23 @@ inline std::vector<std::string> unearned_numbers(const Problem& p, const std::st
         if (question.find(word) != std::string::npos) given.push_back({v, 1});
     for (const auto& n : numbers_in(question)) {
         given.push_back(n.value);
-        if (const auto h = calc::times(n.value, calc::Rational{1, 100})) given.push_back(*h);
+        size_t k = n.end;
+        while (k < question.size() && question[k] == ' ') ++k;
+        const std::string_view rest = std::string_view(question).substr(k);
+        if (rest.starts_with('%') || rest.starts_with("percent") || rest.starts_with("cent"))
+            if (const auto h = calc::times(n.value, calc::Rational{1, 100})) given.push_back(*h);
     }
     for (const int64_t c : {1, 2, 100}) given.push_back({c, 1});
+    // A half (".5") and the percent sign as a factor (GSM8K's "20*.01*120"),
+    // and a quarter as one, as a dollar's (".25").
+    given.push_back({1, 2});
+    given.push_back({1, 100});
+    if (question.find("quarter") != std::string::npos) given.push_back({1, 4});
     std::vector<std::string> out;
     const std::string w = clean(work);
     for (const auto& n : numbers_in(w)) {
         size_t k = n.at;
+        if (k > 0 && w[k - 1] == '-') --k;  // a negative result
         while (k > 0 && w[k - 1] == ' ') --k;
         const bool result = k > 0 && w[k - 1] == '=';
         if (!result && !contains(given, n.value) && !is_constant(n.value)) out.push_back(n.written);
@@ -234,16 +256,6 @@ inline std::string labels_work(const std::string& text) {
     std::string w = strip_digit_commas(text.substr(0, text.find("#### ")));
     w.erase(std::remove(w.begin(), w.end(), '$'), w.end());
     return w;
-}
-
-// Decimals written without their 0 (".4 liters", "60 x .75") with it, so
-// that numbers_in reads them (it skips a number right after a "."). For
-// reading values only: positions move.
-inline std::string with_zeros(std::string s) {
-    for (size_t i = 0; i + 1 < s.size(); ++i)
-        if (s[i] == '.' && labels::detail::digit(s[i + 1]) && (i == 0 || !labels::detail::digit(s[i - 1])))
-            s.insert(i, "0"), ++i;
-    return s;
 }
 
 // a is b, or b as a percentage of it or a share: "100 - 25 = 75" is used

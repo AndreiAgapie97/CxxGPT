@@ -486,8 +486,10 @@ the tune half's kept tries (`score-checks --show VERDICT:LABEL` prints
 the tune half only, never the held-out one):
 - `--strict-outside`: no number one +, -, * or / away from the question's
   numbers (the outside check lets those in, which lets in almost any
-  small number); a number must be in the question, 1, 2, 100, a constant,
-  a result right after "=", or written earlier;
+  small number); a number must be in the question (a percentage or an
+  amount in cents also as its hundredth), 1, 2, 100, a half, 0.01, a
+  constant, a result right after "=" (with its sign), or written earlier;
+  decimals without their 0 (`.731`) are read;
 - `--check-dead` (verdict `dead`): every calculation's result is used
   later, or is the answer (`171 + 380 = 551` and never 551 again); a
   percentage counts as its share (`100 - 25 = 75`, then `.75`);
@@ -508,15 +510,15 @@ notes). Kept tries on the tune half, and GSM8K solutions dropped:
 | checks | tune kept | clean | clean or minor | clean dropped | GSM8K solutions dropped |
 |---|---|---|---|---|---|
 | today's | 118 | 9 (7.6%) | 28 (23.7%) | 0 | 948 (12.7%) |
-| `--strict-outside` | 100 | 9 (9.0%) | 28 (28.0%) | 0 | 1,818 (24.3%) |
+| `--strict-outside` | 99 | 9 (9.1%) | 28 (28.3%) | 0 | 1,812 (24.2%) |
 | `--check-dead` | 96 | 9 (9.4%) | 28 (29.2%) | 0 | 1,021 (13.7%) |
 | `--check-mismatch` | 110 | 9 (8.2%) | 28 (25.5%) | 0 | 988 (13.2%) |
 | `--check-broken` | 109 | 9 (8.3%) | 27 (24.8%) | 0 | 1,210 (16.2%) |
 | `--check-computed` | 115 | 9 (7.8%) | 28 (24.3%) | 0 | 989 (13.2%) |
-| `--strict` (all five) | 72 | 9 (12.5%) | 27 (37.5%) | 0 | 1,950 (26.1%) |
+| `--strict` (all five) | 72 | 9 (12.5%) | 27 (37.5%) | 0 | 1,940 (26.0%) |
 
-On the held-out half, `--strict` keeps 58 tries: 3 clean (5.2%, from
-2.7%), 13 clean or minor (22.4%, from 11.7%), no clean try dropped. (The
+On the held-out half, `--strict` keeps 59 tries: 3 clean (5.1%, from
+2.7%), 13 clean or minor (22.0%, from 11.7%), no clean try dropped. (The
 held-out counts were printed once, by `score-checks` without `--show`,
 while the checks were being written, but no held-out try was read, and no
 check was chosen or changed for them.) Two other checks were tried and
