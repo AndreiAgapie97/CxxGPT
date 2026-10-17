@@ -814,8 +814,9 @@ page, book and licence; `problems.txt` for `eval-reasoning` and
 `self-train`), none sharing a 13-word run, or its numbers and answer, with
 a GSM8K dev or test question.
 - **Licence.** OpenStax's math books were CC BY 4.0 until OpenStax
-  relicensed them CC BY-NC-SA 4.0 on 2026-04-23 (their `osbooks-*`
-  repositories' licence lines). LibreTexts copied them while they were
+  relicensed them CC BY-NC-SA 4.0 in 2026 (the `osbooks-*` repositories'
+  LICENSE files on 2026-03-12 to 03-19, their licence lines on
+  2026-04-23). LibreTexts copied them while they were
   CC BY, and a CC licence cannot be taken back from copies already made,
   so the LibreTexts copies are what the script reads, never openstax.org's
   current books. Share-alike and non-commercial pages are left out.
@@ -837,6 +838,31 @@ a GSM8K dev or test question.
   checking the model's own solutions (`self-train`) and for evaluation,
   not for the training mix as it is. LibreTexts is in the training data
   (`textbooks-libretexts`), so a score on it is not a held-out test.
+- **Second build (2026-10-17), `data/libretexts-problems-2/`: 475
+  problems, 93 of them new.** The builder now also reads answers written
+  "- Answer:" or on the "- 340 yd" line itself, fractions and degrees in a
+  question ("3 1/2 miles", "27°"), "per" in an answer ("60 miles per
+  hour"), a full stop after the number ("The number is 4."), and the
+  nursing books' dosage calculations (OpenStax's Pharmacology for Nurses,
+  29 problems: "The client weighs 176 lb. How many milligrams ...?").
+  Each problem says whether it is `new` against the first build
+  (`--previous`); one old problem is gone ("find the equation of the
+  line", key 9). 50 new problems were worked out by hand: 4 bad in the
+  first draw (8%: a question asking for an equation, one naming
+  "problem 78", two wrong book keys), fixed by two rules and excluded by
+  name; all 50 right after. 0 of GSM8K test and dev share a 13-word run
+  with it (`cxxgpt leak-check`).
+- **Why not thousands.** A survey of the whole LibreTexts file (18,099
+  math, statistics and medicine pages): about 44,000 answer keys, of which
+  some 1,000 belong to a one-paragraph word problem with a one-number
+  answer (half of them copies across course remixes), and the rest are
+  algebra drills, graphs, several parts or LaTeX. Worked examples with a
+  final "Answer the question" step add a few dozen; chemistry and physics
+  answers need constants and significant figures. The OpenStax books'
+  back-of-book answer keys (odd exercises) are not in LibreTexts' copies,
+  and `data/licensed-10b` holds no raw text (token files only; DOAB's math
+  titles are research books). Thousands more would need another source;
+  that is the owner's call on licences.
 
 To see whether math training costs the model its general text, score a
 checkpoint on held-out text it never trained on, the corpus's validation
