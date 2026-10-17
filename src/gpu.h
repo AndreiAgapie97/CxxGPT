@@ -78,6 +78,10 @@ public:
     // (summed on the GPU; only the sum comes back). training = true counts
     // expert loads for the router bias.
     double forward(const int* tokens, const int* targets, int B, int Tn, bool training = false);
+    // forward(tokens, targets, B, Tn), then the loss at every position into
+    // losses [B * Tn]: -log p(target), 0 where the target is -1, as
+    // Model::last_losses (for eval-choice, eval_choice.h).
+    void forward_losses(const int* tokens, const int* targets, int B, int Tn, float* losses);
     // Accumulates d(loss * loss_scale) into the gradients, as Model::backward.
     void backward(double loss_scale = 1.0);
     // Unlikelihood training (#34), as Model::unlikelihood: off while alpha is

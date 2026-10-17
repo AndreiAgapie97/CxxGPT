@@ -152,6 +152,13 @@ public:
         if (cfg.moe()) { dey.resize(NK * C); dxg.resize(NK * C); drl.resize(N * E); }
     }
 
+    // The last forward's loss at each of its B * Tn positions: -log
+    // p(target), 0 where the target is -1 (for eval-choice).
+    std::vector<double> last_losses() const {
+        CHECK(has_targets_, "last_losses: the last forward had no targets");
+        return std::vector<double>(losses.begin(), losses.begin() + std::ptrdiff_t(B_cur) * T_cur);
+    }
+
     // Runs the model on tokens[B * Tn]. With targets (-1 = ignore), returns
     // the mean cross-entropy and keeps what backward() needs; logits then
     // hold probabilities. Without targets, logits hold raw logits; returns 0.

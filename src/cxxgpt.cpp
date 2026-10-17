@@ -17,6 +17,8 @@
 //   cxxgpt redraw-qa --problems FILE.txt --out PREFIX   GSM8K train questions with new numbers
 //       [--versions 1] [--seed 1] -> PREFIX.txt, PREFIX.jsonl, PREFIX.audit.jsonl, PREFIX.json
 //   cxxgpt eval-loss --ckpt model.ckpt --data a.tok,b.tok [--all]  loss on held-out text
+//   cxxgpt eval-choice --ckpt model.ckpt --test a.jsonl,b.jsonl --bpe tok.bpe  multiple-choice tests
+//                                      scored by likelihood (ARC, SciQ, ...), no generation
 //   cxxgpt qa-context --data a.tok,b.tok [--seq 512]   answers trained without their question
 //   cxxgpt bench-infer [--ckpt model.ckpt | model options]  ternary engine vs fp32 decode
 //
@@ -37,6 +39,7 @@
 #include "clone_experts.h"
 #include "failure_labels.h"
 #include "common.h"
+#include "eval_choice.h"
 #include "generate.h"
 #ifdef CXXGPT_CUDA
 #include "gpu.h"
@@ -207,17 +210,21 @@ std::string utf8_prefix(const std::string& text, size_t max_bytes) {
 }
 
 int cmd_leak_check(Args& a) {
-    const std::string questions = a.str("questions"), train = a.str("train");
+    const std::string questions = a.str("questions"), train = a.str("train"), hits_out = a.str("hits");
     a.done();
     CHECK(!questions.empty() && !train.empty(),
-          "usage: cxxgpt leak-check --questions QUESTIONS.txt --train A.txt,B.txt,...\n"
+          "usage: cxxgpt leak-check --questions QUESTIONS.txt --train A.txt,B.txt,... [--hits HITS.txt]\n"
           "Questions: prep-qa problem records or one question per line.\n"
-          "Finds exact runs of 13 ASCII letter/digit words, ignoring case.");
+          "Finds exact runs of 13 ASCII letter/digit words, ignoring case.\n"
+          "--hits: writes the numbers (from 1) of the questions found in any training file, one a line\n"
+          "(eval-choice --skip leaves them out).");
     const leak_check::Index index(leak_check::read_questions(questions));
+    std::vector<bool> any(index.questions.size(), false);
     for (const std::string& path : split(train, ',')) {
         std::ifstream in(path, std::ios::binary);
         CHECK(in, "cannot open %s", path.c_str());
         const auto hits = index.scan(in);
+        for (size_t q = 0; q < hits.size(); ++q) any[q] = any[q] || hits[q];
         const size_t count = size_t(std::count(hits.begin(), hits.end(), true));
         std::printf("%s: %zu / %zu questions share a 13-word run\n", path.c_str(), count, hits.size());
         size_t shown = 0;
@@ -229,6 +236,16 @@ int cmd_leak_check(Args& a) {
             std::printf("  question %zu: %s%s\n", q + 1, example.c_str(), cut ? "..." : "");
             ++shown;
         }
+    }
+    if (!hits_out.empty()) {
+        std::ofstream out(hits_out);
+        CHECK(out, "cannot write %s", hits_out.c_str());
+        size_t n = 0;
+        for (size_t q = 0; q < any.size(); ++q)
+            if (any[q]) out << q + 1 << '\n', ++n;
+        out.close();
+        CHECK(out, "error writing %s", hits_out.c_str());
+        std::printf("%zu / %zu questions in any training file, written to %s\n", n, any.size(), hits_out.c_str());
     }
     return 0;
 }
@@ -2234,6 +2251,134 @@ int cmd_eval_loss(Args& a) {
     return 0;
 }
 
+// Multiple-choice tests scored by likelihood (eval_choice.h): each option's
+// summed log-probability after the context; the best option is the model's
+// answer. Accuracies by the sum, per token and per character, each with its
+// standard error, next to chance.
+int cmd_eval_choice(Args& a) {
+    if (a.flag("help")) {
+        std::printf(
+            "cxxgpt eval-choice --ckpt FILE --test a.jsonl[,b.jsonl...] --bpe tok.bpe [options]\n"
+            "        a test: one JSON object a line, {\"id\", \"context\", \"options\": [...], \"gold\": index}\n"
+            "        (scripts/get_choice_data.py writes them); each row is [BOS] context option, the two\n"
+            "        tokenized apart, so an option starts with its space (\" Paris\")\n"
+            "        --batch 8 (rows a forward) --limit N (the first N questions of each test)\n"
+            "        --skip a.hits[,b.hits...] (one per test: leak-check --hits; the scores again\n"
+            "        without those questions)\n"
+            "        --picks FILE.jsonl (each question's choices and option scores; with several tests,\n"
+            "        FILE.<test>.jsonl)\n"
+            "        --gpu (cxxgpt-gpu) --matmul fp32 (tf32, bf16: as training computes it)\n");
+        return 0;
+    }
+    ThreadPool tp(threads_arg(a));
+    g_pool = &tp;
+    const std::string ckpt = a.str("ckpt", "model.ckpt"), test_arg = a.str("test"), bpe = a.str("bpe");
+    const std::string skip_arg = a.str("skip"), picks = a.str("picks");
+    CHECK(!test_arg.empty(), "usage: cxxgpt eval-choice --ckpt FILE --test a.jsonl[,b.jsonl...] --bpe tok.bpe");
+    const int B = a.integer_int("batch", 8);
+    const long limit = a.integer("limit", 0);
+    CHECK(B > 0, "--batch must be positive");
+    CHECK(limit >= 0, "--limit must be 0 (all) or positive");
+    const bool use_gpu = a.flag("gpu");
+    CHECK(use_gpu || !a.has("matmul"), "--matmul needs --gpu");
+    const std::string matmul = a.str("matmul", "fp32");
+    CHECK(matmul == "fp32" || matmul == "tf32" || matmul == "bf16", "--matmul takes fp32, tf32 or bf16");
+    a.done();
+#ifndef CXXGPT_CUDA
+    CHECK(!use_gpu, "this cxxgpt was built without CUDA; use cxxgpt-gpu (make gpu) for --gpu");
+#endif
+    const std::vector<std::string> tests = split(test_arg, ',');
+    const std::vector<std::string> skips = skip_arg.empty() ? std::vector<std::string>{} : split(skip_arg, ',');
+    CHECK(skips.empty() || skips.size() == tests.size(), "--skip needs one file per test (%zu), got %zu",
+          tests.size(), skips.size());
+    const Tokenizer tok = load_tokenizer(bpe);
+    Model<float> model(peek_checkpoint_config(ckpt));
+    CHECK(tok.vocab_size() <= model.cfg.vocab, "the tokenizer has %d tokens, more than the model's %d: another one?",
+          tok.vocab_size(), model.cfg.vocab);
+    load_checkpoint(ckpt, model, nullptr, nullptr);
+    eval_choice::LossFn losses = [&](const std::vector<int>& inp, const std::vector<int>& tgt, int b, int t) {
+        model.forward(inp.data(), tgt.data(), b, t, false);
+        return model.last_losses();
+    };
+#ifdef CXXGPT_CUDA
+    std::unique_ptr<GpuTrainer> gpu;
+    if (use_gpu) {
+        const Matmul mm = matmul == "fp32" ? Matmul::fp32 : matmul == "bf16" ? Matmul::bf16 : Matmul::tf32;
+        const bool fused = fused_attention_fits(model.cfg.head_size());  // as train's default
+        gpu = std::make_unique<GpuTrainer>(model.cfg, model.infos, mm, fused, /*inference=*/true);
+        gpu->set_params(model.params.data());
+        gpu->set_router_bias(model.router_bias);
+        std::printf("gpu: %s, %s matmuls\n", GpuTrainer::device_name().c_str(), matmul.c_str());
+        losses = [&](const std::vector<int>& inp, const std::vector<int>& tgt, int b, int t) {
+            std::vector<float> l(inp.size());
+            gpu->forward_losses(inp.data(), tgt.data(), b, t, l.data());
+            return std::vector<double>(l.begin(), l.end());
+        };
+    }
+#endif
+    auto line = [](const char* name, const eval_choice::Accuracy& acc) {
+        std::printf("  %-26s %5.1f%% +- %.1f  (%ld / %ld)\n", name, 100 * acc.value(), 100 * acc.se(), acc.right,
+                    acc.n);
+    };
+    auto report = [&](const eval_choice::Result& r) {
+        std::printf("  chance %.1f%%; always option %d: %.1f%%\n", 100 * r.chance, r.most_common_index + 1,
+                    100 * r.most_common_gold);
+        line("by the sum (acc)", r.sum);
+        line("per token", r.per_token);
+        line("per character (acc_norm)", r.per_char);
+    };
+    auto str = [](const std::string& s) { return "\"" + labels::json_escape(s) + "\""; };
+    for (size_t k = 0; k < tests.size(); ++k) {
+        const std::string& path = tests[k];
+        std::vector<eval_choice::Item> items = eval_choice::load(path);
+        CHECK(!items.empty(), "%s has no questions", path.c_str());
+        const size_t total = items.size();
+        if (limit > 0 && size_t(limit) < items.size()) items.resize(size_t(limit));
+        const double t0 = now_seconds();
+        size_t cut = 0;
+        const std::vector<eval_choice::Row> rows = eval_choice::make_rows(items, tok, model.cfg.seq_len, &cut);
+        const std::vector<double> logp = eval_choice::score_rows(rows, B, losses);
+        const eval_choice::Result all = eval_choice::tally(items, rows, logp);
+        std::printf("%s: %zu questions, %zu options (%.2f a question), %zu contexts cut to fit %d tokens, %.1f s\n",
+                    path.c_str(), all.questions, all.rows, double(all.rows) / double(all.questions), cut,
+                    model.cfg.seq_len, now_seconds() - t0);
+        report(all);
+        if (!skips.empty()) {
+            std::vector<bool> skip = eval_choice::read_skip(skips[k], total);
+            skip.resize(items.size());
+            const eval_choice::Result clean = eval_choice::tally(items, rows, logp, skip);
+            std::printf("  without the %zu questions in %s (%zu left):\n", all.questions - clean.questions,
+                        skips[k].c_str(), clean.questions);
+            if (clean.questions) report(clean);
+        }
+        if (!picks.empty()) {
+            std::string out = picks;
+            if (tests.size() > 1) {
+                const std::string stem = std::filesystem::path(path).stem().string();
+                const size_t dot = out.rfind(".jsonl");
+                out = dot == std::string::npos ? out + "." + stem : out.substr(0, dot) + "." + stem + ".jsonl";
+            }
+            std::ofstream f(out, std::ios::binary);
+            CHECK(f, "cannot write %s", out.c_str());
+            for (size_t i = 0, r = 0; i < items.size(); ++i) {
+                std::string sums;
+                for (size_t o = 0; o < items[i].options.size(); ++o, ++r) {
+                    char buf[32];
+                    std::snprintf(buf, sizeof buf, "%s%.9g", o ? "," : "", logp[r]);
+                    sums += buf;
+                }
+                f << "{\"id\":" << str(items[i].id) << ",\"gold\":" << items[i].gold << ",\"sum\":" << all.pick_sum[i]
+                  << ",\"per_token\":" << all.pick_token[i] << ",\"per_char\":" << all.pick_char[i] << ",\"logp\":["
+                  << sums << "]}\n";
+            }
+            f.close();
+            CHECK(f, "error writing %s", out.c_str());
+            std::printf("  picks (option indices from 0, -1 for a tie) in %s\n", out.c_str());
+        }
+    }
+    return 0;
+}
+
 int cmd_sample(Args& a) {
     ThreadPool tp(threads_arg(a));
     g_pool = &tp;
@@ -2451,6 +2596,7 @@ int main(int argc, char** argv) {
         {"self-train", cmd_self_train, "keeps the model's own right, checked solutions as training tokens"},
         {"score-checks", cmd_score_checks, "self-train's checks against hand-labelled tries: how many kept are clean"},
         {"eval-loss", cmd_eval_loss, "a checkpoint's loss on held-out token files"},
+        {"eval-choice", cmd_eval_choice, "multiple-choice tests scored by likelihood, with no generation"},
         {"bench-infer", cmd_bench_infer, "times the ternary inference engine against fp32 decoding"},
         {"redraw-qa", cmd_redraw_qa, "writes GSM8K train questions again with new numbers and exact answers"},
         {"leak-check", cmd_leak_check, "finds questions that share a 13-word run with training files"},
