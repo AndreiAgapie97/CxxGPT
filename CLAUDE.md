@@ -74,7 +74,11 @@ Math problem-solving accuracy is the first evaluation focus.
   format, arithmetic (a written calculation the exact calculator finds
   wrong), passed_gold (the right number in the work, another answer
   given) or other (for a person to judge), with flags for loops and
-  numbers from outside the question; one JSON line per problem.
+  numbers from outside the question; one JSON line per problem. Since
+  2026-10-17 (#72) it also reads plain arithmetic right after a word
+  ("30% of 270 is 270*30/100 = 81", `after_word`; not after one letter
+  or an operator word), which the calculator leaves alone: labels made
+  before count those as unreadable.
 - `train --unlikelihood ALPHA --ul-ngram N` (#34, off by default, CPU
   and GPU): at each trained position, every token that would
   repeat a run of N trained tokens of the same document (the no-repeat
