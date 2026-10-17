@@ -907,6 +907,18 @@ a GSM8K dev or test question.
   "problem 78", two wrong book keys), fixed by two rules and excluded by
   name; all 50 right after. 0 of GSM8K test and dev share a 13-word run
   with it (`cxxgpt leak-check`).
+- **Third build (2026-10-17), `data/libretexts-problems-3/`: 469
+  problems, none new.** OpenStax's own 2e books
+  (`operations/build_openstax_problems.py`, PR #80) give a second answer
+  key for the problems both editions have. Where the keys differ, four
+  LibreTexts keys are wrong: a coffee tip ($0.35 on $1.65: 17.5% for
+  21.2%), tickets varying inversely with price (97 for 9), a bacteria
+  decay (5,870,061 for about 47,700) and Rachael's shake (1161 for 1126;
+  the first build's exclusion was written "21-ounce", the copy kept says
+  "21 ounce", so exclusions now ignore punctuation and case). Two more
+  have two right answers, depending on whose clock (David's 11 hours of
+  driving or 12 from John's start; 1.5 or 1.83 hours): dropped as
+  unclear. These six are the only change from the second build.
 - **Why not thousands.** A survey of the whole LibreTexts file (18,099
   math, statistics and medicine pages): about 44,000 answer keys, of which
   some 1,000 belong to a one-paragraph word problem with a one-number
