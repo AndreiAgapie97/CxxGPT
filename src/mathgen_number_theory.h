@@ -36,9 +36,9 @@
 // larger number, a greatest common divisor from the smaller number's
 // factors, as a pupil would.
 //
-// Against a templated look, the questions and the main solution lines
-// have three wordings each (one held out for the test split), and the
-// topic has its own fillers, in half the problems.
+// Against a templated look, the questions and solution lines have three
+// wordings each (one held out for the test split), and each setting has
+// its own fillers (irrelevant sentences), in half the problems.
 #pragma once
 
 #include "mathgen.h"
@@ -184,44 +184,124 @@ inline constexpr std::array<std::array<const char*, 6>, family_count> patterns =
       "{name} keeps a pattern of working {w} days and resting {r} days, which starts on day 1."}},
 }};
 
-// This topic's own irrelevant sentences (fillers), 0-11 for train and
-// 12-23 for test, in place of gen-word's shared ones: about the story's
-// people, half of them with a number ({a}) that the question does not
-// need. Half the problems get one (number_detail::candidate).
-inline constexpr std::array<const char*, 24> fillers = {
-    "{name} is {a} years old.",
-    "{other} has {a} cousins who live in another town.",
-    "{name}'s favorite color is blue.",
-    "It is a sunny day outside.",
-    "{other} read {a} pages of a novel before lunch.",
-    "{name} has a dog named Biscuit.",
-    "{name} lives {a} blocks from the school.",
-    "{other} is wearing a red hat.",
-    "{name}'s house has {a} steps up to the front door.",
-    "Everyone is in a good mood.",
-    "{other} practices the piano for {a} minutes every evening.",
-    "{name} hums a song while working.",
-    "{other} turned {a} last month.",
-    "{name} owns {a} houseplants.",
-    "The weather is cool and windy.",
-    "{other} is drinking a glass of orange juice.",
-    "{name} once ran {a} laps around the park.",
-    "{other} keeps {a} postcards in a drawer.",
-    "{name} is saving up for a new bicycle.",
-    "{other} has a cat that sleeps most of the day.",
-    "{name}'s street has {a} trees along it.",
-    "{other} likes to knit on weekends.",
-    "The radio is playing an old song.",
-    "{name} has visited {a} different countries."};
+// Where a story takes place, for its fillers.
+enum Setting { pack, seat, bus, light, visit, packs_bought, kits, ribbon, rows, teams, tickets, every, both_gifts, range,
+               lockers, pages, puzzle, beads, shifts, setting_count };
+
+// Irrelevant sentences (fillers) that fit each setting, as in GSM8K: a
+// price nobody asks for, how long something takes, a number that looks
+// usable but is not. Wordings 0-5 for train, 6-8 for test. They may use
+// the story's words ({things}, {holder}, {first}, {gift}, ...). Half the
+// problems get one (candidate). None changes what the question asks: no
+// limit on how many holders there are, no extra things to pack.
+inline constexpr std::array<std::array<const char*, 9>, setting_count> fillers = {{
+    {{"Each empty {holder} costs ${a} at the store.", "{name} has been packing for {a} minutes.",
+      "The {things} were bought {a} days ago.", "{other} offers to help with the packing.",
+      "{name} writes a label on every {holder}.", "The {holders} are stacked by the door.",
+      "{name} paid ${a} for a roll of tape.", "It takes {name} {a} seconds to close a {holder}.",
+      "{other} carries the full {holders} to the car."}},
+    {{"The {holders} were rented for ${a} each.", "{name} arrived {a} minutes early.",
+      "Each of the {things} brought a bottle of water.", "{other} has been planning this for {a} days.",
+      "Everyone is excited.", "The {holders} are all the same size.",
+      "{name} counted everyone twice to be sure.", "The {holders} are {a} years old.",
+      "{other} is in charge of the snacks."}},
+    {{"A ticket costs ${a}.", "The ride into town takes {a} minutes.", "Each bus has {a} seats.",
+      "{name} is waiting at the stop.", "The station has a small cafe.", "It is a cold morning.",
+      "There are {a} people waiting at the stop.", "Every bus is painted yellow.",
+      "{name} has a book to read on the ride."}},
+    {{"The tower is {a} meters tall.", "{name} has been watching for {a} minutes.", "The lights run on batteries.",
+      "It is a dark, clear night.", "Each bulb cost ${a}.", "{other} takes a photo of the lights.",
+      "{name} can see {a} stars in the sky.", "The lamps were put up {a} years ago.",
+      "A boat passes by in the distance."}},
+    {{"{name} lives {a} minutes from {other}.", "{other} has kept this habit for {a} weeks.",
+      "{other} keeps a calendar on the fridge.", "Both of them enjoy it.", "{name} usually goes in the morning.",
+      "{name} started this at age {a}.", "{name} wrote the plan down {a} days ago.",
+      "{other} marks each day on a calendar.", "Neither of them has missed a day yet."}},
+    {{"A pack of {first} costs ${a}.", "{name} has a coupon for ${a} off.", "The {second} are on the top shelf.",
+      "{other} will bring the drinks.", "The store is {a} minutes from home.", "{name} makes a shopping list first.",
+      "Each pack of {second} costs ${a}.", "{name} drives to the store with {other}.",
+      "The {first} are on sale this week."}},
+    {{"{name} bought the bags for ${a}.", "The bags are for a school fair.", "{other} ties a ribbon on each bag.",
+      "{name} spent {a} minutes planning.", "The fair is in {a} days.", "The {first} were on sale.",
+      "The {second} cost ${a} in all.", "{other} writes a card for every bag.", "{name} finishes before lunch."}},
+    {{"{name} paid ${a} for the material.", "{name} measures everything twice.",
+      "The pieces are for a craft project.", "{other} holds one end during the cutting.",
+      "The cutting takes {a} minutes.", "{name} uses a sharp tool.", "{name} paid ${a} for both.",
+      "The work is done in the garage.", "{other} sweeps up afterward."}},
+    {{"Each chair weighs {a} pounds.", "The show lasts {a} minutes.", "{other} helps carry the chairs.",
+      "The hall is {a} meters long.", "All the chairs are blue.", "{name} has {a} minutes to finish.",
+      "The stage is {a} meters wide.", "{other} brings the tickets.", "The hall smells of fresh paint."}},
+    {{"Each game lasts {a} minutes.", "{other} brought {a} balls.", "The weather is perfect for playing.",
+      "The teams will wear colored shirts.", "The field is {a} meters long.", "{name} blows a whistle to start.",
+      "The winners get a prize worth ${a}.", "Everyone brings water.", "{other} keeps score."}},
+    {{"Each ticket costs ${a}.", "The fair lasts {a} days.", "{name} sold the last ticket at noon.",
+      "The prizes are on a long table.", "{other} reads out the winning numbers.",
+      "The raffle raises money for the library.", "The prizes cost ${a} in all.", "{other} bought {a} tickets.",
+      "The winners are told by phone."}},
+    {{"Each {gift} costs {a} cents to make.", "{name} has worked there for {a} years.", "The line is long all day.",
+      "The place opened {a} years ago.", "{other} keeps count at the door.", "Everyone likes the idea.",
+      "The {gift}s come in a big box.", "{other} arrives {a} minutes after opening.",
+      "Many people come back the next day."}},
+    {{"The event lasts {a} hours.", "{other} helps hand things out.", "The first person arrives {a} minutes early.",
+      "Everyone has a good time.", "The prizes are kept in {a} boxes.", "{name} counts everyone at the door.",
+      "{name} wrote the rules on a sign.", "The last person comes in at {a} minutes past five.",
+      "The place is decorated with flags."}},
+    {{"This takes {name} about {a} minutes.", "{other} watches and checks the count.", "It is a quiet afternoon.",
+      "{name} has done this {a} times before.", "{name} uses a blue pen.", "{other} is busy with something else.",
+      "{name} takes a break halfway.", "{other} guesses {a}.", "Nobody else is around."}},
+    {{"Each locker is {a} inches wide.", "The hall is painted white.", "{other} comes along to help.",
+      "The school has {a} classrooms.", "The job takes the whole afternoon.", "The lockers were put in {a} years ago.",
+      "{name} needs {a} minutes for each locker.", "{other} brings the keys.", "The floor has just been cleaned."}},
+    {{"{name} paid ${a} for the paper.", "{name} reads {a} pages a day.", "The cover is dark blue.",
+      "Each page has {a} lines of text.", "{other} drew the pictures.", "The work takes a whole weekend.",
+      "The whole thing weighs {a} ounces.", "{name} keeps the finished copy on a shelf.",
+      "{other} wrote the first chapter."}},
+    {{"{name} likes number puzzles.", "{other} guessed wrong {a} times.", "The puzzle is printed in a magazine.",
+      "{name} solved a harder one {a} days ago.", "It is the last puzzle on the page.", "{other} gives a hint.",
+      "{name} works on the puzzle for {a} minutes.", "The answer is printed on the back page.",
+      "{other} is trying too."}},
+    {{"Each bead costs {a} cents.", "{name} takes {a} minutes to finish.", "The beads come from a craft store.",
+      "{other} likes the colors.", "The string is {a} inches long.", "{name} gives the finished piece to a friend.",
+      "The clasp is made of silver.", "{name} has {a} more strings at home.", "{other} helps sort the beads."}},
+    {{"{name} earns ${a} a day at work.", "The job is {a} minutes from home.", "{name} likes the days off best.",
+      "{other} works at the same place.", "The pattern has gone on for months.", "{name} has had the job for {a} years.",
+      "{name} packs a lunch on every work day.", "{other} visits on some days off.", "The job pays ${a} an hour."}},
+}};
+
+// The setting of a kind's story context.
+inline Setting setting_of(NumberTheoryProblem::Kind kind, int context) {
+    switch (kind) {
+        case NumberTheoryProblem::remainder: return context == 0 ? pack : seat;
+        case NumberTheoryProblem::lcm: return Setting(bus + context);
+        case NumberTheoryProblem::gcd: return context == 0 ? kits : ribbon;
+        case NumberTheoryProblem::factors: return context == 0 ? rows : teams;
+        case NumberTheoryProblem::multiples: return Setting(tickets + context);
+        case NumberTheoryProblem::digits: return context <= 1 ? pages : puzzle;
+        case NumberTheoryProblem::pattern: return context == 0 ? beads : shifts;
+        case NumberTheoryProblem::kind_count: break;
+    }
+    return pack;
+}
 
 // Questions (q_) and solution lines (s_), three wordings each with the
-// same meaning: 0-1 train, 2 test. Like the story sentences, none says
-// "it" or "they" for something a sentence before named.
+// same meaning and the same calculator notes ({p1}, {p2}, {fits}): 0-1
+// train, 2 test, as different people would write them. Like the story
+// sentences, none says "it" or "they" for something a sentence before
+// named. A line that states the answer never starts with it (math_check
+// looks for it after a space).
 enum Phrase { q_pack_full, q_pack_left, q_pack_need, q_pack_more, q_seat_full, q_seat_left, q_seat_need, q_seat_empty,
               q_bus_when, q_light_when, q_visit_when, q_bus_times, q_light_times, q_visit_times, q_packs, q_packs_count,
               q_bags, q_bag_each, q_piece_length, q_pieces, q_rows, q_teams, q_tickets, q_every, q_both, q_range,
               q_lockers, q_digits, q_pages, q_number, q_beads, q_days, s_fits, s_count_up, s_first_both, s_factors,
-              s_largest, phrase_count };
+              s_largest, s_full_pack, s_full_seat, s_left_over, s_need_left, s_need_pack, s_need_seat, s_more_left,
+              s_more_pack, s_more_seat, s_cycle_intro, s_cycle_when, s_cycle_every, s_cycle_span, s_cycle_times,
+              s_packs_intro, s_packs_buy, s_packs_end, s_kits_intro, s_ribbon_intro, s_bags, s_bag_each, s_piece,
+              s_pieces, s_factor_intro, s_factor_list, s_factor_count, s_factor_count_square, s_factor_answer,
+              s_tickets_intro, s_tickets, s_every_intro, s_every, s_both_intro, s_both_every, s_both, s_range_first,
+              s_range_last, s_range_count, s_locker_ends, s_locker_count, s_lockers, s_pages_one, s_pages_two,
+              s_pages_three, s_pages_total, s_total_one, s_total_two, s_total_rest, s_total_pages, s_puzzle_larger,
+              s_puzzle_smaller, s_puzzle_number, s_round, s_rounds, s_round_own, s_extra_all, s_extra_first,
+              s_extra_none, s_extra_second, s_pattern_total, phrase_count };
 
 inline constexpr std::array<std::array<const char*, 3>, phrase_count> phrases = {{
     {{"How many {holders} can {name} fill completely?",
@@ -320,6 +400,7 @@ inline constexpr std::array<std::array<const char*, 3>, phrase_count> phrases = 
     {{"How many of the first {n} days are {asked}?",
       "Of the first {n} days, how many are {asked}?",
       "How many {asked} are there in the first {n} days?"}},
+    // s_fits: the two products around n (fits()).
     {{"{p1} and {p2} is more than {n}",
       "{p1}, while {p2} is already more than {n}",
       "{p1}, but {p2} would be more than {n}"}},
@@ -335,6 +416,194 @@ inline constexpr std::array<std::array<const char*, 3>, phrase_count> phrases = 
     {{"The largest of these that also divides {big} is {g}: {p1} and {p2}.",
       "Of these, the largest that also divides {big} is {g}: {p1} and {p2}.",
       "The biggest one that goes into {big} as well is {g}: {p1} and {p2}."}},
+    // Remainders.
+    {{"{fits}, so {name} can fill {q} {holders} completely.",
+      "{fits}, so {q} {holders} get filled all the way.",
+      "{fits}: {name} fills {q} {holders}."}},
+    {{"{fits}, so {q} {holders} can be filled completely.",
+      "{fits}, so {q} {holders} are full.",
+      "{fits}: {q} {holders} fill up."}},
+    {{"So {p1} {things} are left over.",
+      "That leaves {p1} {things}.",
+      "So {p1} {things} remain."}},
+    {{"That leaves {p1} {things}, which need one more {holder}.",
+      "There are {p1} {things} still to go, and they need one more {holder}.",
+      "The other {p1} {things} need one more {holder}."}},
+    {{"So {name} needs {p1} {holders}.",
+      "In all {name} needs {p1} {holders}.",
+      "That makes {p1} {holders} for {name}."}},
+    {{"So {p1} {holders} are needed.",
+      "In all, {p1} {holders} are needed.",
+      "That makes {p1} {holders} in all."}},
+    {{"That leaves {p1} {things} for the next {holder}.",
+      "The next {holder} gets the other {p1} {things}.",
+      "Then {p1} {things} go into the next {holder}."}},
+    {{"So {name} would need {p1} more {things}.",
+      "To fill the next {holder}, {name} needs {p1} more {things}.",
+      "So {name} is short {p1} {things} for one more full {holder}."}},
+    {{"So the last {holder} has {p1} empty places.",
+      "There are {p1} empty places in the last {holder}.",
+      "So the last {holder} has {p1} places to spare."}},
+    // Cycles meeting again.
+    {{"{They} next {meet} after a number of {unit} that is a multiple of both {a} and {b}.",
+      "The wait until {they} next {meet} must be a multiple of {a} and also of {b}.",
+      "{They} {meet} again after a number of {unit} that both {a} and {b} divide."}},
+    {{"So {both} next {meet} in {lcm} {unit}.",
+      "That means {both} {meet} again after {lcm} {unit}.",
+      "So after {lcm} {unit}, {both} {meet} again."}},
+    {{"So {both} {meet} every {lcm} {unit}.",
+      "That means {both} {meet} once every {lcm} {unit}.",
+      "So once every {lcm} {unit}, {both} {meet}."}},
+    {{"The next {span} {long_unit} are {p1} {unit}.",
+      "In {unit}, the next {span} {long_unit} are {p1}.",
+      "That span of {span} {long_unit} is {p1} {unit}."}},
+    {{"{fits}, so {both} {meet} {count} times.",
+      "{fits}: that is {count} times.",
+      "{fits}, so it happens {count} times."}},
+    {{"The number of {first} is a multiple of {a} and the number of {second} a multiple of {b}, so the smallest equal number is the first multiple of both.",
+      "Whole packs give a multiple of {a} {first} and a multiple of {b} {second}, so the equal number must be a multiple of both {a} and {b}.",
+      "Buying whole packs, the {first} come {a} at a time and the {second} {b} at a time, so the smallest equal number is the first one both {a} and {b} divide."}},
+    {{"So {name} buys {count} packs of {item}.",
+      "That is {count} packs of {item}.",
+      "So {name} needs {count} packs of {item}."}},
+    {{"So {name} ends up with {count} {first}.",
+      "That is {count} {first}.",
+      "So {name} has {count} {first} in the end."}},
+    // Common divisors.
+    {{"Every bag gets the same number of {first} and the same number of {second}, so the number of bags must divide both {a} and {b}.",
+      "For identical bags, the number of bags has to go into {a} and into {b} with nothing left.",
+      "The bags are alike only if the number of bags divides {a} and {b} exactly."}},
+    {{"The length of a piece must divide both {a} and {b}.",
+      "Each piece's length has to go into {a} and into {b} exactly.",
+      "Nothing is wasted only if the piece length divides {a} and {b}."}},
+    {{"So {name} can make at most {g} bags.",
+      "That means {g} bags at most.",
+      "So the greatest number of bags is {g}."}},
+    {{"So each bag has {x} {item}.",
+      "Each bag gets {x} {item}.",
+      "That puts {x} {item} in each bag."}},
+    {{"So each piece is {g} centimeters long.",
+      "The pieces are {g} centimeters long.",
+      "That makes each piece {g} centimeters."}},
+    {{"In all there are {p1} pieces.",
+      "Together that is {p1} pieces.",
+      "So there are {p1} pieces altogether."}},
+    // Factor counts.
+    {{"The number of {groups} times the number of {each} is {n}, and both are at least {m}.",
+      "The {groups} times the {each} must make {n}, with both at least {m}.",
+      "Two numbers, both at least {m}, must multiply to {n}: the {groups} and the {each}."}},
+    {{"The ways to write {n} as such a product are {list}.",
+      "{n} can be written as {list}.",
+      "The products that work are {list}."}},
+    {{"Each product gives two choices ({example}): {p1}.",
+      "Every product can be used both ways ({example}), so {p1}.",
+      "Each one counts twice ({example}): {p1}."}},
+    {{"Each product gives two choices ({example}), except {square}, which gives one: {p1}.",
+      "Every product can be used both ways ({example}) except {square}, so {p1}.",
+      "Each one counts twice ({example}), but {square} only once: {p1}."}},
+    {{"So there are {count} possible numbers of {groups}.",
+      "That is {count} different numbers of {groups}.",
+      "So {count} numbers of {groups} are possible."}},
+    // Multiples.
+    {{"The winning numbers are the multiples of {k} up to {n}.",
+      "A ticket wins if its number is a multiple of {k}, so count the multiples up to {n}.",
+      "Only multiples of {k} win, from {k} up to at most {n}."}},
+    {{"{fits}, so {q} tickets win.",
+      "{fits}: {q} tickets win.",
+      "{fits}, so {q} of the tickets are winners."}},
+    {{"The people who get a {gift} are those whose place in line is a multiple of {k}, up to {n}.",
+      "A {gift} goes to the people at places {k}, {k2}, {k3} and so on, up to {n}.",
+      "Every place in line that is a multiple of {k} gets a {gift}, up to {n}."}},
+    {{"{fits}, so {q} people get a {gift}.",
+      "{fits}: {q} {gift}s are given out.",
+      "{fits}, so {q} people receive a {gift}."}},
+    {{"A person gets both when their place in the count is a multiple of both {a} and {b}.",
+      "Only people whose place is a multiple of {a} and of {b} get both.",
+      "To get both, a person's place must be a multiple of {a} and also of {b}."}},
+    {{"So every {lcmth} person gets both.",
+      "That means every {lcmth} person gets both.",
+      "So both go to every {lcmth} person."}},
+    {{"{fits}, so {q} people get both.",
+      "{fits}: {q} people get both.",
+      "{fits}, so {q} people end up with both."}},
+    {{"The first multiple of {k} from {a} on is {p1}, since {p2} is less than {a}.",
+      "Since {p2} is less than {a}, the first multiple of {k} from {a} on is {p1}.",
+      "Starting at {a}, the first multiple of {k} is {p1}, because {p2} is too small."}},
+    {{"The last one up to {b} is {p1}, since {p2} is more than {b}.",
+      "Since {p2} is more than {b}, the last one up to {b} is {p1}.",
+      "The last multiple of {k} up to {b} is {p1}, because {p2} is too big."}},
+    {{"So the multiples are {k} times {i} up to {k} times {j}: {p1} numbers.",
+      "That is {k} times each number from {i} to {j}: {p1} numbers.",
+      "So they run from {k} times {i} to {k} times {j}, which is {p1} numbers."}},
+    {{"The first {parity} number from {a} on is {first}, and the last one up to {b} is {last}.",
+      "The {parity}-numbered lockers run from {first} to {last}.",
+      "The {parity} numbers start at {first} and end at {last}."}},
+    {{"Going from {first} to {last} in steps of 2: {p1} lockers.",
+      "Counting by twos from {first} to {last}: {p1} lockers.",
+      "From {first} to {last} in steps of 2 there are {p1} numbers."}},
+    {{"So there are {count} {parity}-numbered lockers.",
+      "That is {count} lockers.",
+      "So {count} lockers have {parity} numbers."}},
+    // Page digits.
+    {{"Pages 1 to 9 have one digit each: 9 digits.",
+      "The first 9 pages use one digit each, 9 digits.",
+      "Pages 1 through 9 need 9 digits, one each."}},
+    {{"Pages 10 to {n} have two digits each: {p1} pages, so {p2} digits.",
+      "From page 10 to page {n} there are {p1} pages of two digits: {p2} digits.",
+      "Pages 10 through {n} are {p1} pages with two digits each, which is {p2} digits."}},
+    {{"Pages 100 to {n} have three digits each: {p1} pages, so {p2} digits.",
+      "From page 100 to page {n} there are {p1} pages of three digits: {p2} digits.",
+      "Pages 100 through {n} are {p1} pages with three digits each, which is {p2} digits."}},
+    {{"In all that is {p1} digits.",
+      "Together that makes {p1} digits.",
+      "So the page numbers use {p1} digits."}},
+    {{"Pages 1 to 9 use 9 digits.",
+      "The first 9 pages take 9 digits.",
+      "Pages 1 through 9 need one digit each, 9 in all."}},
+    {{"Pages 1 to 9 use 9 digits, and pages 10 to 99 use {p1} digits: {p2} digits.",
+      "The first 9 pages take 9 digits and pages 10 to 99 take {p1}, so {p2} digits so far.",
+      "Pages 1 through 99 need 9 digits plus {p1}, which is {p2} digits."}},
+    {{"The other {p1} digits are on {size}-digit pages: {p2} pages.",
+      "That leaves {p1} digits for pages with {size} digits each: {p2} pages.",
+      "The remaining {p1} digits go on {size}-digit pages, so {p2} pages."}},
+    {{"So there are {p1} pages.",
+      "In all that is {p1} pages.",
+      "That makes {p1} pages altogether."}},
+    // Digit puzzle.
+    {{"Adding the sum and the difference gives twice the larger digit: {p1}, and {p2}.",
+      "The sum plus the difference is twice the larger digit: {p1}, so the larger digit is {p2}.",
+      "Twice the larger digit is the sum plus the difference, {p1}; half of that is {p2}."}},
+    {{"The smaller digit is {p1}.",
+      "So the smaller digit is {p1}.",
+      "That leaves {p1} for the smaller digit."}},
+    {{"The tens digit is {tens} and the ones digit is {ones}, so the number is {number}.",
+      "With {tens} in the tens place and {ones} in the ones place, the number is {number}.",
+      "The number has tens digit {tens} and ones digit {ones}, so the number is {number}."}},
+    // Repeating patterns.
+    {{"One round of the pattern is {p1} {unit}.",
+      "Each round of the pattern has {p1} {unit}.",
+      "The pattern repeats every {p1} {unit}."}},
+    {{"{fits}, so there are {rounds} full rounds and {p1} {unit} more.",
+      "{fits}: that is {rounds} full rounds, with {p1} {unit} left.",
+      "{fits}, so {rounds} full rounds fit, plus {p1} {unit}."}},
+    {{"The full rounds have {p1} {asked}.",
+      "In the full rounds there are {p1} {asked}.",
+      "The {rounds} full rounds give {p1} {asked}."}},
+    {{"The {extra} {unit} more start the pattern again, so all of them are {first}: {p1}.",
+      "The last {extra} {unit} start a new round, and all {extra} are {first}: {p1}.",
+      "A new round starts with the last {extra} {unit}, all of them {first}: {p1}."}},
+    {{"The {extra} {unit} more start the pattern again, so the first {r} are {first}: {p1}.",
+      "The last {extra} {unit} start a new round, and the first {r} of them are {first}: {p1}.",
+      "A new round starts with the last {extra} {unit}; {r} of them are {first}: {p1}."}},
+    {{"The {extra} {unit} more start the pattern again, so none of them are {second}.",
+      "The last {extra} {unit} start a new round and are all {first}.",
+      "A new round starts with the last {extra} {unit}, which are all {first}."}},
+    {{"The {extra} {unit} more start the pattern again: the first {r} are {first} and {p1} are {second}, so {p2}.",
+      "The last {extra} {unit} start a new round: after {r} {first}, {p1} are {second}, so {p2}.",
+      "A new round starts with the last {extra} {unit}; after {r} {first}, the rest are {second}: {p1}, so {p2}."}},
+    {{"So there are {total} {asked}.",
+      "That is {total} {asked} in all.",
+      "In all there are {total} {asked}."}},
 }};
 
 // One of a phrase's split's wordings, filled in. Its ID goes with the
@@ -354,10 +623,9 @@ inline std::string ordinal(int64_t n) {
 }
 
 // "1, 2, 3 and 6".
-inline std::string listing(const std::vector<int64_t>& values) {
+inline std::string listing(const std::vector<std::string>& values) {
     std::string out;
-    for (size_t i = 0; i < values.size(); ++i)
-        out += (i == 0 ? "" : i + 1 == values.size() ? " and " : ", ") + str(values[i]);
+    for (size_t i = 0; i < values.size(); ++i) out += (i == 0 ? "" : i + 1 == values.size() ? " and " : ", ") + values[i];
     return out;
 }
 
@@ -370,13 +638,19 @@ inline std::string fits(Story& s, int64_t k, int64_t n) {
     return say(s, s_fits, {{"{p1}", below}, {"{p2}", above}, {"{n}", str(n)}});
 }
 
+// The most numbers a solution lists: counting up to a common multiple, and
+// the factors of a number (README, gen-math number theory).
+inline constexpr int64_t most_counted = 8, most_factors = 12;
+
 // The least common multiple found by counting up by the larger number:
 // "Counting up by 12: 12, 24. The first of these that 8 also goes into is
 // 24: 12*2 = <<12*2=24>>24 and 8*3 = <<8*3=24>>24."
 inline void common_multiple(Story& s, int64_t a, int64_t b) {
     const int64_t big = std::max(a, b), small = std::min(a, b), both = std::lcm(a, b);
+    std::vector<std::string> counted;
+    for (int64_t m = big; m <= both; m += big) counted.push_back(str(m));
     std::string list;
-    for (int64_t m = big; m <= both; m += big) list += (list.empty() ? "" : ", ") + str(m);
+    for (const std::string& m : counted) list += (list.empty() ? "" : ", ") + m;
     s.line(say(s, s_count_up, {{"{big}", str(big)}, {"{list}", list}}));
     const std::string by_big = s.calc(str(big) + "*" + str(both / big), both);
     const std::string by_small = s.calc(str(small) + "*" + str(both / small), both);
@@ -384,20 +658,20 @@ inline void common_multiple(Story& s, int64_t a, int64_t b) {
 }
 
 // Two cycle lengths for a least common multiple: different, neither a
-// multiple of the other, the common multiple at most `most` and at most 8
-// counts of the larger.
+// multiple of the other, the common multiple at most `most` and at most
+// most_counted counts of the larger.
 inline bool two_cycles(Story& s, int64_t low, int64_t high, int64_t most, int64_t& a, int64_t& b) {
     a = s.draw(low, high);
     b = s.draw(low, high);
     if (a == b || a % b == 0 || b % a == 0) return false;
     const int64_t both = std::lcm(a, b);
-    return both <= most && both / std::max(a, b) <= 8;
+    return both <= most && both / std::max(a, b) <= most_counted;
 }
 
 // n things into holders of k: full holders (asked 0), things left over
 // (1), holders needed for all (2), things or places to fill the last one
 // (3). Packing things (context 0) or placing people (context 1).
-inline bool remainder_story(Story& s, std::string& answer, Place& place) {
+inline bool remainder_story(Story& s, std::string& answer, Place& place, Fills& words) {
     // What is packed or placed, its holder, and the sizes a real one has.
     struct Holder { const char* things; const char* one; const char* many; int64_t k_low, k_high, n_high; };
     static const std::array<Holder, 4> packs = {{{"cookies", "box", "boxes", 6, 24, 400},
@@ -416,34 +690,34 @@ inline bool remainder_story(Story& s, std::string& answer, Place& place) {
     // has nothing left over to ask about.
     if (q < 2 || r < 2 || k - r < 2) return false;
     s.out.inputs = {n, k};
-    const std::string things = h.things, one = h.one, many = h.many, &name = s.out.name;
-    s.sentence(context == 0 ? rem_pack : rem_seat, {{"{n}", str(n)}, {"{k}", str(k)}, {"{things}", things},
-                                                    {"{holders}", many}, {"{holder}", one}});
+    words = {{"{things}", h.things}, {"{holders}", h.many}, {"{holder}", h.one}};
+    s.sentence(context == 0 ? rem_pack : rem_seat, {{"{n}", str(n)}, {"{k}", str(k)}, words[0], words[1], words[2]});
     static constexpr std::array<Phrase, 4> pack_questions = {q_pack_full, q_pack_left, q_pack_need, q_pack_more};
     static constexpr std::array<Phrase, 4> seat_questions = {q_seat_full, q_seat_left, q_seat_need, q_seat_empty};
-    s.question = say(s, (context == 0 ? pack_questions : seat_questions)[size_t(s.out.asked)],
-                     {{"{things}", things}, {"{holders}", many}, {"{holder}", one}});
-    s.line(fits(s, k, n) + ", so " + (context == 0 ? name + " can fill " + str(q) + " " + many + " completely."
-                                                   : str(q) + " " + many + " can be filled completely."));
+    s.question = say(s, (context == 0 ? pack_questions : seat_questions)[size_t(s.out.asked)], words);
+    const auto with = [&](Fills more) {
+        more.insert(more.end(), words.begin(), words.end());
+        return more;
+    };
+    s.line(say(s, context == 0 ? s_full_pack : s_full_seat, with({{"{fits}", fits(s, k, n)}, {"{q}", str(q)}})));
     place = Place::anywhere;
     if (s.out.asked == 0) {
         answer = str(q);
         return true;
     }
-    const std::string left = s.calc(str(n) + "-" + str(k * q), r) + " " + things;
+    const std::string left = s.calc(str(n) + "-" + str(k * q), r);
     if (s.out.asked == 1) {
-        s.line("So " + left + " are left over.");
+        s.line(say(s, s_left_over, with({{"{p1}", left}})));
         answer = str(r);
     } else if (s.out.asked == 2) {
-        s.line("That leaves " + left + ", which need one more " + one + ".");
-        const std::string needed = s.calc(str(q) + "+1", q + 1) + " " + many;
-        s.line(context == 0 ? "So " + name + " needs " + needed + "." : "So " + needed + " are needed.");
+        s.line(say(s, s_need_left, with({{"{p1}", left}})));
+        const std::string needed = s.calc(str(q) + "+1", q + 1);
+        s.line(say(s, context == 0 ? s_need_pack : s_need_seat, with({{"{p1}", needed}})));
         answer = str(q + 1);
     } else {
-        s.line("That leaves " + left + " for the next " + one + ".");
+        s.line(say(s, s_more_left, with({{"{p1}", left}})));
         const std::string more = s.calc(str(k) + "-" + str(r), k - r);
-        s.line(context == 0 ? "So " + name + " would need " + more + " more " + things + "."
-                            : "So the last " + one + " has " + more + " empty places.");
+        s.line(say(s, context == 0 ? s_more_pack : s_more_seat, with({{"{p1}", more}})));
         answer = str(k - r);
     }
     return true;
@@ -453,7 +727,7 @@ inline bool remainder_story(Story& s, std::string& answer, Place& place) {
 // (2), asking when (0) or how many times in the next hours, minutes or
 // days (1); or hot dogs and buns in packs (3), asking for the packs of the
 // first (0) or the second (1), or the number of each (2).
-inline bool lcm_story(Story& s, std::string& answer, Place& place) {
+inline bool lcm_story(Story& s, std::string& answer, Place& place, Fills& words) {
     // Things sold in packs of a few, in pairs that are bought one for one.
     static const std::array<std::array<const char*, 2>, 4> pairs = {
         {{"hot dogs", "buns"}, {"paper cups", "lids"}, {"plates", "napkins"}, {"juice boxes", "straws"}}};
@@ -477,46 +751,58 @@ inline bool lcm_story(Story& s, std::string& answer, Place& place) {
     // At least twice in the span, and not exactly at its end.
     if (times && (whole / both < 2 || whole % both == 0)) return false;
     if (times) s.out.inputs.push_back(span);
-    const std::string first = pair[0], second = pair[1], &name = s.out.name;
+    const std::string first = pair[0], second = pair[1];
     std::string capital = first;
     capital[0] = char(capital[0] - 'a' + 'A');
+    words = {{"{first}", first}, {"{second}", second}};
     const Family family = context == 0 ? lcm_bus : context == 1 ? lcm_light : context == 2 ? lcm_visit : lcm_packs;
     s.sentence(family, {{"{a}", str(a)}, {"{b}", str(b)}, {"{first} come", capital + " come"}, {"{first}", first},
                         {"{second}", second}});
-    const std::string both_of = "a multiple of both " + str(a) + " and " + str(b);
-    // Per cycle context: what meets, how it meets, and the units.
-    static const std::array<std::array<const char*, 4>, 3> words = {{{"both buses", "leave together", "minutes", "hours"},
-                                                                      {"both lights", "flash together", "seconds", "minutes"},
-                                                                      {"both", "do it on the same day", "days", "days"}}};
     place = Place::anywhere;
     if (context < 3) {
-        const auto& w = words[size_t(context)];
+        // Per cycle context: who meets, how, and the units.
+        struct Meeting { const char* they_capital; const char* they; const char* both; const char* meet; const char* unit;
+                         const char* long_unit; };
+        static const std::array<Meeting, 3> meetings = {
+            {{"The buses", "the buses", "both buses", "leave together", "minutes", "hours"},
+             {"The lights", "the lights", "both lights", "flash together", "seconds", "minutes"},
+             {"They", "they", "both", "do it on the same day", "days", "days"}}};
+        const Meeting& m = meetings[size_t(context)];
+        const Fills meeting = {{"{They}", m.they_capital}, {"{they}", m.they}, {"{both}", m.both},
+                               {"{meet}", m.meet}, {"{unit}", m.unit}, {"{long_unit}", m.long_unit},
+                               {"{a}", str(a)}, {"{b}", str(b)}, {"{lcm}", str(both)}, {"{span}", str(span)}};
         static constexpr std::array<Phrase, 3> when = {q_bus_when, q_light_when, q_visit_when};
         static constexpr std::array<Phrase, 3> how_often = {q_bus_times, q_light_times, q_visit_times};
-        s.question = say(s, (times ? how_often : when)[size_t(context)], {{"{span}", str(span)}});
-        s.line(std::string(context == 2 ? "They" : context == 0 ? "The buses" : "The lights") + " next " + w[1] +
-               " after a number of " + w[2] + " that is " + both_of + ".");
+        s.question = say(s, (times ? how_often : when)[size_t(context)], meeting);
+        s.line(say(s, s_cycle_intro, meeting));
         common_multiple(s, a, b);
         if (!times) {
-            s.line(std::string("So ") + w[0] + " next " + w[1] + " in " + str(both) + " " + w[2] + ".");
+            s.line(say(s, s_cycle_when, meeting));
             answer = str(both);
             return true;
         }
-        s.line(std::string("So ") + w[0] + " " + w[1] + " every " + str(both) + " " + w[2] + ".");
-        if (range.unit != 1)
-            s.line("The next " + str(span) + " " + w[3] + " are " + s.calc(str(span) + "*60", whole) + " " + w[2] + ".");
-        s.line(fits(s, both, whole) + ", so " + w[0] + " " + w[1] + " " + str(whole / both) + " times.");
+        s.line(say(s, s_cycle_every, meeting));
+        if (range.unit != 1) {
+            Fills spanned = meeting;
+            spanned.push_back({"{p1}", s.calc(str(span) + "*60", whole)});
+            s.line(say(s, s_cycle_span, spanned));
+        }
+        Fills counted = meeting;
+        counted.insert(counted.begin(), {"{fits}", fits(s, both, whole)});
+        counted.push_back({"{count}", str(whole / both)});
+        s.line(say(s, s_cycle_times, counted));
         answer = str(whole / both);
         return true;
     }
-    s.question = say(s, s.out.asked == 2 ? q_packs_count : q_packs,
-                     {{"{item}", s.out.asked == 0 ? first : second}, {"{first}", first}});
-    s.line("The number of " + first + " is a multiple of " + str(a) + " and the number of " + second +
-           " a multiple of " + str(b) + ", so the smallest equal number is the first multiple of both.");
+    const Fills sizes = {{"{a}", str(a)}, {"{b}", str(b)}, {"{first}", first}, {"{second}", second},
+                         {"{item}", s.out.asked == 0 ? first : second}};
+    s.question = say(s, s.out.asked == 2 ? q_packs_count : q_packs, sizes);
+    s.line(say(s, s_packs_intro, sizes));
     common_multiple(s, a, b);
     answer = str(s.out.asked == 0 ? both / a : s.out.asked == 1 ? both / b : both);
-    s.line(s.out.asked == 2 ? "So " + name + " ends up with " + answer + " " + first + "."
-                            : "So " + name + " buys " + answer + " packs of " + (s.out.asked == 0 ? first : second) + ".");
+    Fills ending = sizes;
+    ending.push_back({"{count}", answer});
+    s.line(say(s, s.out.asked == 2 ? s_packs_end : s_packs_buy, ending));
     return true;
 }
 
@@ -524,7 +810,7 @@ inline bool lcm_story(Story& s, std::string& answer, Place& place) {
 // (context 0), asking for the number of bags (0) or how many of the first
 // (1) or second (2) in each; or two ribbons cut into the longest equal
 // pieces (context 1), asking for the length (0) or the number of pieces (1).
-inline bool gcd_story(Story& s, std::string& answer, Place& place) {
+inline bool gcd_story(Story& s, std::string& answer, Place& place, Fills& words) {
     static const std::array<std::array<const char*, 2>, 5> kinds = {{{"pencils", "erasers"},
                                                                      {"apples", "oranges"},
                                                                      {"stickers", "bookmarks"},
@@ -538,22 +824,26 @@ inline bool gcd_story(Story& s, std::string& answer, Place& place) {
     const int64_t g = s.draw(2, context == 0 ? 24 : 30), x = s.draw(2, 12), y = s.draw(2, 12);
     const int64_t a = g * x, b = g * y, most = context == 0 ? 200 : 300;
     if (x == y || std::gcd(x, y) != 1 || a > most || b > most) return false;
+    const int64_t small = std::min(a, b), big = std::max(a, b);
+    std::vector<std::string> factors;
+    for (int64_t f = 1; f <= small; ++f)
+        if (small % f == 0) factors.push_back(str(f));
+    if (int64_t(factors.size()) > most_factors) return false;  // a list a person would not write out
     s.out.inputs = {a, b};
-    const std::string first = kind[0], second = kind[1], &name = s.out.name;
+    const std::string first = kind[0], second = kind[1];
+    words = {{"{first}", first}, {"{second}", second}};
     s.sentence(context == 0 ? gcd_kits : gcd_ribbon,
                {{"{a}", str(a)}, {"{b}", str(b)}, {"{first}", first}, {"{second}", second}});
+    const std::string item = s.out.asked == 1 ? first : second;
+    const Fills sizes = {{"{a}", str(a)}, {"{b}", str(b)}, {"{first}", first}, {"{second}", second},
+                         {"{item}", item}, {"{g}", str(g)}};
     if (context == 0) {
-        s.question = say(s, s.out.asked == 0 ? q_bags : q_bag_each, {{"{item}", s.out.asked == 1 ? first : second}});
-        s.line("Every bag gets the same number of " + first + " and the same number of " + second +
-               ", so the number of bags must divide both " + str(a) + " and " + str(b) + ".");
+        s.question = say(s, s.out.asked == 0 ? q_bags : q_bag_each, sizes);
+        s.line(say(s, s_kits_intro, sizes));
     } else {
-        s.question = say(s, s.out.asked == 0 ? q_piece_length : q_pieces, {});
-        s.line("The length of a piece must divide both " + str(a) + " and " + str(b) + ".");
+        s.question = say(s, s.out.asked == 0 ? q_piece_length : q_pieces, sizes);
+        s.line(say(s, s_ribbon_intro, sizes));
     }
-    const int64_t small = std::min(a, b), big = std::max(a, b);
-    std::vector<int64_t> factors;
-    for (int64_t f = 1; f <= small; ++f)
-        if (small % f == 0) factors.push_back(f);
     s.line(say(s, s_factors, {{"{small}", str(small)}, {"{list}", listing(factors)}}));
     const std::string first_parts = s.calc(str(a) + "/" + str(g), x), second_parts = s.calc(str(b) + "/" + str(g), y);
     s.line(say(s, s_largest, {{"{big}", str(big)}, {"{g}", str(g)}, {"{p1}", first_parts}, {"{p2}", second_parts}}));
@@ -561,51 +851,51 @@ inline bool gcd_story(Story& s, std::string& answer, Place& place) {
     if (context == 0) {
         const std::array<int64_t, 3> values = {g, x, y};
         answer = str(values[size_t(s.out.asked)]);
-        s.line(s.out.asked == 0 ? "So " + name + " can make at most " + answer + " bags."
-                                : "So each bag has " + answer + " " + (s.out.asked == 1 ? first : second) + ".");
+        Fills ending = sizes;
+        ending.push_back({"{x}", answer});
+        s.line(say(s, s.out.asked == 0 ? s_bags : s_bag_each, ending));
     } else if (s.out.asked == 0) {
         answer = str(g);
-        s.line("So each piece is " + answer + " centimeters long.");
+        s.line(say(s, s_piece, sizes));
     } else {
         answer = str(x + y);
-        s.line("In all there are " + s.calc(str(x) + "+" + str(y), x + y) + " pieces.");
+        s.line(say(s, s_pieces, {{"{p1}", s.calc(str(x) + "+" + str(y), x + y)}}));
     }
     return true;
 }
 
 // How many ways n things go into equal rows (context 0) or teams (1),
 // with at least m rows and at least m in each (m is 2 or 3).
-inline bool factors_story(Story& s, std::string& answer, Place& place) {
+inline bool factors_story(Story& s, std::string& answer, Place& place, Fills&) {
     const int context = s.out.context = int(s.rng.below(2));
     const int64_t n = s.draw(12, 200), m = s.draw(2, 3);
     std::vector<std::pair<int64_t, int64_t>> products;  // d * e = n with m <= d <= e
     for (int64_t d = m; d * d <= n; ++d)
         if (n % d == 0) products.push_back({d, n / d});
-    if (products.size() < 2) return false;  // one way, or none, is not much of a question
+    // One way, or none, is not much of a question; more than 6 is a long list.
+    if (products.size() < 2 || products.size() > 6) return false;
     const bool square = products.back().first == products.back().second;
     const int64_t pairs = int64_t(products.size()), count = 2 * pairs - (square ? 1 : 0);
     s.out.inputs = {n, m};
     s.sentence(context == 0 ? factor_rows : factor_teams, {{"{n}", str(n)}, {"{m}", str(m)}});
     const std::string groups = context == 0 ? "rows" : "teams";
-    s.question = say(s, context == 0 ? q_rows : q_teams, {});
-    s.line((context == 0 ? "The number of rows times the number of chairs in each row is "
-                         : "The number of teams times the number on each team is ") +
-           str(n) + ", and both are at least " + str(m) + ".");
-    std::vector<std::string> written;
-    for (const auto& [d, e] : products) written.push_back(s.calc(str(d) + "*" + str(e), n));
-    std::string list;
-    for (size_t i = 0; i < written.size(); ++i)
-        list += (i == 0 ? "" : i + 1 == written.size() ? " and " : ", ") + written[i];
-    s.line("The ways to write " + str(n) + " as such a product are " + list + ".");
     const auto [d, e] = products.front();
-    const std::string example = str(d) + " " + groups + " of " + str(e) + ", or " + str(e) + " " + groups + " of " + str(d);
     const int64_t last = products.back().first;
-    s.line("Each product gives two choices (" + example + ")" +
-           (square ? ", except " + str(last) + "*" + str(last) + ", which gives one: " +
-                         s.calc(str(pairs) + "*2-1", count)
-                   : ": " + s.calc(str(pairs) + "*2", count)) +
-           ".");
-    s.line("So there are " + str(count) + " possible numbers of " + groups + ".");
+    Fills sizes = {{"{groups}", groups}, {"{each}", context == 0 ? "chairs in each row" : "people on each team"},
+                   {"{n}", str(n)}, {"{m}", str(m)}, {"{count}", str(count)},
+                   {"{example}", str(d) + " " + groups + " of " + str(e) + ", or " + str(e) + " " + groups + " of " + str(d)},
+                   {"{square}", str(last) + "*" + str(last)}};
+    s.question = say(s, context == 0 ? q_rows : q_teams, sizes);
+    s.line(say(s, s_factor_intro, sizes));
+    std::vector<std::string> written;
+    for (const auto& [low, high] : products) written.push_back(s.calc(str(low) + "*" + str(high), n));
+    Fills listed = sizes;
+    listed.push_back({"{list}", listing(written)});
+    s.line(say(s, s_factor_list, listed));
+    Fills counted = sizes;
+    counted.push_back({"{p1}", square ? s.calc(str(pairs) + "*2-1", count) : s.calc(str(pairs) + "*2", count)});
+    s.line(say(s, square ? s_factor_count_square : s_factor_count, counted));
+    s.line(say(s, s_factor_answer, sizes));
     answer = str(count);
     place = Place::anywhere;
     return true;
@@ -614,10 +904,11 @@ inline bool factors_story(Story& s, std::string& answer, Place& place) {
 // Counting multiples: tickets 1 to n that are multiples of k (context 0);
 // every k-th of n people (1); every a-th and every b-th of n people, both
 // (2); multiples of k from a to b (3); even or odd lockers from a to b (4).
-inline bool multiples_story(Story& s, std::string& answer, Place& place) {
+inline bool multiples_story(Story& s, std::string& answer, Place& place, Fills& words) {
     static const std::array<const char*, 5> gifts = {"muffin", "balloon", "pen", "badge", "cookie"};
     const int context = s.out.context = int(s.rng.below(5));
     const std::string gift = gifts[s.rng.below(gifts.size())];
+    words = {{"{gift}", gift}};
     place = Place::anywhere;
     if (context <= 1) {
         const int64_t k = context == 0 ? s.draw(3, 19) : s.draw(3, 20), n = s.draw(30, context == 0 ? 500 : 400);
@@ -626,16 +917,12 @@ inline bool multiples_story(Story& s, std::string& answer, Place& place) {
         s.out.inputs = {n, k};
         s.sentence(context == 0 ? mult_tickets : mult_every,
                    {{"{n}", str(n)}, {"{k}", str(k)}, {"{kth}", ordinal(k)}, {"{gift}", gift}});
-        if (context == 0) {
-            s.question = say(s, q_tickets, {});
-            s.line("The winning numbers are the multiples of " + str(k) + " up to " + str(n) + ".");
-            s.line(fits(s, k, n) + ", so " + str(q) + " tickets win.");
-        } else {
-            s.question = say(s, q_every, {{"{gift}", gift}});
-            s.line("The people who get a " + gift + " are those whose place in line is a multiple of " + str(k) +
-                   ", up to " + str(n) + ".");
-            s.line(fits(s, k, n) + ", so " + str(q) + " people get a " + gift + ".");
-        }
+        Fills sizes = {{"{n}", str(n)}, {"{k}", str(k)}, {"{k2}", str(2 * k)}, {"{k3}", str(3 * k)},
+                       {"{gift}", gift}, {"{q}", str(q)}};
+        s.question = say(s, context == 0 ? q_tickets : q_every, sizes);
+        s.line(say(s, context == 0 ? s_tickets_intro : s_every_intro, sizes));
+        sizes.insert(sizes.begin(), {"{fits}", fits(s, k, n)});
+        s.line(say(s, context == 0 ? s_tickets : s_every, sizes));
         answer = str(q);
         return true;
     }
@@ -646,11 +933,13 @@ inline bool multiples_story(Story& s, std::string& answer, Place& place) {
         if (n / both < 2 || n % both == 0) return false;
         s.out.inputs = {n, a, b};
         s.sentence(mult_both, {{"{n}", str(n)}, {"{ath}", ordinal(a)}, {"{bth}", ordinal(b)}});
-        s.question = say(s, q_both, {});
-        s.line("A person gets both when their place in the count is a multiple of both " + str(a) + " and " + str(b) + ".");
+        Fills sizes = {{"{a}", str(a)}, {"{b}", str(b)}, {"{lcmth}", ordinal(both)}, {"{q}", str(n / both)}};
+        s.question = say(s, q_both, sizes);
+        s.line(say(s, s_both_intro, sizes));
         common_multiple(s, a, b);
-        s.line("So every " + ordinal(both) + " person gets both.");
-        s.line(fits(s, both, n) + ", so " + str(n / both) + " people get both.");
+        s.line(say(s, s_both_every, sizes));
+        sizes.insert(sizes.begin(), {"{fits}", fits(s, both, n)});
+        s.line(say(s, s_both, sizes));
         answer = str(n / both);
         return true;
     }
@@ -662,13 +951,19 @@ inline bool multiples_story(Story& s, std::string& answer, Place& place) {
         if (count < 2) return false;
         s.out.inputs = {a, b, k};
         s.sentence(mult_range, {{"{a}", str(a)}, {"{b}", str(b)}, {"{k}", str(k)}});
-        s.question = say(s, q_range, {{"{a}", str(a)}, {"{b}", str(b)}, {"{k}", str(k)}});
-        s.line("The first multiple of " + str(k) + " from " + str(a) + " on is " + s.calc(str(k) + "*" + str(i), k * i) +
-               ", since " + s.calc(str(k) + "*" + str(i - 1), k * (i - 1)) + " is less than " + str(a) + ".");
-        s.line("The last one up to " + str(b) + " is " + s.calc(str(k) + "*" + str(j), k * j) + ", since " +
-               s.calc(str(k) + "*" + str(j + 1), k * (j + 1)) + " is more than " + str(b) + ".");
-        s.line("So the multiples are " + str(k) + " times " + str(i) + " up to " + str(k) + " times " + str(j) + ": " +
-               s.calc(str(j) + "-" + str(i) + "+1", count) + " numbers.");
+        const Fills sizes = {{"{a}", str(a)}, {"{b}", str(b)}, {"{k}", str(k)}, {"{i}", str(i)}, {"{j}", str(j)}};
+        s.question = say(s, q_range, sizes);
+        const std::string first = s.calc(str(k) + "*" + str(i), k * i), before = s.calc(str(k) + "*" + str(i - 1), k * (i - 1));
+        Fills starts = sizes;
+        starts.insert(starts.end(), {{"{p1}", first}, {"{p2}", before}});
+        s.line(say(s, s_range_first, starts));
+        const std::string last = s.calc(str(k) + "*" + str(j), k * j), after = s.calc(str(k) + "*" + str(j + 1), k * (j + 1));
+        Fills ends = sizes;
+        ends.insert(ends.end(), {{"{p1}", last}, {"{p2}", after}});
+        s.line(say(s, s_range_last, ends));
+        Fills counted = sizes;
+        counted.push_back({"{p1}", s.calc(str(j) + "-" + str(i) + "+1", count)});
+        s.line(say(s, s_range_count, counted));
         answer = str(count);
         return true;
     }
@@ -678,12 +973,14 @@ inline bool multiples_story(Story& s, std::string& answer, Place& place) {
     s.out.inputs = {a, b, odd};
     const std::string parity = odd ? "odd" : "even";
     s.sentence(parity_lockers, {{"{a}", str(a)}, {"{b}", str(b)}, {"{parity}", parity}});
-    s.question = say(s, q_lockers, {{"{parity}", parity}});
-    s.line("The first " + parity + " number from " + str(a) + " on is " + str(first) + ", and the last one up to " +
-           str(b) + " is " + str(last) + ".");
-    s.line("Going from " + str(first) + " to " + str(last) + " in steps of 2: " +
-           s.calc("(" + str(last) + "-" + str(first) + ")/2+1", count) + " lockers.");
-    s.line("So there are " + str(count) + " " + parity + "-numbered lockers.");
+    Fills sizes = {{"{a}", str(a)}, {"{b}", str(b)}, {"{parity}", parity}, {"{first}", str(first)},
+                   {"{last}", str(last)}, {"{count}", str(count)}};
+    s.question = say(s, q_lockers, sizes);
+    s.line(say(s, s_locker_ends, sizes));
+    Fills counted = sizes;
+    counted.push_back({"{p1}", s.calc("(" + str(last) + "-" + str(first) + ")/2+1", count)});
+    s.line(say(s, s_locker_count, counted));
+    s.line(say(s, s_lockers, sizes));
     answer = str(count);
     return true;
 }
@@ -691,7 +988,7 @@ inline bool multiples_story(Story& s, std::string& answer, Place& place) {
 // The digits used to number n pages (context 0), the pages that d digits
 // number (1), or a two-digit number from the sum and the difference of its
 // digits (2).
-inline bool digits_story(Story& s, std::string& answer, Place& place) {
+inline bool digits_story(Story& s, std::string& answer, Place& place, Fills&) {
     const int context = s.out.context = int(s.rng.below(3));
     place = Place::anywhere;
     if (context <= 1) {
@@ -703,35 +1000,40 @@ inline bool digits_story(Story& s, std::string& answer, Place& place) {
         if (context == 0) {
             s.sentence(digit_pages, {{"{n}", str(n)}});
             s.question = say(s, q_digits, {});
-            s.line("Pages 1 to 9 have one digit each: 9 digits.");
-            if (!long_book) {
-                s.line("Pages 10 to " + str(n) + " have two digits each: " + s.calc(str(n) + "-9", short_pages) +
-                       " pages, so " + s.calc(str(short_pages) + "*2", 2 * short_pages) + " digits.");
-                s.line("In all that is " + s.calc("9+" + str(2 * short_pages), digits) + " digits.");
-            } else {
-                s.line("Pages 10 to 99 have two digits each: " + s.calc("99-9", 90) + " pages, so " +
-                       s.calc("90*2", 180) + " digits.");
-                s.line("Pages 100 to " + str(n) + " have three digits each: " + s.calc(str(n) + "-99", long_pages) +
-                       " pages, so " + s.calc(str(long_pages) + "*3", 3 * long_pages) + " digits.");
-                s.line("In all that is " + s.calc("9+180+" + str(3 * long_pages), digits) + " digits.");
+            s.line(say(s, s_pages_one, {}));
+            const int64_t two_end = long_book ? 99 : n;
+            const std::string two_pages = s.calc(str(two_end) + "-9", short_pages);
+            const std::string two_digits = s.calc(str(short_pages) + "*2", 2 * short_pages);
+            s.line(say(s, s_pages_two, {{"{n}", str(two_end)}, {"{p1}", two_pages}, {"{p2}", two_digits}}));
+            std::string sum = "9+" + str(2 * short_pages);
+            if (long_book) {
+                const std::string three_pages = s.calc(str(n) + "-99", long_pages);
+                const std::string three_digits = s.calc(str(long_pages) + "*3", 3 * long_pages);
+                s.line(say(s, s_pages_three, {{"{n}", str(n)}, {"{p1}", three_pages}, {"{p2}", three_digits}}));
+                sum += "+" + str(3 * long_pages);
             }
+            s.line(say(s, s_pages_total, {{"{p1}", s.calc(sum, digits)}}));
             answer = str(digits);
             return true;
         }
         s.sentence(digit_total, {{"{d}", str(digits)}});
         s.question = say(s, q_pages, {});
+        int64_t before = 9, rest = 2 * short_pages, size = 2, counted = short_pages, start = 9;
         if (!long_book) {
-            s.line("Pages 1 to 9 use 9 digits.");
-            s.line("The other " + s.calc(str(digits) + "-9", 2 * short_pages) + " digits are on two-digit pages: " +
-                   s.calc(str(2 * short_pages) + "/2", short_pages) + " pages.");
-            s.line("So there are " + s.calc("9+" + str(short_pages), n) + " pages.");
+            s.line(say(s, s_total_one, {}));
         } else {
-            s.line("Pages 1 to 9 use 9 digits, and pages 10 to 99 use " + s.calc("90*2", 180) + " digits: " +
-                   s.calc("9+180", 189) + " digits.");
-            s.line("The other " + s.calc(str(digits) + "-189", 3 * long_pages) + " digits are on three-digit pages: " +
-                   s.calc(str(3 * long_pages) + "/3", long_pages) + " pages.");
-            s.line("So there are " + s.calc("99+" + str(long_pages), n) + " pages.");
+            const std::string two = s.calc("90*2", 180), so_far = s.calc("9+180", 189);
+            s.line(say(s, s_total_two, {{"{p1}", two}, {"{p2}", so_far}}));
+            before = 189;
+            rest = 3 * long_pages;
+            size = 3;
+            counted = long_pages;
+            start = 99;
         }
+        const std::string other = s.calc(str(digits) + "-" + str(before), rest);
+        const std::string pages_of = s.calc(str(rest) + "/" + str(size), counted);
+        s.line(say(s, s_total_rest, {{"{p1}", other}, {"{p2}", pages_of}, {"{size}", size == 2 ? "two" : "three"}}));
+        s.line(say(s, s_total_pages, {{"{p1}", s.calc(str(start) + "+" + str(counted), n)}}));
         answer = str(n);
         return true;
     }
@@ -745,18 +1047,19 @@ inline bool digits_story(Story& s, std::string& answer, Place& place) {
                                              : "the ones digit is " + str(gap) + " more than the tens digit";
     s.sentence(digit_puzzle, {{"{s}", str(sum)}, {"{relation}", relation}});
     s.question = say(s, q_number, {});
-    s.line("Adding the sum and the difference gives twice the larger digit: " +
-           s.calc(str(sum) + "+" + str(gap), sum + gap) + ", and " + s.calc(str(sum + gap) + "/2", larger) + ".");
-    s.line("The smaller digit is " + s.calc(str(sum) + "-" + str(larger), smaller) + ".");
+    const std::string doubled = s.calc(str(sum) + "+" + str(gap), sum + gap);
+    const std::string halved = s.calc(str(sum + gap) + "/2", larger);
+    s.line(say(s, s_puzzle_larger, {{"{p1}", doubled}, {"{p2}", halved}}));
+    s.line(say(s, s_puzzle_smaller, {{"{p1}", s.calc(str(sum) + "-" + str(larger), smaller)}}));
     answer = str(10 * tens + ones);
-    s.line("The tens digit is " + str(tens) + " and the ones digit is " + str(ones) + ", so the number is " + answer + ".");
+    s.line(say(s, s_puzzle_number, {{"{tens}", str(tens)}, {"{ones}", str(ones)}, {"{number}", answer}}));
     return true;
 }
 
 // A repeating pattern: r of the first color then b of the second, n beads
 // (context 0); or w work days then r days off, the first n days (1).
 // Asked: the first (0) or the second (1).
-inline bool pattern_story(Story& s, std::string& answer, Place& place) {
+inline bool pattern_story(Story& s, std::string& answer, Place& place, Fills&) {
     static const std::array<std::array<const char*, 2>, 4> colors = {
         {{"red", "blue"}, {"white", "green"}, {"yellow", "black"}, {"pink", "purple"}}};
     const int context = s.out.context = int(s.rng.below(2));
@@ -770,38 +1073,41 @@ inline bool pattern_story(Story& s, std::string& answer, Place& place) {
     s.out.inputs = {r, b, n};
     const std::string first = context == 0 ? std::string(color[0]) + " beads" : "work days";
     const std::string second = context == 0 ? std::string(color[1]) + " beads" : "days off";
-    const std::string unit = context == 0 ? "beads" : "days";
     if (context == 0)
         s.sentence(pattern_beads, {{"{n}", str(n)}, {"{r}", str(r)}, {"{b}", str(b)}, {"{first}", color[0]},
                                    {"{second}", color[1]}});
     else
         s.sentence(pattern_shifts, {{"{w}", str(r)}, {"{r}", str(b)}});
-    s.question = say(s, context == 0 ? q_beads : q_days,
-                     {{"{asked}", s.out.asked == 0 ? first : second}, {"{n}", str(n)}});
-    s.line("One round of the pattern is " + s.calc(str(r) + "+" + str(b), cycle) + " " + unit + ".");
-    s.line(fits(s, cycle, n) + ", so there are " + str(rounds) + " full rounds and " +
-           s.calc(str(n) + "-" + str(cycle * rounds), extra) + " " + unit + " more.");
     const int64_t own = s.out.asked == 0 ? r : b;
-    const std::string asked = s.out.asked == 0 ? first : second;
-    s.line("The full rounds have " + s.calc(str(rounds) + "*" + str(own), rounds * own) + " " + asked + ".");
+    const Fills sizes = {{"{first}", first}, {"{second}", second}, {"{unit}", context == 0 ? "beads" : "days"},
+                         {"{asked}", s.out.asked == 0 ? first : second}, {"{n}", str(n)}, {"{r}", str(r)},
+                         {"{rounds}", str(rounds)}, {"{extra}", str(extra)}};
+    const auto with = [&](Fills more) {
+        more.insert(more.end(), sizes.begin(), sizes.end());
+        return more;
+    };
+    s.question = say(s, context == 0 ? q_beads : q_days, sizes);
+    s.line(say(s, s_round, with({{"{p1}", s.calc(str(r) + "+" + str(b), cycle)}})));
+    const std::string whole = fits(s, cycle, n), left = s.calc(str(n) + "-" + str(cycle * rounds), extra);
+    s.line(say(s, s_rounds, with({{"{fits}", whole}, {"{p1}", left}})));
+    s.line(say(s, s_round_own, with({{"{p1}", s.calc(str(rounds) + "*" + str(own), rounds * own)}})));
     int64_t total = rounds * own;
     if (s.out.asked == 0) {
         const int64_t start = std::min(extra, r);
         total += start;
-        s.line("The " + str(extra) + " " + unit + " more start the pattern again, so " +
-               (extra <= r ? "all of them" : "the first " + str(r)) + " are " + first + ": " +
-               s.calc(str(rounds * own) + "+" + str(start), total) + ".");
+        const std::string added = s.calc(str(rounds * own) + "+" + str(start), total);
+        s.line(say(s, extra <= r ? s_extra_all : s_extra_first, with({{"{p1}", added}})));
     } else if (extra <= r) {
-        s.line("The " + str(extra) + " " + unit + " more start the pattern again, so none of them are " + second + ".");
+        s.line(say(s, s_extra_none, sizes));
     } else {
         const int64_t end = extra - r;
         total += end;
-        s.line("The " + str(extra) + " " + unit + " more start the pattern again: the first " + str(r) + " are " + first +
-               " and " + s.calc(str(extra) + "-" + str(r), end) + " are " + second + ", so " +
-               s.calc(str(rounds * own) + "+" + str(end), total) + ".");
+        const std::string rest = s.calc(str(extra) + "-" + str(r), end);
+        const std::string added = s.calc(str(rounds * own) + "+" + str(end), total);
+        s.line(say(s, s_extra_second, with({{"{p1}", rest}, {"{p2}", added}})));
     }
     answer = str(total);
-    s.line("So there are " + answer + " " + asked + ".");
+    s.line(say(s, s_pattern_total, with({{"{total}", answer}})));
     place = Place::anywhere;
     return true;
 }
@@ -811,22 +1117,22 @@ inline bool candidate(Choices& rng, const MathOptions& options, NumberTheoryProb
     Story s(rng, options, out, patterns.data());
     std::string answer;
     Place place = Place::anywhere;
+    Fills words;  // the story's words its fillers may use
     bool made = false;
     switch (out.kind) {
-        case NumberTheoryProblem::remainder: made = remainder_story(s, answer, place); break;
-        case NumberTheoryProblem::lcm: made = lcm_story(s, answer, place); break;
-        case NumberTheoryProblem::gcd: made = gcd_story(s, answer, place); break;
-        case NumberTheoryProblem::factors: made = factors_story(s, answer, place); break;
-        case NumberTheoryProblem::multiples: made = multiples_story(s, answer, place); break;
-        case NumberTheoryProblem::digits: made = digits_story(s, answer, place); break;
-        case NumberTheoryProblem::pattern: made = pattern_story(s, answer, place); break;
+        case NumberTheoryProblem::remainder: made = remainder_story(s, answer, place, words); break;
+        case NumberTheoryProblem::lcm: made = lcm_story(s, answer, place, words); break;
+        case NumberTheoryProblem::gcd: made = gcd_story(s, answer, place, words); break;
+        case NumberTheoryProblem::factors: made = factors_story(s, answer, place, words); break;
+        case NumberTheoryProblem::multiples: made = multiples_story(s, answer, place, words); break;
+        case NumberTheoryProblem::digits: made = digits_story(s, answer, place, words); break;
+        case NumberTheoryProblem::pattern: made = pattern_story(s, answer, place, words); break;
         case NumberTheoryProblem::kind_count: break;
     }
     if (!made) return false;
-    // This topic's own fillers, in one problem of two: gen-word's shared
-    // ones ("The office door is numbered 14", "route 9") would read as part
-    // of a story about numbered tickets, lockers or multiples.
-    math_detail::add_distractor(s, answer, place, fillers, 2);
+    // The setting's own fillers, in one problem of two.
+    const auto& bank = fillers[size_t(setting_of(out.kind, out.context))];
+    math_detail::add_distractor(s, answer, place, {bank.data(), 6}, {bank.data() + 6, 3}, 2, words);
     math_detail::finish(s, answer, "number-theory");
     return true;
 }

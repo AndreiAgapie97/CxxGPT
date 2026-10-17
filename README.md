@@ -595,9 +595,9 @@ On the generators' own solutions (300 problems per topic,
 word problems and equations pass, and 299 of 300 fractions (one with more
 combinations than are followed). Without their `<<...>>` notes (as `--notes
 off` writes them, and as rp1 writes) they pass as often. Number theory
-(80 problems per split) gets three versions of 80 of 80, but only 10 (train)
-and 6 (test) of its gold solutions pass: most write a number no calculation
-makes (see
+(80 problems per split) gets three versions of 80 of 80, but only 6 of its
+gold solutions pass in each split: most write a number no calculation makes
+(see
 "Generated math problems: number theory").
 
 On rp1 (2026-10-17, `runs/rp1.night1.ckpt`, 100 new problems per topic, 8
@@ -869,30 +869,64 @@ the generator and works every story out by brute force: it fills boxes one
 at a time, tries every time until both buses come round, every common
 divisor, every number of rows, every ticket, every page, every two-digit
 number, and lays the beads down one by one. calc.h checks every note.
+Lists stay short: counting up to a common multiple stops at 8 numbers, a
+factor list at 12, a list of factorings at 6 (the longest in 300,000
+problems: "The multiples of 9 are 9, 18, 27, 36, 45, 54, 63, 72.", the 12
+factors of 150, the 6 ways to write 168).
 
 Wordings, so that the text is less of a template:
 
 - the story: 20 sentence families of six wordings, 120 patterns, 40 held
   out for the test split;
-- the question and the main solution lines (the two products, counting
-  up, the factors, the largest common factor): 37 phrases of three
-  wordings each, two for train and one held out ("How many trays can Leo
-  fill completely?", "How many full trays can Leo make?"; "... is more
-  than 50", "..., while ... is already more than 50"). The other solution
-  lines have one wording.
-- fillers (irrelevant sentences): this topic has its own 24, 12 per split,
-  about the story's people ("Maya is 12 years old.", "Leo has a dog named
-  Biscuit."), half of them with a number the question does not need, and
-  only half the problems get one. gen-word's shared fillers are not used
-  here: they name numbered things ("The office door is numbered 14", "route
-  9") that would read as part of a story about numbered tickets or
-  lockers, and every equations or fractions problem has one, so each of
-  them repeats in about 8% of problems; here no filler is in more than 4.4%.
+- the question and every solution line: 97 phrases of three wordings each,
+  two for train and one held out, with the same calculator notes ("How
+  many trays can Leo fill completely?", "How many full trays can Leo
+  make?"; "... is more than 50", "..., while ... is already more than 50",
+  "..., but ... would be more than 50"; "Counting up by 12", "The
+  multiples of 12 are", "Listing the multiples of 12");
+- fillers (irrelevant sentences): each of the 19 settings has its own 9
+  (6 train, 3 test) that fit its story, as in GSM8K: a price nobody asks
+  for ("Each empty carton costs $4 at the store."), how long something
+  takes ("The ride into town takes 12 minutes."), a number that looks
+  usable ("Each bus has 20 seats.") or none ("The station has a small
+  cafe."). None changes what is asked (no limit on the number of boxes, no
+  extra things to pack). Half the problems get one. In 300,000 problems
+  the 114 train fillers each appear in at most 1.2% of problems.
+  gen-word's shared fillers are not used here: they name numbered things
+  ("The office door is numbered 14", "route 9") that would read as part
+  of a story about numbered tickets or lockers, and every equations or
+  fractions problem has one of 12, so each repeats in about 8% of them.
+  Changing those would change the equations, fractions and gen-word
+  output, and their recipes: the owner's call.
 
-The solutions are still written to a small set of plans (one per kind and
-question), and each story is one or two sentences around one idea, where
-GSM8K usually chains several: a step towards less templated data, not the
-end of it.
+The solutions still follow one plan per kind and question (the same notes
+in the same order), and each story is one or two sentences around one
+idea, where GSM8K usually chains several: a step towards less templated
+data, not the end of it.
+
+How the quotient is found is open (the owner decides). In `7*28 = 196 and
+7*29 = 203 is more than 200`, the check is written but the 28 is not: the
+division happens in the head, and calc.h cannot help, since 200/7 has no
+exact decimal. The options:
+
+1. An estimate step in the solution, as in long division: `7*20 =
+   <<7*20=140>>140, 200-140 = <<200-140=60>>60 left; 7*8 = <<7*8=56>>56,
+   60-56 = <<60-56=4>>4 left, less than 7, so 20+8 = <<20+8=28>>28.` Only
+   the generators change; every note is plain GSM8K arithmetic; it teaches
+   the search (tens first, then ones). Longer solutions (about twice the
+   notes), and the 20 and 8 are still chosen by the writer, though they
+   are easy choices.
+2. A rounded division note, `200/7 = <<200/7=28.57>>28.57`, so about 28. GSM8K
+   writes such notes, but calc.h refuses them (it is exact), and so do
+   self-train's checks unless the rounding is right; it would need a rule
+   for rounding in the calculator.
+3. A whole-number division in calc.h, such as `<<200//7=28>>` or a
+   remainder form `<<200/7=28 r 4>>`. The tool finds the quotient, and the
+   re-draw check could follow it once its formulas know whole division
+   (a change there too). But GSM8K
+   never writes it, so the model would learn a notation only our data and
+   our calculator use, and every eval with `--tools calc-notes` would need
+   it too.
 
 In 1M problems: multiples 110k different stories, remainders 26k, cycles
 25k, common divisors 7.9k, patterns 6.5k, digits 2.0k and factors only
@@ -903,8 +937,8 @@ No generated question shares a 13-word run with GSM8K test or dev. Small
 stories land on the numbers and answer of some of GSM8K's questions by
 chance (20 campers in tents of 6 need 4 tents, and a GSM8K question with
 the numbers 6 and 20 has the answer 4; without `--exclude`, 25 GSM8K test
-and dev questions in 839 of 300,000 problems), so use `--exclude`: of
-300,000 problems it draws 884 again, after which none of GSM8K test or dev
+and dev questions in 845 of 300,000 problems), so use `--exclude`: of
+300,000 problems it draws 879 again, after which none of GSM8K test or dev
 shares a 13-word run, or its numbers and answer, with the output (checked
 again in Python, with the filler taken out). Not in any training mix: the
 owner decides.
@@ -913,8 +947,11 @@ A hand check of 30 problems (seed 2026, train) and 15 (seed 77, test): all
 45 answers and solutions right; one train wording asked "How many trays
 does Leo need?" after a sentence that named nobody, in 3 of the 30. That
 wording now names the person, and a test checks that a name in the
-question is in the story. After the new wordings and fillers, 22 more
-(seed 4242, train, and 4243, test): all right.
+question is in the story. After the first new wordings and fillers, 22
+more (seed 4242, train, and 4243, test): all right. After every solution
+line got three wordings and each setting its own fillers, 24 more (seed
+515, train, and 516, test): all right; one pair of wordings said "That
+leaves ..." twice in a row, now reworded.
 
 `--recipes FILE` works as for the other topics, and self-train's re-draw
 check makes three versions of almost every problem. But most of these

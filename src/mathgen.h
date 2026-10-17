@@ -49,6 +49,7 @@
 #include <memory>
 #include <numeric>
 #include <set>
+#include <span>
 #include <sstream>
 #include <string>
 #include <utility>
@@ -243,14 +244,17 @@ enum class Place {
 // One irrelevant sentence, as in gen-word, from the split's own distractor
 // wordings. Drawn even when disabled, so toggling distractors changes no
 // other draw. Its number is never one the story or solution uses. A topic
-// may bring its own 24 wordings (12 train, 12 test; they may name the
-// story's people) and leave the sentence out of one problem in
-// `none_one_in` (0: never).
+// may bring its own wordings (up to 12 per split; they may name the
+// story's people and use `words`, such as {things}) and leave the sentence
+// out of one problem in `none_one_in` (0: never).
 inline void add_distractor(Story& s, const std::string& answer, Place place,
-                           const std::array<const char*, 24>& wordings = word_detail::distractors,
-                           uint64_t none_one_in = 0) {
+                           std::span<const char* const> train = {word_detail::distractors.data(), 12},
+                           std::span<const char* const> test = {word_detail::distractors.data() + 12, 12},
+                           uint64_t none_one_in = 0, const Fills& words = {}) {
     MathRecord& out = s.out;
-    const int extra = int(s.rng.below(12)) + (s.options.test ? 12 : 0);
+    const std::span<const char* const> wordings = s.options.test ? test : train;
+    const size_t pick = s.rng.below(wordings.size());
+    const int extra = int(pick) + (s.options.test ? 12 : 0);
     // Every whole number in the story, the solution and the answer, down to an "x + 4".
     std::set<int64_t> used(out.inputs.begin(), out.inputs.end());
     std::string texts = answer;
@@ -269,7 +273,7 @@ inline void add_distractor(Story& s, const std::string& answer, Place place,
     if (place == Place::not_last && position == s.sentences.size()) position = 0;
     const bool none = none_one_in != 0 && s.rng.below(none_one_in) == 0;
     if (!s.options.distractors || none) return;
-    std::string text = s.fill(wordings[size_t(extra)], {});
+    std::string text = s.fill(wordings[pick], words);
     out.distractor = extra;
     if (text.find("{a}") != std::string::npos) out.distractor_number = irrelevant;
     word_detail::replace(text, "{a}", str(irrelevant));

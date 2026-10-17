@@ -188,7 +188,7 @@ inline void test_mathgen_number_theory() {
         }
     }
     // Most story numbers moved by one change the answer; in a few problems
-    // (8 of 800 with this seed) no such change does.
+    // (6 of 800 with this seed) no such change does.
     EXPECT(caught * 3 >= changed * 2 && unchanged * 50 <= 800,
            "the checker caught only %d of %d story numbers moved by one; none in %d of 800 problems", caught, changed,
            unchanged);
