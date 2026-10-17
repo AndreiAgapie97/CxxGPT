@@ -537,6 +537,9 @@ inline void test_self_train_strict() {
     const Problem coat = self_train_problem("A coat costs $80 and is 25% off. What does it cost now?", "60");
     const Problem pens = self_train_problem("A shop sells 12 pens a day for 5 days. How many pens?", "60");
     const Problem eggs = self_train_problem("A box holds 60 eggs and 12 break. How many are left?", "48");
+    const Problem gum = self_train_problem("A pack of gum costs 14 cents. How many dollars do 3 packs cost?", "0.42");
+    const Problem rope = self_train_problem("A rope piece is 14 centimeters long. How many meters are 3 pieces?", "0.42");
+    const Problem quarter = self_train_problem("Quarter of the 80 balls are red. How many are red?", "20");
     auto check = [](bool self_train::Options::*flag, const char* name, std::initializer_list<Case> cases) {
         self_train::Options off, on;
         on.*flag = true;
@@ -559,7 +562,13 @@ inline void test_self_train_strict() {
            {&apples, "Going back, 4 - 12 = <<4-12=-8>>-8, so 8 are left.\n#### 8\n", Verdict::kept},
            // Only a percentage gives its hundredth: 0.6 is not given by 60 eggs, 0.25 is by 25%.
            {&eggs, "60 - 12 = <<60-12=48>>48 eggs, 0.6 of a box.\n#### 48\n", Verdict::outside},
-           {&coat, "It is 80 * 0.25 = <<80*0.25=20>>20 off, so 80 - 20 = <<80-20=60>>60.\n#### 60\n", Verdict::kept}});
+           {&coat, "It is 80 * 0.25 = <<80*0.25=20>>20 off, so 80 - 20 = <<80-20=60>>60.\n#### 60\n", Verdict::kept},
+           // Cents give their hundredth, centimeters do not; a quarter in any case; a spaced sign.
+           {&gum, "14 cents is 0.14 dollars, so 3 * 0.14 = <<3*0.14=0.42>>0.42 dollars.\n#### 0.42\n", Verdict::kept},
+           {&rope, "14 centimeters is 0.14 meters, so 3 * 0.14 = <<3*0.14=0.42>>0.42 meters.\n#### 0.42\n",
+            Verdict::outside},
+           {&quarter, "80 * .25 = <<80*.25=20>>20, so 20 are red.\n#### 20\n", Verdict::kept},
+           {&apples, "Going back, 4 - 12 = <<4-12=- 8>>- 8, so 8 are left.\n#### 8\n", Verdict::kept}});
     check(&self_train::Options::check_dead, "dead calculations",
           {{&bottles, "6 + 24 = <<6+24=30>>30 and 6 * 24 = <<6*24=144>>144 bottles.\n#### 144\n", Verdict::dead},
            {&bottles, "6 * 24 = <<6*24=144>>144 bottles.\n#### 144\n", Verdict::kept},

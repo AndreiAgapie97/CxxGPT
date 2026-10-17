@@ -57,6 +57,7 @@
 #pragma once
 
 #include <algorithm>
+#include <cctype>
 #include <optional>
 #include <set>
 #include <string>
@@ -227,7 +228,11 @@ inline std::vector<std::string> unearned_numbers(const Problem& p, const std::st
         size_t k = n.end;
         while (k < question.size() && question[k] == ' ') ++k;
         const std::string_view rest = std::string_view(question).substr(k);
-        if (rest.starts_with('%') || rest.starts_with("percent") || rest.starts_with("cent"))
+        // "cent" and "cents" as whole words: not "25 centimeters".
+        auto word = [&](std::string_view unit) {
+            return rest.starts_with(unit) && (rest.size() == unit.size() || !std::isalpha((unsigned char)rest[unit.size()]));
+        };
+        if (rest.starts_with('%') || rest.starts_with("percent") || word("cent") || word("cents"))
             if (const auto h = calc::times(n.value, calc::Rational{1, 100})) given.push_back(*h);
     }
     for (const int64_t c : {1, 2, 100}) given.push_back({c, 1});
@@ -235,12 +240,15 @@ inline std::vector<std::string> unearned_numbers(const Problem& p, const std::st
     // and a quarter as one, as a dollar's (".25").
     given.push_back({1, 2});
     given.push_back({1, 100});
-    if (question.find("quarter") != std::string::npos) given.push_back({1, 4});
+    std::string lower = question;
+    for (char& c : lower) c = char(std::tolower((unsigned char)c));
+    if (lower.find("quarter") != std::string::npos) given.push_back({1, 4});
     std::vector<std::string> out;
     const std::string w = clean(work);
     for (const auto& n : numbers_in(w)) {
         size_t k = n.at;
-        if (k > 0 && w[k - 1] == '-') --k;  // a negative result
+        while (k > 0 && w[k - 1] == ' ') --k;
+        if (k > 0 && w[k - 1] == '-') --k;  // a negative result ("=-9", "= - 9")
         while (k > 0 && w[k - 1] == ' ') --k;
         const bool result = k > 0 && w[k - 1] == '=';
         if (!result && !contains(given, n.value) && !is_constant(n.value)) out.push_back(n.written);
