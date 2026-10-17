@@ -189,6 +189,12 @@ Math problem-solving accuracy is the first evaluation focus.
   seed-repeat funnel an idea passes before it gets a laptop night.
   Decisions are made on a dev set held out of GSM8K train, never on the
   GSM8K test set, which gives headline numbers only.
+- `docs/plan-generator.md` (2026-10-17, a design, not built; the owner
+  decides): word problems from random dependency graphs, so the solution's
+  plan varies, not only its wording (backward problems, questions about
+  middle quantities, distractor quantities, plans held out by hash), after
+  iGSM (Physics of Language Models, Part 2.1); a second solver, the
+  re-draw check, the gates before any mix, a first version of about 3 days.
 - `src/wordgen.h` (`cxxgpt gen-word`): GSM8K-style word problems with exact
   answers and worked solutions (with or without calculator notes). Six
   story shapes (a running quantity, comparisons, totals over people,

@@ -894,6 +894,9 @@ contains saved moments.
   language-model training, and natural with our generator.
 - **Test:** the same compute with a fixed mix against the adaptive mix, judged
   on fixed held-out levels.
+- A generator whose plans vary, not only its wording (docs/plan-generator.md,
+  a design, not built) would give this idea more knobs: direction (forward
+  or backward), questions about middle quantities, distractor relations.
 
 ### E. Exact step grading
 
