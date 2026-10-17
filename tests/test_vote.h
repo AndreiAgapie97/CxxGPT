@@ -117,10 +117,17 @@ inline void test_score_tries() {
     s = score_tries({unfinished, answer("3"), answer("5"), answer("5")}, "3");
     EXPECT(!s.vote_ok && s.any_ok && s.distinct == 2 && s.shown == 2,
            "3, 5, 5 vs gold 3: vote %d any %d distinct %d shown %zu", s.vote_ok, s.any_ok, s.distinct, s.shown);
+    // Equal numbers written differently are one answer: "$57", "57.00" and
+    // "57 dollars" outvote 56 and 56, and against gold "57.00" too.
+    s = score_tries({answer("56"), answer("$57"), answer("57.00"), answer("56"), answer("57 dollars")}, "57.00");
+    EXPECT(s.vote_ok && s.any_ok && !s.first_ok && s.distinct == 2 && s.shown == 1,
+           "56, $57, 57.00, 56, 57 dollars vs gold 57.00: vote %d any %d first %d distinct %d shown %zu", s.vote_ok,
+           s.any_ok, s.first_ok, s.distinct, s.shown);
     // One try: all three scores equal the plain check, on every kind of text.
     const std::vector<std::pair<std::string, std::string>> single = {
         {answer("7"), "7"}, {answer("8"), "7"}, {unfinished, "7"}, {answer(""), ""},
         {unfinished, ""},   {"#### 7", "7"},    {answer("1,080"), "1080"},
+        {answer("$57.00"), "57"}, {answer("57"), "57.00"}, {answer("57 or 58"), "57"}, {answer("0.8"), "0.80"},
     };
     for (const auto& [text, gold] : single) {
         const bool plain = completion_done(text) && answer_matches(text, gold);

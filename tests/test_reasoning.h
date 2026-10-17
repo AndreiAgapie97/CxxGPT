@@ -348,6 +348,41 @@ inline void test_planted_mistakes() {
     std::printf("  %d wrong steps and corrections independently checked; exact byte/BPE/target masks checked\n", checked);
 }
 
+// Answers are compared as numbers (canonical_answer): what may surround the
+// number, equal numbers written differently, and what must not match.
+inline void test_answer_matches() {
+    auto line = [](const std::string& a) { return "work\n#### " + a + "\n"; };
+    const std::vector<std::pair<std::string, std::string>> same = {
+        {"57", "57"},           {"57.0", "57"},          {"57.00", "57"},       {"$57", "57"},
+        {"$ 57", "57"},         {"57 dollars", "57"},    {"57%", "57"},         {"$57.00 dollars.", "57"},
+        {"57.", "57"},          {"57 square feet", "57"}, {"1,080", "1080"},    {"0.8", "0.80"},
+        {"0.80", "0.8"},        {"-28.5", "-28.50"},     {"-$28.50", "-28.5"},  {"$-28.5", "-28.50"},
+        {"57", "57.00"},        {"0", "0.0"},            {"-0", "0"},           {"0.05", "0.050"},
+        {"698,201.57", "698201.57"}, {"123456789012345678901234567890", "123456789012345678901234567890.0"},
+        {"(1, 2)", "(1, 2)"},   {"x = 4", "x = 4"},      {"", ""},
+    };
+    for (const auto& [answer, gold] : same)
+        EXPECT(answer_matches(line(answer), gold), "'%s' must match gold '%s' (forms '%s', '%s')", answer.c_str(),
+               gold.c_str(), canonical_answer(answer).c_str(), canonical_answer(gold).c_str());
+    const std::vector<std::pair<std::string, std::string>> different = {
+        {"57 or 58", "57"}, {"5.7", "57"},     {"570", "57"},        {"3", "-3"},          {"-3", "3"},
+        {"57.5", "57"},     {"57.01", "57"},   {"fifty-seven", "57"}, {"", "57"},          {"0.5", "1/2"},
+        {"1/2", "0.5"},     {"50+7", "57"},    {"about 57", "57"},   {"057", "57"},        {".5", "0.5"},
+        {"57th", "57"},     {"57 dollars and 50 cents", "57"},       {"57 (rounded)", "57"},
+        {"$57 each, $114 total", "57"},       {"57..", "57"},       {"(1,2)", "(1, 2)"},  {"x = 5", "x = 4"},
+    };
+    for (const auto& [answer, gold] : different)
+        EXPECT(!answer_matches(line(answer), gold), "'%s' must not match gold '%s' (forms '%s', '%s')",
+               answer.c_str(), gold.c_str(), canonical_answer(answer).c_str(), canonical_answer(gold).c_str());
+    // The shortest forms themselves.
+    EXPECT(canonical_answer(" $1,080.50 dollars. ") == "1080.5" && canonical_answer("-0.000") == "0" &&
+               canonical_answer("0.80%") == "0.8" && canonical_answer("100") == "100",
+           "shortest form changed");
+    // Not one number: kept as written, trimmed and without grouping commas.
+    EXPECT(canonical_answer(" 57 or 1,080 ") == "57 or 1080" && canonical_answer("057") == "057",
+           "text that is not one number must stay as written");
+}
+
 inline void test_reasoning() {
     Rng mul_rng(69);
     for (int d=1; d<=5; ++d) for (int i=0; i<100; ++i) {
@@ -375,6 +410,7 @@ inline void test_reasoning() {
            "normalization accepted a wrong/missing answer");
     EXPECT(strip_digit_commas("1,234,567") == "1234567" && strip_digit_commas("(1, 2)") == "(1, 2)",
            "normalization changed non-grouping commas");
+    test_answer_matches();
     Rng rng(41);
     int checked = 0;
     for (const auto& task : reasoning_tasks())

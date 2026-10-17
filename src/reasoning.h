@@ -620,6 +620,62 @@ inline std::string strip_digit_commas(const std::string& s) {
     return o;
 }
 
+// The form answers are compared in. An answer that is one number, with only
+// these around it, becomes that number written the shortest way:
+//   - spaces at either end, and commas that group digits ("1,080");
+//   - a "$" before the number ("$57", "$ 57", "-$57", "$-57");
+//   - a "%" right after it ("57%");
+//   - words of letters after a space ("57 dollars", "57 square feet");
+//   - one "." at the very end ("57.").
+// The shortest way: no leading zeros ("0.5" keeps its 0), no trailing zeros
+// after the point, no point with nothing after it, and no "-0". So "57",
+// "57.0", "57.00", "$57" and "57 dollars." all become "57", and "0.80"
+// becomes "0.8". The number itself is a "-" or nothing, digits, and a "."
+// with digits after it or nothing; "057", ".5", "1/2" or "50+7" are not
+// numbers here.
+// Anything else stays as it was written, trimmed and without digit-grouping
+// commas, and only the same text matches it: "57 or 58" (a second number),
+// "about 57" (a word before), "fifty-seven".
+// Equal numbers have the same shortest form, so comparing the forms compares
+// the numbers exactly, digit by digit, with no rounding: "57.5" is not "57",
+// and a number of any length works.
+inline std::string canonical_answer(const std::string& answer) {
+    const std::string s = strip_digit_commas(trim(answer));
+    auto digit = [&](size_t i) { return i < s.size() && s[i] >= '0' && s[i] <= '9'; };
+    auto letter = [&](size_t i) { return (s[i] >= 'a' && s[i] <= 'z') || (s[i] >= 'A' && s[i] <= 'Z'); };
+    size_t i = 0;
+    bool minus = false;
+    if (i < s.size() && s[i] == '-') minus = true, ++i;
+    if (i < s.size() && s[i] == '$') {
+        ++i;
+        while (i < s.size() && s[i] == ' ') ++i;
+        if (!minus && i < s.size() && s[i] == '-') minus = true, ++i;
+    }
+    // The digits before the point: "0", or no leading zero.
+    const size_t whole_begin = i;
+    while (digit(i)) ++i;
+    std::string whole = s.substr(whole_begin, i - whole_begin);
+    if (whole.empty() || (whole.size() > 1 && whole[0] == '0')) return s;
+    // The digits after the point, without trailing zeros.
+    std::string fraction;
+    if (i < s.size() && s[i] == '.' && digit(i + 1)) {
+        const size_t begin = ++i;
+        while (digit(i)) ++i;
+        fraction = s.substr(begin, i - begin);
+        while (!fraction.empty() && fraction.back() == '0') fraction.pop_back();
+    }
+    // What may follow: a "%", words, one final ".".
+    if (i < s.size() && s[i] == '%') ++i;
+    if (i < s.size() && s[i] == ' ')  // words start after a space: "57th" is not 57
+        while (i < s.size() && (s[i] == ' ' || letter(i))) ++i;
+    if (i + 1 == s.size() && s[i] == '.') ++i;
+    if (i != s.size()) return s;
+    if (whole == "0" && fraction.empty()) minus = false;
+    return (minus ? "-" : "") + whole + (fraction.empty() ? "" : "." + fraction);
+}
+
+// Whether the completion's "#### " answer is the gold answer, both compared
+// in canonical_answer()'s form.
 inline bool answer_matches(const std::string& completion, const std::string& gold) {
-    return strip_digit_commas(trim(extract_answer(completion))) == gold;
+    return canonical_answer(extract_answer(completion)) == canonical_answer(gold);
 }
