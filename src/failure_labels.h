@@ -278,7 +278,12 @@ inline void check_calculations(std::string_view work, AnswerLabel& out) {
                     r = calc::evaluate(*link).value_or("");
         }
         if (!r) continue;  // not a calculation: "x = 5", "The total = ..."
-        const auto exact = r->empty() ? std::nullopt : value_of(*r);
+        // The left side's value (a plain Rational and a flag, not an optional:
+        // g++ -O3 then warns that the optional's value may be uninitialized).
+        calc::Rational exact;
+        bool readable = false;
+        if (!r->empty())
+            if (const auto v = value_of(*r)) exact = *v, readable = true;
         // The right side: the next link of a chain, if this "=" has one (the
         // text up to the next " = " on the line, all of it arithmetic), or
         // else the number written right after the "=".
@@ -286,25 +291,25 @@ inline void check_calculations(std::string_view work, AnswerLabel& out) {
         const size_t next = work.find(" = ", after);
         if (next != std::string_view::npos && next < line_end) {
             if (const auto link = whole_calculation(work.substr(after, next - after))) {
-                if (!exact) {
+                if (!readable) {
                     ++out.unreadable;
                     continue;
                 }
-                const calc::Rational v = *calc::Parser(*link).parse();
+                const calc::Rational v = calc::Parser(*link).parse().value_or(calc::Rational{});
                 const std::string wrote(trim_blanks(work.substr(after, next - after)));
-                out.calcs.push_back({i, around(work, i, next), wrote, *r, same(magnitude(v), *exact), v.num < 0});
+                out.calcs.push_back({i, around(work, i, next), wrote, *r, same(magnitude(v), exact), v.num < 0});
                 continue;
             }
         }
         const auto nums = numbers_in(work.substr(after));
         const bool written = !nums.empty() && nums[0].at == 0;
-        if (!written || !exact) {
+        if (!written || !readable) {
             ++out.unreadable;
             continue;
         }
         const Number& n = nums[0];
         out.calcs.push_back({i, around(work, i, after + n.end), std::string(work.substr(after, n.end)), *r,
-                             same(n.value, *exact), false});
+                             same(n.value, exact), false});
     }
 }
 
