@@ -63,6 +63,7 @@ class Questions(unittest.TestCase):
             ['a. 250% of 65 is what number? b. 8.2% of what amount is 2.87 dollars in the store today?'],
             ['The length of a rectangle is 5 feet longer than three times its width. Find the dimensions if the area is 138 square feet.'],
             ['Carolyn invests a total of $12,000 in two bonds paying 10.5% and 12%. How much was invested at each rate?'],
+            ['The length of a rectangle is 32 meters and the width is 20 meters. Find (a) the perimeter, and (b) the area.'],
             ['Find an equation of the plane passing through points (1,-3,-2), (0,3,-2), and (1,0,-2) in space.'],
             ['The statistician in problem 78 is eight pieces of data short of being 5/6 done. How many pieces has she collected?'],
         ]:
@@ -101,10 +102,12 @@ class Pages(unittest.TestCase):
             '- Answer', '- 340 yd',
             'The length of a rectangle is 62 feet and the width is 48 feet. Find (a) the perimeter and (b) the area of it.',
             '- Answer a', '-', '220 ft', '- Answer b', '- 2976 sq. ft',
+            'A rectangle is 30 feet long and 20 feet wide. What is its perimeter and how many square feet is its area?',
+            '- Answer', '- 100 ft', '- 600 sq. ft',  # two unlabeled parts: the first is not the answer
         ])
         found, dropped = B.problems_of(page)
         self.assertEqual([a for _, a in found], ['35838.76', '340'])
-        self.assertEqual(dropped, 2)  # "Answer a" and "Answer b": parts of one exercise
+        self.assertEqual(dropped, 3)  # "Answer a", "Answer b" (parts of one exercise), the unlabeled pair
 
     def test_unanswered_exercise_does_not_take_the_next_answer(self):
         page = '\n'.join([
