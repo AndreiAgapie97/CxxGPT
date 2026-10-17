@@ -288,7 +288,8 @@ Math problem-solving accuracy is the first evaluation focus.
   exact decimal only rounded right, never whole, and plain `16 x 7 = 112`, as
   failure_labels.h finds them, sign included, chains `a = b = c` link by
   link), no repeated line (`--allow-loops`), no number from outside the
-  question but a few constants (`--allow-outside`), not the gold solution
+  question but a few constants (`--allow-outside`), every number of the
+  question used (`--allow-unused`; off with `--recipes`), not the gold solution
   (`--keep-gold`) and no `[[no-loss]]` marker. "The same solution" (for
   dedupe and the gold check) is the same outline by default: the
   calculations' values in order, in any words (`--same text` for text

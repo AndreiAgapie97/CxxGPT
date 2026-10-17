@@ -24,9 +24,11 @@ inline void test_self_train_check() {
     using self_train::Verdict;
     const Problem p = self_train_problem("What is 3 plus 4?", "7");
     // These cases test the arithmetic, so numbers from outside the question
-    // ("28 - 35") are allowed here; test_self_train_outside tests that check.
+    // ("28 - 35"), and leaving the question's numbers unused, are allowed
+    // here; test_self_train_outside and test_self_train_unused test those.
     self_train::Options o;
     o.allow_outside = true;
+    o.allow_unused = true;
     auto verdict = [&](const std::string& text, const self_train::Options& opts) {
         return self_train::check_try(p, text, opts);
     };
@@ -129,7 +131,10 @@ inline void test_self_train_keep() {
         {"#### 7\n", "9 - 1 = 7\n#### 7\n", "9 - 1 = 9\n#### 8\n", "#### 8\n", "#### 9\n", "#### 6\n"},
     };
     // Compared as text here: test_self_train_outline compares outlines.
+    // "5 + 5 = 10" for 2 times 5 leaves the 2 unused; test_self_train_unused
+    // tests that check, these test dedupe and the cap.
     self_train::Options o;
+    o.allow_unused = true;
     o.keep = 2;
     o.same = self_train::Same::text;
     const self_train::Result r = self_train::keep_checked(ps, texts, o);
@@ -170,7 +175,9 @@ inline void test_self_train_keep() {
     // By outline (the default), "4 + 3 = 7" is "3 + 4 = 7" again, and
     // "5 + 5 = 10" is "2 * 5 = 10": the same values in the same order.
     // Work without a calculation ("3 plus 4 makes 7.") is compared as text.
-    const self_train::Result outline = self_train::keep_checked(ps, texts, {});
+    self_train::Options by_values;
+    by_values.allow_unused = true;
+    const self_train::Result outline = self_train::keep_checked(ps, texts, by_values);
     const std::vector<std::vector<Verdict>> by_outline = {
         {Verdict::arithmetic, Verdict::wrong, Verdict::kept, Verdict::duplicate, Verdict::duplicate, Verdict::kept},
         {Verdict::kept, Verdict::wrong, Verdict::duplicate, Verdict::unfinished, Verdict::duplicate, Verdict::kept},
@@ -225,6 +232,7 @@ inline void test_self_train_outside() {
            "an invented 37 must be rejected and named (%zu outside numbers)", info.outside.size());
     self_train::Options allow;
     allow.allow_outside = true;
+    allow.allow_unused = true;
     EXPECT(self_train::check_try(p, "Each box holds 37, so 3 + 4 = 7\n#### 7\n", allow) == Verdict::kept,
            "--allow-outside must keep it");
     // In words too (Codex's review on #69): the failure labels read digits only.
@@ -251,6 +259,49 @@ inline void test_self_train_outside() {
     EXPECT(self_train::check_try(weeks, "Sam reads 3 * 13 = 39 pages, then 39 + 3 = 42\n#### 42\n", o) ==
                Verdict::outside,
            "13 days from nowhere must be rejected");
+}
+
+// A number of the question the work never uses: rp1's lucky answers on the
+// textbook problems (2026-10-17) ignore one. 1 is a unit, not a quantity,
+// and a percentage may be used as its hundredth.
+inline void test_self_train_unused() {
+    using self_train::Verdict;
+    const self_train::Options o;
+    const Problem triangle = self_train_problem("Find the area of a triangle with base 14 inches and height 7 inches.", "49");
+    self_train::TryInfo info;
+    EXPECT(self_train::check_try(triangle, "The area is 7 x 7 = <<7*7=49>>49 square inches.\n#### 49\n", o, &info) ==
+                   Verdict::unused &&
+               info.unused == std::vector<std::string>({"14"}),
+           "a triangle's area without its base must be rejected and the 14 named (%zu unused)", info.unused.size());
+    EXPECT(self_train::check_try(triangle, "The area is 14 x 7 / 2 = <<14*7/2=49>>49 square inches.\n#### 49\n", o) ==
+               Verdict::kept,
+           "the area from both numbers must be kept");
+    self_train::Options allow;
+    allow.allow_unused = true;
+    EXPECT(self_train::check_try(triangle, "The area is 7 x 7 = <<7*7=49>>49 square inches.\n#### 49\n", allow) ==
+               Verdict::kept,
+           "--allow-unused must keep it");
+    // 1 is the unit in "1 hour each day"; "$" and grouping commas are read as the labels read them.
+    const Problem gym = self_train_problem("Jo spends 1 hour each day at the gym, 3 days a week, at $1,200 a year.", "3");
+    EXPECT(self_train::check_try(gym, "Jo spends 3 hours a week; the $1,200 does not matter.\n#### 3\n", o) == Verdict::kept,
+           "the 1 of 1 hour need not be used, and $1,200 is 1200");
+    // A percentage used as its hundredth, or as itself.
+    const Problem off = self_train_problem("A coat costs $80 and is 25% off. What does it cost now?", "60");
+    EXPECT(self_train::check_try(off, "It is 80 * 0.25 = <<80*0.25=20>>20 off, so 80 - 20 = <<80-20=60>>60.\n#### 60\n", o) ==
+               Verdict::kept,
+           "25%% used as 0.25 is used");
+    EXPECT(self_train::check_try(off, "It is 80 * 25 / 100 = <<80*25/100=20>>20 off, so 80 - 20 = <<80-20=60>>60.\n#### 60\n",
+                                 o) == Verdict::kept,
+           "25%% used as 25 is used");
+    EXPECT(self_train::check_try(off, "It costs 60 now.\n#### 60\n", o) == Verdict::unused,
+           "an answer that uses neither 80 nor 25 must be rejected");
+    // The re-draw check replaces this one: generated problems add numbers on purpose.
+    const Problem distractor = self_train_problem("The hall has 9 lamps. What is 3 plus 4?", "7");
+    const std::vector<Problem> none;
+    EXPECT(self_train::check_try(distractor, "3 + 4 = 7\n#### 7\n", o) == Verdict::unused,
+           "without the re-draw check, the 9 lamps must be used");
+    EXPECT(self_train::check_try(distractor, "3 + 4 = 7\n#### 7\n", o, nullptr, &none) != Verdict::unused,
+           "with the re-draw check, unused numbers are its business");
 }
 
 // From the scripted model to the files: what sample_tries decodes is what
@@ -477,6 +528,7 @@ inline void test_self_train() {
     test_self_train_keep();
     test_self_train_outline();
     test_self_train_outside();
+    test_self_train_unused();
     test_self_train_files();
     test_self_train_redraw();
 }

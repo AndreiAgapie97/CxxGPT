@@ -299,6 +299,17 @@ as `eval-reasoning --tries`), and a try is kept only if (`src/self_train.h`):
   the question's numbers, the work's own and one step from them. An invented
   quantity is a wrong plan even when the answer comes out right
   (`--allow-outside` keeps those);
+- it uses every number of the question (`--allow-unused` keeps those),
+  but 1 (the unit in `1 hour each day`), and a percentage may be used as
+  its hundredth (`25%` as `0.25`). rp1's lucky answers on the textbook
+  problems ignore one: the area of a triangle with base 14 and height 7
+  as `7 x 7 = 49`. On GSM8K dev (rp1 after 20 minutes of night 2's mix,
+  32 tries), of the right tries that pass the other checks, it drops 20
+  of the 35 that reach under half of the gold solution's intermediate
+  results (likely lucky) and 8 of the 245 that reach all of them; 8% of
+  GSM8K's own train solutions leave a number unused (`a 2008 study`).
+  Generated problems add numbers on purpose (a distractor sentence), so
+  with `--recipes` the re-draw check replaces this one;
 - it is not the problem file's own solution (`--keep-gold` keeps those):
   a model that has learned its training problems, or a generator's
   templates, writes them back, and they teach it nothing new;
