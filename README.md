@@ -733,6 +733,40 @@ public or commercial release of weights, check the attribution each
 licence asks for (Common Pile's per-document licences, GSM8K's MIT
 notice).
 
+**Textbook word problems with answer keys (2026-10-17).**
+`operations/build_libretexts_problems.py` takes word problems and their
+book answers from the CC BY math textbooks in Common Pile's copy of
+LibreTexts (OpenStax's Prealgebra 1e, Intermediate Algebra 1e, Precalculus
+1e and others, and course remixes of them), into
+`data/libretexts-problems/`: 383 problems (JSON Lines with each problem's
+page, book and licence; `problems.txt` for `eval-reasoning` and
+`self-train`), none sharing a 13-word run, or its numbers and answer, with
+a GSM8K dev or test question.
+- **Licence.** OpenStax's math books were CC BY 4.0 until OpenStax
+  relicensed them CC BY-NC-SA 4.0 on 2026-04-23 (their `osbooks-*`
+  repositories' licence lines). LibreTexts copied them while they were
+  CC BY, and a CC licence cannot be taken back from copies already made,
+  so the LibreTexts copies are what the script reads, never openstax.org's
+  current books. Share-alike and non-commercial pages are left out.
+- **What is kept.** Only an exercise of one paragraph, followed directly by
+  an answer that is one number ("58 hardback books" is 58), is kept.
+  Anything unclear is dropped: two answers, fractions, a figure or table
+  the text lost, two exercises sharing one answer. A wrong pairing would go
+  unseen (nothing solves these problems again), and
+  `tests/test_libretexts_problems.py` checks each rule. Most exercises do
+  not qualify (algebra drills, graphs, several parts), hence the small
+  count.
+- **Audit.** 100 problems were worked out by hand, all right in the final
+  set. The draw before the last fixes had 5 bad ones, 3 of them wrong
+  keys in the books themselves (1161 for 1126, 14 for 34); those are
+  excluded by name. Expect a few percent of such book errors among the
+  rest. Some keys round without the question saying how (33.33, 2.2), and
+  the scorer compares the text after `####` exactly.
+- **Use.** There are answers but no worked solutions, so the set is for
+  checking the model's own solutions (`self-train`) and for evaluation,
+  not for the training mix as it is. LibreTexts is in the training data
+  (`textbooks-libretexts`), so a score on it is not a held-out test.
+
 To see whether math training costs the model its general text, score a
 checkpoint on held-out text it never trained on, the corpus's validation
 files (encoded with `data/licensed-10b/tok.bpe`, so only for models with

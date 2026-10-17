@@ -211,6 +211,16 @@ Math problem-solving accuracy is the first evaluation focus.
   text) and `math_check` (notes and the stated answer). Not in the
   training mix (the owner decides). Next topics, in order: number theory,
   counting (the answer format of probability needs a decision first).
+- `operations/build_libretexts_problems.py` (2026-10-17): 383 human-written
+  word problems with their book answers (one number, no worked solution)
+  from the CC BY math textbooks in Common Pile's LibreTexts (OpenStax 1e
+  copies, made before OpenStax went CC BY-NC-SA on 2026-04-23), into
+  `data/libretexts-problems/`, with each page's licence and address. Kept
+  out: GSM8K dev/test overlaps, copies, unclear pairings
+  (`tests/test_libretexts_problems.py`). 100 checked by hand; the books'
+  own keys are wrong a few percent of the time. For self-train and
+  evaluation, not the mix; not held out (LibreTexts is in training)
+  (README, "Textbook word problems with answer keys").
 - GSM8K dev set: `scripts/get_data.py` holds out 500 GSM8K train problems
   (the 500 questions with the smallest sha256); `DEV=1 scripts/night.sh`
   validates on it instead of the test set. `cxxgpt leak-check` finds
