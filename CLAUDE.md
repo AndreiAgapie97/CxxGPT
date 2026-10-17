@@ -221,8 +221,31 @@ Math problem-solving accuracy is the first evaluation focus.
   `fraction_check` works each story out again its own way. 120 patterns,
   40 held out. Both topics share `math_detail` (the story, distractor and
   text) and `math_check` (notes and the stated answer). Not in the
-  training mix (the owner decides). Next topics, in order: number theory,
-  counting (the answer format of probability needs a decision first).
+  training mix (the owner decides).
+  `src/mathgen_number_theory.h` (`--topic number-theory`, 2026-10-17):
+  remainders (boxes, vans), common multiples (buses, lights, packs),
+  common divisors (gift bags, ribbons), factor counts (equal rows),
+  multiples (tickets, every k-th, a range, even lockers), page digits and
+  digit puzzles, repeating patterns; whole answers. calc.h has only + - *
+  /, so a quotient is found as in long division, every step a plain note
+  ("7*20 = 140, ... leaves 60; 7*8 = 56, ... leaves 4; 4 is less than 7,
+  so 20+8 = 28"; owner's decision, 2026-10-17: no new calculator notation,
+  which only our data would use); `number_theory_check`
+  works every story out by brute force. 120 story patterns (40 held
+  out), 99 question and solution phrases of 3 wordings (1 held out), 9
+  fillers per setting that fit its story, in half the problems (gen-word's
+  shared ones name numbered things and are in every equations/fractions
+  problem). Lists capped (count-up 8, factors 12). `--exclude` draws 879
+  of 300k again, then 0 GSM8K test/dev leaks. `--recipes` works, but most
+  gold solutions fail the re-draw check (numbers no calculation makes
+  become constants): self-train on it waits until the check can follow it.
+  `operations/build_gen_math.py --topics number-theory --notes on` builds
+  nt-dev/nt-train without the factor kind (`--skip-kinds factors`: about
+  300 stories). Mix plan (owner's decision, 2026-10-17): not in night 3
+  (which tests #86's GSM8K variants); after it, about 1-2% of the mix in
+  place of part of gen-word's share, first tested on a checkpoint copy
+  against the GSM8K dev set. Next topic: counting (the answer format of
+  probability needs a decision first).
 - `operations/build_libretexts_problems.py` (2026-10-17): 383 human-written
   word problems with their book answers (one number, no worked solution)
   from the CC BY math textbooks in Common Pile's LibreTexts (OpenStax 1e

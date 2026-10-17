@@ -152,7 +152,7 @@ patterns for inspection and do not establish the cause of a wrong answer.
 |---|---|
 | `gen-reasoning` | writes the synthetic curriculum: problems with step-by-step solutions, train/val token files and a test set one difficulty level beyond training |
 | `gen-word` | writes exact word problems, worked solutions, and separate train/test sentence patterns |
-| `gen-math` | writes math problems built from a chosen answer (equations so far), each solved again by a second solver |
+| `gen-math` | writes math problems built from a chosen answer (equations, fractions, number theory), each solved again by a second solver |
 | `bpe-train` | trains a BPE tokenizer on a text file |
 | `text2tok` | encodes text into a token file (parallel, streaming; `--doc-sep` splits documents) |
 | `prep-qa` | turns question/answer JSONL (GSM8K and the like) into token files with a loss mask and a test set |
@@ -594,7 +594,11 @@ On the generators' own solutions (300 problems per topic,
 (their questions repeat small numbers); with every reading tried, all
 word problems and equations pass, and 299 of 300 fractions (one with more
 combinations than are followed). Without their `<<...>>` notes (as `--notes
-off` writes them, and as rp1 writes) they pass as often.
+off` writes them, and as rp1 writes) they pass as often. Number theory
+(80 problems per split) gets three versions of 80 of 80, but only 8
+(train) and 7 (test) of its gold solutions pass: most write a number no
+calculation makes (see
+"Generated math problems: number theory").
 
 On rp1 (2026-10-17, `runs/rp1.night1.ckpt`, 100 new problems per topic, 8
 tries, `--temp 0.7 --seed 1`, then `--recheck` with `--keep-gold`, so that
@@ -824,6 +828,201 @@ splits 61k, units 16k, ratio-and-count 13k, what-percent 6.6k (drawn
 least often). Prices, weights, distances and counts stay in ranges a real
 thing has (a sofa $300-1,500, a lamp $20-150; a jar of honey 100-400 g; a
 walk or a drive of up to 8 km a day).
+
+### Generated math problems: number theory
+
+```sh
+./cxxgpt gen-math --topic number-theory --out data/math/nt-train --split train --seed 1 --count 100000 \
+    --exclude data/licensed-10b/gsm8k-test.txt,data/licensed-10b/gsm8k-dev.txt
+```
+
+`--topic number-theory` (`src/mathgen_number_theory.h`, 2026-10-17) has
+the same files, options, splits and checks as the other two topics, with
+the task `number-theory`. Every answer is a whole number. Its stories:
+
+- remainders: 50 cookies packed in boxes of 6, or 111 students in vans of
+  13, asking for the full boxes, what is left over, the boxes needed for
+  all, or how many more would fill one more box;
+- least common multiples: two buses (lights, visits) repeating every 12 and
+  18 minutes, asking when they next meet or how many times in the next few
+  hours; hot dogs in packs of 8 and buns in packs of 6, asking for the
+  fewest packs for equal numbers;
+- greatest common divisors: identical gift bags from 24 pencils and 36
+  erasers, or two ribbons cut into the longest equal pieces;
+- factors: 36 chairs in equal rows, at least 2 (or 3) rows of at least 2
+  (3) chairs: how many numbers of rows are possible?
+- multiples: raffle tickets 1 to 200 that are multiples of 7, every 5th
+  customer, every 4th and every 6th person (who gets both?), the multiples
+  of 7 from 45 to 180, the even- or odd-numbered lockers from 18 to 210;
+- digits: the digits needed to number a book's pages, the pages that 342
+  digits number, a two-digit number from its digit sum and difference;
+- repeating patterns: 3 red beads then 2 blue, or 5 work days then 2 days
+  off: how many of each in the first n?
+
+The exact calculator (`src/calc.h`) knows only `+ - * /`, so a whole-number
+quotient is found as in long division: the biggest hundreds, tens and ones
+of the divisor that fit are taken away in turn, every step a plain GSM8K
+note, until less than the divisor is left:
+
+```
+Now find how many times 7 goes into 200.
+7*20 = <<7*20=140>>140, and taking that away leaves 200-140 = <<200-140=60>>60.
+7*8 = <<7*8=56>>56, which leaves 60-56 = <<60-56=4>>4.
+4 is less than 7, so 7 goes into 200 20+8 = <<20+8=28>>28 times.
+```
+
+"Less than 7 is left" is the check that 28 is the largest. A common
+multiple is found by counting up by the larger number (`Counting up by
+12: 12, 24.`), a common divisor from the factors of the smaller one. The checker (`number_theory_check`) shares no code with
+the generator and works every story out by brute force: it fills boxes one
+at a time, tries every time until both buses come round, every common
+divisor, every number of rows, every ticket, every page, every two-digit
+number, and lays the beads down one by one. calc.h checks every note.
+Lists stay short: counting up to a common multiple stops at 8 numbers, a
+factor list at 12, a list of factorings at 6 (the longest in 300,000
+problems: "The multiples of 9 are 9, 18, 27, 36, 45, 54, 63, 72.", the 12
+factors of 150, the 6 ways to write 168).
+
+Wordings, so that the text is less of a template:
+
+- the story: 20 sentence families of six wordings, 120 patterns, 40 held
+  out for the test split;
+- the question and every solution line: 99 phrases of three wordings each,
+  two for train and one held out, with the same calculator notes ("How
+  many trays can Leo fill completely?", "How many full trays can Leo
+  make?"; "7*20 = 140, and taking that away leaves ...", "7*20 = 140,
+  which leaves ...", "Taking away 7*20 = 140 leaves ..."; "Counting up by
+  12", "The multiples of 12 are", "Listing the multiples of 12");
+- fillers (irrelevant sentences): each of the 19 settings has its own 9
+  (6 train, 3 test) that fit its story, as in GSM8K: a price nobody asks
+  for ("Each empty carton costs $4 at the store."), how long something
+  takes ("The ride into town takes 12 minutes."), a number that looks
+  usable ("Each bus has 20 seats.") or none ("The station has a small
+  cafe."). None changes what is asked (no limit on the number of boxes, no
+  extra things to pack). Half the problems get one. In 300,000 problems
+  the 114 train fillers each appear in at most 1.2% of problems.
+  gen-word's shared fillers are not used here: they name numbered things
+  ("The office door is numbered 14", "route 9") that would read as part
+  of a story about numbered tickets or lockers, and every equations or
+  fractions problem has one of 12, so each repeats in about 8% of them.
+  Changing those would change the equations, fractions and gen-word
+  output, and their recipes: the owner's call.
+
+The solutions still follow one plan per kind and question (the same notes
+in the same order), and each story is one or two sentences around one
+idea, where GSM8K usually chains several: a step towards less templated
+data, not the end of it.
+
+**How the quotient is found: owner's decision, 2026-10-17 (option 1).**
+The first version wrote `7*28 = 196 and 7*29 = 203 is more than 200`: the
+check was written but the 28 was guessed in the head, and calc.h cannot
+help (200/7 has no exact decimal). The options were:
+
+1. An estimate step in the solution, as in long division: `7*20 =
+   <<7*20=140>>140, 200-140 = <<200-140=60>>60 left; 7*8 = <<7*8=56>>56,
+   60-56 = <<60-56=4>>4 left, less than 7, so 20+8 = <<20+8=28>>28.` Only
+   the generators change; every note is plain GSM8K arithmetic; it teaches
+   the search (tens first, then ones). Longer solutions (about twice the
+   notes), and the 20 and 8 are still chosen by the writer, though they
+   are easy choices.
+2. A rounded division note, `200/7 = <<200/7=28.57>>28.57`, so about 28. GSM8K
+   writes such notes, but calc.h refuses them (it is exact), and so do
+   self-train's checks unless the rounding is right; it would need a rule
+   for rounding in the calculator.
+3. A whole-number division in calc.h, such as `<<200//7=28>>` or a
+   remainder form `<<200/7=28 r 4>>`. The tool finds the quotient, and the
+   re-draw check could follow it once its formulas know whole division
+   (a change there too). But GSM8K
+   never writes it, so the model would learn a notation only our data and
+   our calculator use, and every eval with `--tools calc-notes` would need
+   it too.
+
+For self-train the difference is plain: options 1 and 2 leave the re-draw
+check as it is (the 20 and the 8 of option 1, or a rounded 28.57, are still
+numbers its formulas keep as constants), so right tries on this topic would
+still be dropped. Option 3 fixes only the kinds that hinge on a whole
+quotient (remainders, most multiples, patterns: about half the problems), at
+the cost of changing calc.h, the formula reader and the calculator evals
+together. Common multiples and divisors found by counting up or listing
+factors, the first even locker and the digit puzzle would still need
+their own notation or reading.
+
+Option 1 was chosen: plain GSM8K notes, no calculator change. Option 3
+would add a notation only our data and our calculator use, and would fix
+only some kinds. The bracket check (`7*29 = 203 is more than 200`) is gone:
+"4 is less than 7" checks the same thing. Every quotient the stories need
+uses the step, including the first and last multiple in a range (`7 goes
+into 164 23 times`, so the first multiple from 164 on is `7*24`).
+
+In 1M problems: multiples 110k different stories, remainders 26k, cycles
+25k, common divisors 7.9k, patterns 6.5k, digits 2.0k and factors only
+about 300 (a number of chairs up to 200 has few factorings), so factors
+are drawn least (1 in 33) and repeat with other names and wordings.
+
+No generated question shares a 13-word run with GSM8K test or dev. Small
+stories land on the numbers and answer of some of GSM8K's questions by
+chance (20 campers in tents of 6 need 4 tents, and a GSM8K question with
+the numbers 6 and 20 has the answer 4; without `--exclude`, 25 GSM8K test
+and dev questions in 802 of 300,000 problems), so use `--exclude`: of
+300,000 problems it draws 828 again, after which none of GSM8K test or dev
+shares a 13-word run, or its numbers and answer, with the output (checked
+again in Python, with the filler taken out).
+
+**Training files and the mix: owner's decision, 2026-10-17.**
+`operations/build_gen_math.py --topics number-theory --notes on --out
+data/gen-math-nt` builds `nt-dev` (1,000 problems from the held-out
+wordings) and `nt-train` (500,000), with calculator notes, the same
+`--exclude` of GSM8K test and dev, and Python's second check. The factor
+kind is left out of both (`gen-math --skip-kinds factors`): about 300
+different factor stories exist, so 500,000 problems would repeat each one
+about 50 times, and a cap of a few hundred would be under 0.1% of the file.
+The plan: not in night 3, which tests one change (GSM8K's own questions
+with new numbers, `cxxgpt redraw-qa`, PR #86) against night 2 on the dev
+set. Number theory comes after that at a small share, about 1-2% of the
+mix, taken from gen-word's share at the same total tokens, and is tested
+first on a copy of the checkpoint against the GSM8K dev set (`nt-dev` is
+for the topic's own exam and `--val-sources`, not for deciding the mix).
+No mix file and no
+`night.sh` default includes it yet.
+
+Built 2026-10-17 at fbe174a into `data/gen-math-nt` (git-ignored, on the
+laptop; `manifest.json` has the seeds, counts and hashes, 2 minutes 22
+seconds on the CPU): `nt-dev` 993 problems (230,495 tokens), `nt-train`
+497,275 problems (113,955,252 tokens). For the train file, gen-math drew
+again 534 problems sharing a 13-word run with the dev file and 49,819 with
+a dev or GSM8K problem's numbers and answer (small stories often share
+them), so the dev file stays held out; Python's cruder numbers check then
+dropped 7 dev and 2,725 train problems. No factor problem in either file.
+That keeps out some of the simplest stories: against the same seed with
+only GSM8K excluded, problems whose question numbers are all under 20 fall
+from 12.7% to 11.0% of the file (answers of 5 or less: 20.4% and 21.2%).
+The files come again only with the same options: `gen-math --seed
+202610174 --skip-kinds factors` (leaving a kind out changes every draw),
+as `manifest.json` records.
+
+A hand check of 30 problems (seed 2026, train) and 15 (seed 77, test): all
+45 answers and solutions right; one train wording asked "How many trays
+does Leo need?" after a sentence that named nobody, in 3 of the 30. That
+wording now names the person, and a test checks that a name in the
+question is in the story. After the first new wordings and fillers, 22
+more (seed 4242, train, and 4243, test): all right. After every solution
+line got three wordings and each setting its own fillers, 24 more (seed
+515, train, and 516, test): all right; one pair of wordings said "That
+leaves ..." twice in a row, now reworded. With the long-division step, 30
+problems that use it (seeds 1017 and 1018, train and test, remainders,
+multiples, cycles and patterns): all answers and every step right. One
+more showed "3-2 = 1 are days off", which 3,722 of 300,000 problems had;
+reworded, and a test now rejects "1 are".
+
+`--recipes FILE` works as for the other topics, and self-train's re-draw
+check makes three versions of almost every problem. But most of these
+solutions do not pass it (below, "The re-draw check"): a quotient's parts
+(the 20 and the 8 above), a common multiple found by counting up, or the
+first even locker is a number no calculation makes, which the formula
+keeps as a constant, so on other numbers it gives another answer. Only
+solutions made of plain sums pass: the page digits, the factor counts and
+some common multiples. Self-train on this topic waits until the re-draw
+check can follow it (owner's decision, 2026-10-17).
 
 ### Real data and GPU training
 

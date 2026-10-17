@@ -1,9 +1,15 @@
-"""Builds data/gen-math: gen-math's equations and fractions, tokenized for night.sh's mix.
+"""Builds data/gen-math: gen-math's topics, tokenized for night.sh's mix.
 
-For each topic:
+For each topic (--topics; equations and fractions by default, as before):
 
   TOPIC-dev    1,000 problems from the held-out (test) sentence patterns
   TOPIC-train  500,000 problems from the training patterns
+
+Number theory (--topics number-theory, nt-dev and nt-train) leaves out its
+factor-counting kind (gen-math --skip-kinds factors), in both files: about
+300 different factor stories exist, so 500,000 problems would repeat each
+one about 50 times (owner's decision, 2026-10-17: capped or left out; left
+out, since a cap of a few hundred would be under 0.1% of the file anyway).
 
 gen-math --exclude already draws a problem again when its question shares a
 13-word run with GSM8K test or dev (or the topic's dev set), or has one of
@@ -24,6 +30,9 @@ It writes into a new folder (--out) and never touches another one. Usage
   python -I operations/build_gen_math.py --cxxgpt build/cxxgpt.exe \\
       --heldout data/targeted-math/heldout.jsonl --gsm8k data/licensed-10b \\
       --out data/gen-math --tok data/licensed-10b/tok.bpe
+
+  (number theory, with notes: add --topics number-theory --notes on and
+  another --out, such as data/gen-math-nt)
 """
 import argparse
 import datetime
@@ -36,8 +45,13 @@ import subprocess
 
 COUNTS = {'dev': 1000, 'train': 500000}
 SEEDS = {('equations', 'dev'): 202610171, ('equations', 'train'): 202610170,
-         ('fractions', 'dev'): 202610173, ('fractions', 'train'): 202610172}
-SHORT = {'equations': 'eq', 'fractions': 'frac'}
+         ('fractions', 'dev'): 202610173, ('fractions', 'train'): 202610172,
+         ('number-theory', 'dev'): 202610175, ('number-theory', 'train'): 202610174}
+SHORT = {'equations': 'eq', 'fractions': 'frac', 'number-theory': 'nt'}
+SOURCES = {'equations': 'src/mathgen.h', 'fractions': 'src/mathgen_fractions.h',
+           'number-theory': 'src/mathgen_number_theory.h'}
+# Kinds left out of a topic's files (gen-math --skip-kinds), and why.
+SKIP = {'number-theory': 'factors'}
 
 
 def sha256(path):
@@ -77,7 +91,11 @@ def main():
     ap.add_argument('--tok', required=True, help="the RunPod model's tokenizer")
     ap.add_argument('--train-count', type=int, default=COUNTS['train'])
     ap.add_argument('--notes', choices=['off', 'on'], default='off', help='calculator notes, kept in the tokens')
+    ap.add_argument('--topics', default='equations,fractions', help='comma-separated gen-math topics')
     args = ap.parse_args()
+    topics = args.topics.split(',')
+    assert all(t in SHORT for t in topics), f'--topics: one of {sorted(SHORT)}'
+
     COUNTS['train'] = args.train_count
     out = pathlib.Path(args.out)
     args.cxxgpt = str(pathlib.Path(args.cxxgpt).resolve())  # Windows does not search relative paths
@@ -101,7 +119,7 @@ def main():
         return any((tuple(k), answer) in held_numbers for k in keys)
 
     records = {}
-    for topic in ['equations', 'fractions']:
+    for topic in topics:
         dev_grams = set()
         for split, style in [('dev', 'test'), ('train', 'train')]:
             name = SHORT[topic] + '-' + split
@@ -110,7 +128,8 @@ def main():
             files = exclude + ([str(out / ('generated-' + SHORT[topic] + '-dev.txt'))] if split == 'train' else [])
             run = subprocess.run([args.cxxgpt, 'gen-math', '--topic', topic, '--out', str(raw),
                                   '--count', str(COUNTS[split]), '--seed', str(seed), '--split', style,
-                                  '--notes', args.notes, '--exclude', ','.join(files)],
+                                  '--notes', args.notes, '--exclude', ','.join(files)] +
+                                 (['--skip-kinds', SKIP[topic]] if topic in SKIP else []),
                                  check=True, capture_output=True, text=True)
             print(run.stdout.strip(), flush=True)
             kept = dropped = dropped_numbers = 0
@@ -140,20 +159,21 @@ def main():
             with open(prefix.with_suffix('.tok'), 'rb') as f:
                 magic, _, masked, tokens = struct.unpack('<8sIIQ', f.read(24))
             assert magic == b'CXTOKEN1' and masked == 1
-            records[name] = {'topic': topic, 'seed': seed, 'split_patterns': style, 'questions': kept,
+            records[name] = {'topic': topic, 'seed': seed, 'split_patterns': style,
+                             'skipped_kinds': SKIP.get(topic, ''), 'questions': kept,
                              'dropped_near_heldout': dropped, 'dropped_same_numbers_and_answer': dropped_numbers,
                              'tokens': tokens, 'sha256': sha256(prefix.with_suffix('.tok'))}
             print('ready', name, records[name], flush=True)
         (out / ('generated-' + SHORT[topic] + '-dev.txt')).unlink(missing_ok=True)
 
     # The generators' hashes as git stores them (LF line ends).
-    sources = {f: hashlib.sha256(pathlib.Path(f).read_bytes().replace(b'\r\n', b'\n')).hexdigest()
-               for f in ['src/mathgen.h', 'src/mathgen_fractions.h']}
+    files = sorted({'src/mathgen.h'} | {SOURCES[t] for t in topics})
+    sources = {f: hashlib.sha256(pathlib.Path(f).read_bytes().replace(b'\r\n', b'\n')).hexdigest() for f in files}
     commit = subprocess.run(['git', 'rev-parse', 'HEAD'], capture_output=True, text=True, check=True).stdout.strip()
     manifest = {
         'created_utc': datetime.datetime.now(datetime.timezone.utc).isoformat(),
-        'generator': 'CxxGPT gen-math --topic equations and fractions; exact arithmetic, every problem solved '
-                     'again by a second solver; ' +
+        'generator': 'CxxGPT gen-math --topic ' + ' and '.join(topics) + '; exact arithmetic, every problem '
+                     'solved again by a second solver; ' +
                      ('calculator notes kept' if args.notes == 'on' else 'no calculator notes'),
         'cxxgpt_sha256': sha256(args.cxxgpt),  # the program that ran, which can be older than the checkout
         'source': 'locally generated from repository templates, not an externally downloaded dataset',

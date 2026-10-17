@@ -6,7 +6,8 @@
 // self-train works a try's calculations out again on versions of its
 // problem with new numbers (self_train.h). This file makes those versions.
 //
-// The generators (wordgen.h, mathgen.h, mathgen_fractions.h) make two kinds
+// The generators (wordgen.h, mathgen.h, mathgen_fractions.h,
+// mathgen_number_theory.h) make two kinds
 // of random choices (Choices): what the story is, and the numbers in it.
 // `gen-word`/`gen-math --recipes FILE` writes, for each problem, a Recipe:
 // the generator, the options that change its question, and the random
@@ -38,6 +39,7 @@
 
 #include "failure_labels.h"
 #include "mathgen_fractions.h"
+#include "mathgen_number_theory.h"
 
 namespace redraw {
 
@@ -70,6 +72,8 @@ inline std::optional<Recipe> parse_recipe(const std::string& line) {
         if (r.shape < 0 || r.shape >= EquationProblem::kind_count) return {};
     } else if (r.topic == "fractions") {
         if (r.shape < 0 || r.shape >= FractionProblem::kind_count) return {};
+    } else if (r.topic == "number-theory") {
+        if (r.shape < 0 || r.shape >= NumberTheoryProblem::kind_count) return {};
     } else {
         return {};
     }
@@ -126,6 +130,12 @@ inline std::optional<Problem> make(const Recipe& r, Choices& choices) {
         int64_t answer = 0;
         if (!equation_detail::candidate(choices, o, e, answer) || !equation_check::problems_with(e).empty()) return {};
         return e.problem;
+    }
+    if (r.topic == "number-theory") {
+        NumberTheoryProblem n;
+        n.kind = NumberTheoryProblem::Kind(r.shape);
+        if (!number_detail::candidate(choices, o, n) || !number_theory_check::problems_with(n).empty()) return {};
+        return n.problem;
     }
     CHECK(r.topic == "fractions", "no generator %s", r.topic.c_str());
     FractionProblem f;

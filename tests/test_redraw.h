@@ -14,11 +14,12 @@ inline void test_redraw_recipes() {
         std::vector<Recipe> recipes;
         if (topic == "word") make_word_problems(seed, count, {2, 8, true, true, test}, &recipes);
         else if (topic == "equations") make_equation_problems(seed, count, {true, true, test}, &recipes);
-        else make_fraction_problems(seed, count, {false, true, test}, &recipes);
+        else if (topic == "fractions") make_fraction_problems(seed, count, {false, true, test}, &recipes);
+        else make_number_theory_problems(seed, count, {true, true, test}, &recipes);
         return recipes;
     };
     std::vector<Recipe> all;
-    for (const char* topic : {"word", "equations", "fractions"}) {
+    for (const char* topic : {"word", "equations", "fractions", "number-theory"}) {
         const std::vector<Recipe> r = recipes_of(topic, 3, 20, std::string(topic) == "fractions");
         EXPECT(r.size() == 20, "%s: %zu recipes for 20 problems", topic, r.size());
         all.insert(all.end(), r.begin(), r.end());
@@ -32,6 +33,8 @@ inline void test_redraw_recipes() {
                redraw::recipe_line(back[i]).c_str());
     EXPECT(back.size() > 50 && back[50].topic == "fractions" && back[50].test && !back[50].distractors,
            "the fractions recipes keep their options");
+    EXPECT(back.size() > 70 && back[70].topic == "number-theory" && !back[70].test && back[70].distractors,
+           "the number-theory recipes keep their options");
     const std::string good = redraw::recipe_line(all[0]);
     EXPECT(redraw::parse_recipe(good).has_value(), "'%s' must read", good.c_str());
     for (const std::string& bad :
@@ -40,6 +43,7 @@ inline void test_redraw_recipes() {
           std::string("word distractors=1 test=0 steps=9 shape=2 state=1,2,3,4"),
           std::string("word distractors=1 test=0 steps=5 shape=6 state=1,2,3,4"),
           std::string("equations distractors=1 test=0 steps=0 shape=7 state=1,2,3,4"),
+          std::string("number-theory distractors=1 test=0 steps=0 shape=7 state=1,2,3,4"),
           std::string("word distractors=1 test=0 steps=5 shape=2 state=0,0,0,0"),
           std::string("word distractors=1 test=0 steps=5 shape=2 state=1,2,3"), good + " more", std::string("")})
         EXPECT(!redraw::parse_recipe(bad).has_value(), "'%s' must not read", bad.c_str());
@@ -64,13 +68,15 @@ inline void test_redraw_versions() {
         bool test;
     };
     for (const Topic topic : {Topic{"word", false}, Topic{"word", true}, Topic{"equations", false},
-                              Topic{"equations", true}, Topic{"fractions", false}, Topic{"fractions", true}}) {
+                              Topic{"equations", true}, Topic{"fractions", false}, Topic{"fractions", true},
+                              Topic{"number-theory", false}, Topic{"number-theory", true}}) {
         std::vector<Recipe> recipes;
         std::vector<Problem> problems;
         const std::string name = topic.name;
         if (name == "word") problems = make_word_problems(11, 80, {2, 8, true, true, topic.test}, &recipes);
         else if (name == "equations") problems = make_equation_problems(11, 80, {true, true, topic.test}, &recipes);
-        else problems = make_fraction_problems(11, 80, {true, true, topic.test}, &recipes);
+        else if (name == "fractions") problems = make_fraction_problems(11, 80, {true, true, topic.test}, &recipes);
+        else problems = make_number_theory_problems(11, 80, {true, true, topic.test}, &recipes);
         size_t full = 0, strict = 0, passed = 0, plain_passed = 0;
         for (size_t i = 0; i < problems.size(); ++i) {
             const Problem& p = problems[i];
@@ -94,7 +100,7 @@ inline void test_redraw_versions() {
             const self_train::Trace t = self_train::trace_try(p, label, v.versions);
             strict += t.passed && !t.ambiguous;
             passed += t.passed;
-            if (!t.passed && name != "fractions")
+            if (!t.passed && name != "fractions" && name != "number-theory")
                 std::printf("  %s %zu: the gold solution misses a version (%s, %zu readings):\n%s\n", topic.name, i,
                             t.formula.c_str(), t.readings, p.completion().c_str());
             // The same solution without its notes ("--notes off", and how rp1
@@ -117,9 +123,19 @@ inline void test_redraw_versions() {
                problems.size());
         // Word problems and equations: every gold solution has a reading
         // that passes. Fractions: a long run of halves can have more
-        // combinations than are followed (counted ambiguous).
-        EXPECT(name == "fractions" ? passed * 50 >= full * 49 : passed == full,
-               "%s: the gold solutions must pass with one of their readings (%zu of %zu)", topic.name, passed, full);
+        // combinations than are followed (counted ambiguous). Number
+        // theory: most solutions write a number the calculations do not
+        // make (the 20 and the 8 of a long division, "7*20 = 140 ... 7*8 =
+        // 56", a common multiple found by counting up, the first even locker),
+        // which the formula keeps as a constant, so other numbers give
+        // another answer; only the plain sums pass (README, gen-math
+        // number theory).
+        if (name == "number-theory")
+            EXPECT(passed > 0, "number-theory: none of %zu gold solutions pass", full);
+        else
+            EXPECT(name == "fractions" ? passed * 50 >= full * 49 : passed == full,
+                   "%s: the gold solutions must pass with one of their readings (%zu of %zu)", topic.name, passed,
+                   full);
         EXPECT(strict > 0, "%s: some gold solutions must pass with one reading", topic.name);
     }
 }
