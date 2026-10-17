@@ -11,7 +11,10 @@
 //   - every calculation it wrote is right by the exact calculator (calc.h),
 //     both forms: "<<48/2=24>>" notes and plain "16 x 7 = 112", found the
 //     way failure_labels.h finds them, with the right sign, and the number
-//     written right after a note is the note's. A right answer reached through a wrong
+//     written right after a note is the note's, sign included; a note the
+//     calculator leaves to the model (a value with no finite decimal,
+//     "<<20/3=") is right only as that value rounded to its decimal places,
+//     never as a whole number. A right answer reached through a wrong
 //     calculation is a lucky answer, and would teach the mistake;
 //   - it does not repeat a line of 12 or more characters (the failure
 //     labels' loop flag), unless loops are allowed;
@@ -175,19 +178,64 @@ inline std::string work_of(const std::string& text) {
     return trim(text.substr(0, hashes == std::string::npos ? text.size() : hashes));
 }
 
-// A right note followed by another number: "<<3+4=7>>8". The calculation
-// check reads the note, not the number the model copied after it. Read as
-// that check reads the work: "$" and digit-grouping commas dropped.
+// A right note followed by another number: "<<3+4=7>>8", or by the same
+// number without its sign: "<<14-21=-7>>7" (rp1 drops the minus after the
+// calculator's negative results). The calculation check reads the note, not
+// the number the model copied after it. Read as that check reads the work:
+// "$" and digit-grouping commas dropped.
 inline bool note_miscopied(std::string work) {
     work = strip_digit_commas(work);
     work.erase(std::remove(work.begin(), work.end(), '$'), work.end());
     for (size_t at = 0; (at = work.find("<<", at)) != std::string::npos; at += 2) {
         const size_t equals = work.find('=', at), end = work.find(">>", at);
         if (equals == std::string::npos || end == std::string::npos || equals > end) continue;
-        const auto value = labels::detail::value_of(work.substr(equals + 1, end - equals - 1));
-        const auto after = labels::detail::numbers_in(work.substr(end + 2));
-        if (value && !after.empty() && after[0].at == 0 && !labels::detail::same(after[0].value, *value))
+        const auto value = calc::Parser(work.substr(equals + 1, end - equals - 1)).parse();  // with its sign
+        const std::string_view rest = std::string_view(work).substr(end + 2);
+        const bool minus = rest.starts_with('-');
+        const auto after = labels::detail::numbers_in(rest.substr(minus ? 1 : 0));
+        if (value && !after.empty() && after[0].at == 0 &&
+            (!labels::detail::same(after[0].value, labels::detail::magnitude(*value)) || minus != (value->num < 0)))
             return true;
+    }
+    return false;
+}
+
+// A note whose exact value has no finite decimal, so the calculator left
+// it to the model ("<<20/3=" is no call), written wrong: as a whole number
+// ("<<20/3=10>>", "<<304/82=4>>": a whole number never stands for a value
+// that is not whole), or as a decimal that is not the value rounded to its
+// places ("<<10/3=3.34>>"; "<<10/3=3.33>>" and "<<20/3=6.7>>" are right).
+// The failure labels count these notes as unreadable, not wrong. GSM8K's
+// own notes never have such a value (0 of its 23,716 train notes), so a
+// right try needs none; this only keeps a wrong one out. Read as the
+// calculation check reads the work: "$" and digit-grouping commas dropped.
+inline bool note_inexact(std::string work) {
+    work = strip_digit_commas(work);
+    work.erase(std::remove(work.begin(), work.end(), '$'), work.end());
+    for (size_t at = 0; (at = work.find("<<", at)) != std::string::npos; at += 2) {
+        const size_t equals = work.find('=', at), end = work.find(">>", at);
+        if (equals == std::string::npos || end == std::string::npos || equals > end) continue;
+        const std::string_view expression = std::string_view(work).substr(at + 2, equals - at - 2);
+        if (calc::evaluate(expression)) continue;  // the calculator's own result: checked by the labels
+        const auto exact = calc::Parser(expression).parse();
+        if (!exact) continue;  // not arithmetic it can read ("5%*20", "2x+3"), or too large
+        const std::string_view wrote =
+            labels::detail::trim_blanks(std::string_view(work).substr(equals + 1, end - equals - 1));
+        const auto value = calc::Parser(wrote).parse();
+        if (!value || wrote.find_first_not_of("-.0123456789") != std::string_view::npos) continue;
+        const size_t point = wrote.find('.');
+        const size_t places = point == std::string_view::npos ? 0 : wrote.size() - point - 1;
+        if (places == 0) return true;  // "<<20/3=10>>": a whole number for a value that is not whole
+        // Rounded right: |value - exact| <= 1/2 * 10^-places, that is
+        // 2 * 10^places * |num| <= den for the difference num/den. A
+        // difference that does not fit, or a product that overflows, is far
+        // from a rounding.
+        const auto diff = calc::plus(*value, calc::Rational{-exact->num, exact->den});
+        if (!diff || places > 18) return true;
+        int64_t scale = 2, bound = 0;
+        for (size_t i = 0; i < places; ++i) scale *= 10;
+        const int64_t num = diff->num < 0 ? -diff->num : diff->num;
+        if (__builtin_mul_overflow(scale, num, &bound) || bound > diff->den) return true;
     }
     return false;
 }
@@ -489,7 +537,8 @@ inline Verdict check_try(const Problem& p, const std::string& text, const Option
     in.calcs = label.calcs.size();
     in.unreadable = label.unreadable;
     in.outside = outside_numbers(label, p, work);
-    if (label.wrong_calcs() > 0 || sign_wrong(label) || note_miscopied(work)) return Verdict::arithmetic;
+    if (label.wrong_calcs() > 0 || sign_wrong(label) || note_miscopied(work) || note_inexact(work))
+        return Verdict::arithmetic;
     if (label.loop && !o.allow_loops) return Verdict::loop;
     if (!in.outside.empty() && !o.allow_outside) return Verdict::outside;
     in.key = solution_key(label, work, o.same);

@@ -43,6 +43,20 @@ inline void test_self_train_check() {
         {"<<4-1=-3>>3, so 3 + 4 = 7\n#### 7\n", Verdict::arithmetic},
         {"28 - 35 = -7, so 3 + 4 = 7\n#### 7\n", Verdict::kept},   // a negative result: unreadable, not wrong
         {"<<28-35=-7>>-7 and 3 + 4 = 7\n#### 7\n", Verdict::kept},
+        {"<<28-35=-7>>7 and 3 + 4 = 7\n#### 7\n", Verdict::arithmetic},  // the minus dropped after it (rp1)
+        {"<<3-10=-7>>$-7 and 3 + 4 = 7\n#### 7\n", Verdict::kept},
+        {"<<10-3=7>>-7 and 3 + 4 = 7\n#### 7\n", Verdict::arithmetic},   // a minus the note does not have
+        {"<<10/3=3>>3, so 3 + 4 = 7\n#### 7\n", Verdict::arithmetic},    // a whole number for 10/3 (rp1: 20/3=10)
+        {"<<304/82=4>>4, so 3 + 4 = 7\n#### 7\n", Verdict::arithmetic},  // rounded to a whole number: still not 4
+        {"<<10/3=3.34>>3.34, so 3 + 4 = 7\n#### 7\n", Verdict::arithmetic},  // not 10/3 rounded
+        {"<<10/3=3.33>>3.33, so 3 + 4 = 7\n#### 7\n", Verdict::kept},      // 10/3 rounded to 2 places
+        {"<<20/3=6.7>>6.7, so 3 + 4 = 7\n#### 7\n", Verdict::kept},
+        {"<<2/3=0.6667>>0.6667, so 3 + 4 = 7\n#### 7\n", Verdict::kept},
+        {"<<-20/3=-6.67>>-6.67, so 3 + 4 = 7\n#### 7\n", Verdict::kept},
+        {"<<-20/3=6.67>>6.67, so 3 + 4 = 7\n#### 7\n", Verdict::arithmetic},  // the sign
+        {"<<1/3=0.333333333333333333>>, so 3 + 4 = 7\n#### 7\n", Verdict::kept},   // 18 places, rounded right
+        {"<<1/3=0.333333333333333334>>, so 3 + 4 = 7\n#### 7\n", Verdict::arithmetic},
+        {"<<5%*20=1>>1, so 3 + 4 = 7\n#### 7\n", Verdict::kept},           // not arithmetic it reads: unreadable
         {"#### 9\n", Verdict::wrong},
         {"3 + 4 = 9\n#### 9\n", Verdict::wrong},                    // wrong answer comes before arithmetic
         {"#### 7\n", Verdict::no_work},

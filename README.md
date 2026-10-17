@@ -279,8 +279,15 @@ as `eval-reasoning --tries`), and a try is kept only if (`src/self_train.h`):
   sign). A chain such as `6 * 4 + 2 = 24 + 2 = 26` is checked link by
   link (`6 * 4 + 2 = 24 + 2`, then `24 + 2 = 26`). A right answer through
   a wrong step (`3 + 4 = 8, so 7`) is a lucky answer, and would teach the
-  mistake. A calculation the calculator cannot read (`10 / 3 = 3.33`) is
-  counted, not rejected;
+  mistake. The number after a note keeps the note's sign: rp1 copies the
+  calculator's `<<14-21=-7>>` as `7`, which is rejected. A calculation the
+  calculator cannot read (`10 / 3 = 3.33`) is counted, not rejected, but a
+  note with no exact decimal (`<<10/3=`, which the calculator leaves to the
+  model) must be that value rounded to its places (`3.33`, `3.3`), never a
+  whole number: rp1 wrote `<<20/3=10>>` and `<<304/82=4>>` in right tries.
+  GSM8K's own notes never have such a value (0 of 23,716), and neither rule
+  rejects any of 10,459 gold solutions with notes (GSM8K train and dev, and
+  the word, eq and frac dev sets);
 - no line of 12 or more characters is written twice (`--allow-loops` keeps
   those);
 - it uses no number from outside the question: not in it (in digits or
@@ -383,6 +390,22 @@ brackets, which reproduces the table above):
   aside) are in 1 of 202 right answers (a `0.10`) and 62 of 1,117 wrong
   ones; without the constants, 6 right answers would be rejected (12, 7,
   60).
+
+Problems with an answer and no worked solution (2026-10-17): 186 of the
+383 textbook problems (half A, by the sha256 of the question; half B is
+held out to measure), rp1 after 20 minutes of night 2's notes mix,
+`--tools calc-notes --tries 8 --temp 0.7 --max-new 400`, GPU, 4 minutes:
+22 problems solved by some try (11.8%), 19 tries kept. Read by hand, 5
+of the 19 had a wrong step the checks missed then: the minus dropped
+after a note (`<<14-21=-7>>7`, 3 tries) or a whole number for a division
+with no exact decimal (`<<20/3=10>>`, 2 tries). Both are rejected since
+(above), and `--recheck` keeps 14. Of those 14, 8 follow a right plan,
+some with a useless line in between (`20 rows * 2 = 40 rows`, then `16 *
+20 = 320 tiles`), and 6 reach the book's answer by a wrong plan with
+right arithmetic (the area of a triangle as `7 x 7 = 49`, where `14 x 7 /
+2` is also 49). The checks cannot tell those apart without a second
+version of the problem (the re-draw check, below), which these problems
+do not have. None of it is in a mix.
 
 #### The re-draw check: right by method, not by luck
 

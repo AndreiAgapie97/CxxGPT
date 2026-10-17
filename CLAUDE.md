@@ -282,7 +282,8 @@ Math problem-solving accuracy is the first evaluation focus.
   `--tries` solutions per training problem (`sample_tries`, the sampler
   and seeds of `eval-reasoning --tries`, CPU or `--gpu`) and keeps a try
   only with the right answer, some work, every calculation right by
-  calc.h (notes, the number after a note, and plain `16 x 7 = 112`, as
+  calc.h (notes, the number after a note with its sign, a note with no
+  exact decimal only rounded right, never whole, and plain `16 x 7 = 112`, as
   failure_labels.h finds them, sign included, chains `a = b = c` link by
   link), no repeated line (`--allow-loops`), no number from outside the
   question but a few constants (`--allow-outside`), not the gold solution
