@@ -645,11 +645,17 @@ inline std::string canonical_answer(const std::string& answer) {
     auto letter = [&](size_t i) { return (s[i] >= 'a' && s[i] <= 'z') || (s[i] >= 'A' && s[i] <= 'Z'); };
     size_t i = 0;
     bool minus = false;
-    if (i < s.size() && s[i] == '-') minus = true, ++i;
+    if (i < s.size() && s[i] == '-') {
+        minus = true;
+        ++i;
+    }
     if (i < s.size() && s[i] == '$') {
         ++i;
         while (i < s.size() && s[i] == ' ') ++i;
-        if (!minus && i < s.size() && s[i] == '-') minus = true, ++i;
+        if (!minus && i < s.size() && s[i] == '-') {
+            minus = true;
+            ++i;
+        }
     }
     // The digits before the point: "0", or no leading zero.
     const size_t whole_begin = i;
