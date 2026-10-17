@@ -173,6 +173,10 @@ def question_text(lines):
         return None  # parts a, b, c with one answer between them
     if re.search(r'\b(at|of|in) each (rate|type|kind|size|account|investment|bond|fund)\b|\b(many|much) of each\b', q, re.I):
         return None  # asks for several amounts
+    if re.search(r'\bfind (an?|the) (equation|expression|formula|function)\b', q, re.I):
+        return None  # "Find an equation of the plane ...": the key "z = -2" is not a number to compute
+    if re.search(r'\bproblems? \d', q, re.I):
+        return None  # "The statistician in problem 78 ...": another problem's numbers
     if re.search(r'\d\s+\.\s|\.\s+\.|\$\s+\d+\s+\.', q):
         return None  # "$ 2 . .65": a broken copy of a number
     if re.search(r'[=<>]', q) or len(re.findall(r'\b[A-Za-z]{2,}\b', q)) < 10:
@@ -248,6 +252,9 @@ EXCLUDED = {
     'Kurt can ride his bike for 30 miles': 'the key says 14; it is 34',
     'The fuel consumption (mpg) of a car varies inversely with its weight. A Ford Focus': '15.65 is 15.7, not 15.6',
     'The coordinates of an object are (5.682, 2.0521)': 'the key 6 is a rounded 6.04',
+    # (the 2026-10-17 audit of the second build)
+    'Two airplanes take off in different directions. One travels 300 mph': 'the key says 599.8; it is 292.4',
+    'Find the linear speed of the moon': 'the key 2234 is 2234.65 cut short, not rounded',
 }
 
 
