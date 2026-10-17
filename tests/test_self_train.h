@@ -32,6 +32,14 @@ inline void test_self_train_check() {
         {"3 + 4 = <<3+4=7>>7 apples.\n#### 7\n", Verdict::kept},   // a right note
         {"3 + 4 = 8, so 7.\n#### 7\n", Verdict::arithmetic},        // right answer, wrong plain step
         {"3 + 4 = <<3+4=8>>8\n#### 7\n", Verdict::arithmetic},     // right answer, wrong note
+        {"3 + 4 = <<3+4=7>>8\n#### 7\n", Verdict::arithmetic},     // right note, another number after it
+        {"3 + 4 = $<<3+4=7>>7.00\n#### 7\n", Verdict::kept},        // the same number, written another way
+        {"35 - 28 = 7\n#### 7\n", Verdict::kept},
+        {"28 - 35 = 7\n#### 7\n", Verdict::arithmetic},            // the sign is wrong (rp1 wrote one)
+        {"<<28-35=7>>7, so 7\n#### 7\n", Verdict::arithmetic},     // in a note too
+        {"<<4-1=-3>>3, so 3 + 4 = 7\n#### 7\n", Verdict::arithmetic},
+        {"28 - 35 = -7, so 3 + 4 = 7\n#### 7\n", Verdict::kept},   // a negative result: unreadable, not wrong
+        {"<<28-35=-7>>-7 and 3 + 4 = 7\n#### 7\n", Verdict::kept},
         {"#### 9\n", Verdict::wrong},
         {"3 + 4 = 9\n#### 9\n", Verdict::wrong},                    // wrong answer comes before arithmetic
         {"#### 7\n", Verdict::no_work},

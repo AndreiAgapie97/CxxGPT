@@ -10,8 +10,8 @@
 //     how its tokens are masked or where its document ends;
 //   - every calculation it wrote is right by the exact calculator (calc.h),
 //     both forms: "<<48/2=24>>" notes and plain "16 x 7 = 112", found the
-//     way failure_labels.h finds them, and the number written right after
-//     a note is the note's. A right answer reached through a wrong
+//     way failure_labels.h finds them, with the right sign, and the number
+//     written right after a note is the note's. A right answer reached through a wrong
 //     calculation is a lucky answer, and would teach the mistake;
 //   - it does not repeat a line of 12 or more characters (the failure
 //     labels' loop flag), unless loops are allowed.
@@ -107,6 +107,19 @@ inline bool note_miscopied(std::string work) {
     return false;
 }
 
+// A calculation right up to its sign: "30 - 35 = 5", or "<<4-1=-3>>". The
+// failure labels compare numbers without their sign (prose rarely writes
+// one), so these pass there; training text must not state them. A plain
+// result is read from its first digit, so "30 - 35 = -5" is unreadable
+// there (counted, not wrong) and never reaches this check.
+inline bool sign_wrong(const labels::AnswerLabel& label) {
+    for (const labels::Calculation& c : label.calcs) {
+        const std::string wrote = trim(c.wrote);
+        if (!c.exact.empty() && (c.exact[0] == '-') != (!wrote.empty() && wrote[0] == '-')) return true;
+    }
+    return false;
+}
+
 // Every check that looks at one try alone (all but duplicate and over_cap).
 // calcs, if given, gets how many calculations the try's work had and how
 // many the calculator could not read ("10/3 = 3.33"; those are not wrong,
@@ -124,7 +137,7 @@ inline Verdict check_try(const Problem& p, const std::string& text, const Option
     const labels::AnswerLabel label = labels::label_answer(p, text);
     if (calcs) *calcs += label.calcs.size();
     if (unreadable) *unreadable += label.unreadable;
-    if (label.wrong_calcs() > 0 || note_miscopied(work)) return Verdict::arithmetic;
+    if (label.wrong_calcs() > 0 || sign_wrong(label) || note_miscopied(work)) return Verdict::arithmetic;
     if (label.loop && !o.allow_loops) return Verdict::loop;
     return Verdict::kept;
 }

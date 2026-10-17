@@ -231,10 +231,13 @@ as `eval-reasoning --tries`), and a try is kept only if (`src/self_train.h`):
   before it;
 - every calculation in the work is right by the exact calculator, both
   `<<48/2=24>>` notes (and the number written after a note) and plain
-  `16 x 7 = 112`, found as `--labels` finds them. A right answer through a
-  wrong step (`3 + 4 = 8, so 7`) is a lucky answer, and would teach the
-  mistake. A calculation the calculator cannot read (`10 / 3 = 3.33`) is
-  counted, not rejected;
+  `16 x 7 = 112`, found as `--labels` finds them, sign included (`30 - 35
+  = 5` is wrong here, though `--labels` compares numbers without their
+  sign). A right answer through a wrong step (`3 + 4 = 8, so 7`) is a
+  lucky answer, and would teach the mistake. A calculation the calculator
+  cannot read (`10 / 3 = 3.33`) is counted, not rejected. One known false
+  rejection: a chain such as `6 * 4 + 2 = 24 + 2 = 26` reads as
+  `6 * 4 + 2 = 24`, which is wrong;
 - no line of 12 or more characters is written twice (`--allow-loops` keeps
   those);
 - it holds no `[[no-loss]]` marker and no BOS byte.
@@ -266,6 +269,16 @@ or the same numbers and answer); excluded problems are counted. Whether
 self-generated files join a night's mix, and how much, is the owner's
 decision (docs/research-plan.md, "Learning from its own checked
 solutions"); keep the original data in the mix too.
+
+First runs (2026-10-17, `runs/rp1.ckpt` on the CPU, 4 tries at temp 0.7):
+- 8 `gen-word` train problems (a new seed): 7 solved, 27 of 32 tries kept,
+  4 wrong, 1 duplicate.
+- 16 GSM8K train problems: 13 first tries right (81%, against 3.9% on
+  the test set: the model has learned GSM8K train, which its mix repeats
+  64 times), 15 solved by some try, 17 tries kept, 31 duplicates of a kept
+  one, 11 wrong, 5 with a wrong step (one the chain above, one `30 - 35 =
+  5`). So GSM8K train gives back mostly what the model already copies;
+  fresh generator problems are the better source.
 
 ### Generated word problems
 

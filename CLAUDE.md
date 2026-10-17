@@ -251,14 +251,17 @@ Math problem-solving accuracy is the first evaluation focus.
   and seeds of `eval-reasoning --tries`, CPU or `--gpu`) and keeps a try
   only with the right answer, some work, every calculation right by
   calc.h (notes, the number after a note, and plain `16 x 7 = 112`, as
-  failure_labels.h finds them), no repeated line (`--allow-loops`) and no
+  failure_labels.h finds them, sign included; a right chain `a = b = c`
+  is rejected), no repeated line (`--allow-loops`) and no
   `[[no-loss]]` marker; exact copies dropped, at most `--keep K` per
   problem. Writes `OUT.txt` (problems), `OUT.tok` (prep-qa's masking:
   question masked, work and gold answer trained) and `OUT.json`
   (settings, counts). `--exclude` drops problems repeating dev/test
   questions. Tests: `tests/test_self_train.h` (scripted fake model) and
-  `tests/test_cli.sh`. On rp1 (CPU, 8 gen-word train problems x 4 tries):
-  27 kept of 32. Self-generated data is in no mix: the owner decides.
+  `tests/test_cli.sh`. On rp1 (CPU, 4 tries): 8 gen-word train problems,
+  27 of 32 tries kept; 16 GSM8K train problems, 81% first tries right
+  (memorized: 3.9% on test), 17 kept, 31 duplicates (README). Self-generated
+  data is in no mix: the owner decides.
 - `src/cxxgpt.cpp`: the CLI (train, sample, eval, data prep, benchmarks).
 - `scripts/get_data.py`: downloads GSM8K into `data/gsm8k/` as JSON Lines
   (for `prep-qa`), with the 500 dev problems held out of train (the same
