@@ -234,6 +234,14 @@ Math problem-solving accuracy is the first evaluation focus.
   own keys are wrong a few percent of the time. For self-train and
   evaluation, not the mix; not held out (LibreTexts is in training)
   (README, "Textbook word problems with answer keys").
+  `operations/build_openstax_problems.py` (2026-10-17): 233 more, none in
+  the LibreTexts sets, from OpenStax's own CNXML on GitHub (inline
+  `<solution>` answers) at the last commit of each `osbooks-*` repository
+  before it went CC BY-NC-SA (pinned and checked in the script; the owner
+  decided such a commit counts as CC BY), into `data/openstax-problems/`
+  (raw: `data/openstax-raw/`, `--fetch`). 50 checked by hand: 4 bad in the
+  first draw, all right after four rules; the cross-check found 4 wrong
+  keys in the LibreTexts sets (README). Same use as LibreTexts'.
 - GSM8K dev set: `scripts/get_data.py` holds out 500 GSM8K train problems
   (the 500 questions with the smallest sha256); `DEV=1 scripts/night.sh`
   validates on it instead of the test set. `cxxgpt leak-check` finds
