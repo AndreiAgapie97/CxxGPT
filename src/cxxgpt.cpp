@@ -941,6 +941,8 @@ int cmd_self_train(Args& a) {
     opts.keep = a.integer_int("keep", 0);
     CHECK(opts.keep >= 0, "--keep must not be negative");
     opts.allow_loops = a.flag("allow-loops");
+    // Keep tries that copy the problem file's own solution word for word.
+    opts.keep_gold = a.flag("keep-gold");
     // Questions not to train on, such as GSM8K test and dev (gen-math's rule).
     const std::string exclude = a.str("exclude", "");
     // Every try's text and verdict, one JSON line per try, for audits.
@@ -1034,7 +1036,8 @@ int cmd_self_train(Args& a) {
                        ",\"max_new\":" + std::to_string(max_new) + ",\"tools\":" +
                        str(tool == calc::Mode::notes ? "calc-notes" : tool == calc::Mode::plain ? "calc-plain" : "none") +
                        ",\"keep\":" + std::to_string(opts.keep) + ",\"allow_loops\":" +
-                       (opts.allow_loops ? "true" : "false") + ",\"gpu\":" + (use_gpu ? "true" : "false") +
+                       (opts.allow_loops ? "true" : "false") + ",\"keep_gold\":" +
+                       (opts.keep_gold ? "true" : "false") + ",\"gpu\":" + (use_gpu ? "true" : "false") +
                        ",\"matmul\":" + str(matmul) + ",\"problems_tried\":" + std::to_string(r.problems) +
                        ",\"excluded\":" + std::to_string(excluded) + ",\"first_right\":" +
                        std::to_string(r.first_right) + ",\"solved\":" + std::to_string(r.solved) +

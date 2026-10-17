@@ -240,6 +240,9 @@ as `eval-reasoning --tries`), and a try is kept only if (`src/self_train.h`):
   `6 * 4 + 2 = 24`, which is wrong;
 - no line of 12 or more characters is written twice (`--allow-loops` keeps
   those);
+- it is not the problem file's own solution word for word (`--keep-gold`
+  keeps those): a model that has learned its training problems by heart
+  writes them back, and they teach it nothing new;
 - it holds no `[[no-loss]]` marker and no BOS byte.
 
 Of those, an exact copy of an earlier try's work is dropped, and at most
@@ -256,7 +259,7 @@ try order, so the same seed writes the same files:
 The summary gives the problems tried, the first try's accuracy, the
 problems any try solved (pass@N) and those with a kept solution, and every
 try's verdict (`kept`, `unfinished`, `wrong`, `no_work`, `markers`,
-`arithmetic`, `loop`, `duplicate`, `over_cap`, `too_long`); `--audit
+`arithmetic`, `loop`, `gold_copy`, `duplicate`, `over_cap`, `too_long`); `--audit
 FILE.jsonl` writes every try's text and verdict. `--tools calc-notes`
 lets the calculator finish the model's notes while it writes, as in
 `eval-reasoning`.

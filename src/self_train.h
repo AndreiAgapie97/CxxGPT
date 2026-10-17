@@ -14,7 +14,10 @@
 //     written right after a note is the note's. A right answer reached through a wrong
 //     calculation is a lucky answer, and would teach the mistake;
 //   - it does not repeat a line of 12 or more characters (the failure
-//     labels' loop flag), unless loops are allowed.
+//     labels' loop flag), unless loops are allowed;
+//   - it is not the problem file's own solution word for word (spaces
+//     around it aside), unless gold copies are allowed: a model that has
+//     learned its training problems by heart writes those back.
 // Of the tries left, an exact copy of an earlier try's work is dropped, and
 // at most `keep` per problem are kept (0: all), in try order. Everything is
 // decided in a fixed order, so the same seed gives the same file.
@@ -58,10 +61,11 @@ enum class Verdict {
     markers,      // a "[[no-loss]]" marker or a BOS byte in the text
     arithmetic,   // the right answer, but a calculation in the work is wrong
     loop,         // the right answer, but a line repeats
+    gold_copy,    // the problem file's own solution, word for word: nothing new
     duplicate,    // the same work as an earlier kept try of the problem
     over_cap,     // the problem already has `keep` kept tries
 };
-inline constexpr int kVerdicts = 10;
+inline constexpr int kVerdicts = 11;
 
 inline const char* verdict_name(Verdict v) {
     switch (v) {
@@ -73,6 +77,7 @@ inline const char* verdict_name(Verdict v) {
         case Verdict::markers: return "markers";
         case Verdict::arithmetic: return "arithmetic";
         case Verdict::loop: return "loop";
+        case Verdict::gold_copy: return "gold_copy";
         case Verdict::duplicate: return "duplicate";
         case Verdict::over_cap: return "over_cap";
     }
@@ -82,6 +87,7 @@ inline const char* verdict_name(Verdict v) {
 struct Options {
     int keep = 0;             // kept tries per problem at most; 0: all
     bool allow_loops = false; // keep right tries that repeat a line
+    bool keep_gold = false;   // keep tries that copy the problem's own solution
 };
 
 // The work before the "#### " line, trimmed: what a kept try trains on.
@@ -139,6 +145,9 @@ inline Verdict check_try(const Problem& p, const std::string& text, const Option
     if (unreadable) *unreadable += label.unreadable;
     if (label.wrong_calcs() > 0 || sign_wrong(label) || note_miscopied(work)) return Verdict::arithmetic;
     if (label.loop && !o.allow_loops) return Verdict::loop;
+    // A model that learned its training problems by heart (rp1 on GSM8K
+    // train) writes their solutions back; those teach it nothing new.
+    if (!o.keep_gold && work == trim(p.steps)) return Verdict::gold_copy;
     return Verdict::kept;
 }
 

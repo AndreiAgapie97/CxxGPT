@@ -61,6 +61,14 @@ inline void test_self_train_check() {
     loops.allow_loops = true;
     EXPECT(verdict("We have seven apples now.\nWe have seven apples now.\n#### 7\n", loops) == Verdict::kept,
            "--allow-loops must keep a right try that repeats a line");
+    // The problem file's own solution, written back word for word, is
+    // dropped (spaces around it aside), unless --keep-gold; a solution that
+    // differs in a word is the model's own.
+    EXPECT(verdict(" gold work\n#### 7\n", o) == Verdict::gold_copy, "a copy of the gold solution must be dropped");
+    EXPECT(verdict("gold work, done\n#### 7\n", o) == Verdict::kept, "another solution is not a gold copy");
+    self_train::Options gold;
+    gold.keep_gold = true;
+    EXPECT(verdict("gold work\n#### 7\n", gold) == Verdict::kept, "--keep-gold must keep a copy of the gold solution");
     // A calculation the calculator cannot read is unchecked, not wrong.
     size_t calcs = 0, unreadable = 0;
     EXPECT(self_train::check_try(p, "10 / 3 = 3.33, then 3 + 4 = 7\n#### 7\n", o, &calcs, &unreadable) ==
