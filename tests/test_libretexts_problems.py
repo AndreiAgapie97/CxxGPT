@@ -132,5 +132,35 @@ class Copies(unittest.TestCase):
         self.assertFalse(B.same_problem(a, other))  # other numbers: another problem with the same answer
 
 
+
+class Excluded(unittest.TestCase):
+    def test_wrong_keys_are_dropped_in_any_spelling(self):
+        for q in ['Rachael had a 21-ounce strawberry shake that has 739 calories. How many calories are there in a 32 ounce shake?',
+                  'Rachael had a 21 ounce strawberry shake that has 739 calories. How many calories are there in a 32 ounce shake?',
+                  'Tipping At the campus coffee cart, a medium coffee costs $1.65. MaryAnne brings $2.00 with her when she '
+                  'buys a cup of coffee and leaves the change as a tip. What percent tip does she leave?',
+                  'The number of tickets for a music fundraiser varies inversely with the price of the tickets. If Madelyn '
+                  'has just enough money to purchase 12 tickets for $6, how many tickets can Madelyn afford to buy if the '
+                  'price increased to $8?',
+                  'Researchers recorded that a certain bacteria population declined from 700,000 to 400,000 in 5 hours '
+                  'after the administration of medication. At this rate of decay, how many bacteria will there be 24 '
+                  'hours from the start of the experiment?',
+                  'College roommates John and David were driving home to the same town for the holidays. John drove 55 '
+                  'mph, and David, who left an hour later, drove 60 mph. How long will it take for David to catch up to John?',
+                  'Felecia left her home to visit her daughter driving 45 mph. Her husband waited for the dog sitter to '
+                  'arrive and left home twenty minutes (1/3 hour) later. He drove 55 mph to catch up to Felecia. How long '
+                  'before he reaches her?']:
+            self.assertTrue(B.excluded(q), q)
+
+    def test_other_problems_are_kept(self):
+        for q in ['MaryAnne just returned from a visit with her grandchildren back east. The trip was 2400 miles from her '
+                  'home and her total time in the airplane for the round trip was 10 hours. If the plane was flying at a '
+                  'rate of 500 miles per hour, what was the speed of the jet stream?',
+                  'The number of tickets for a sports fundraiser varies inversely with the price of the tickets. Brianna '
+                  'has just enough money to purchase 15 tickets at $10 each. How many can she buy at $12?',
+                  'Rachael had a 16-ounce vanilla shake that has 550 calories. How many calories are in a 24 ounce shake?']:
+            self.assertFalse(B.excluded(q), q)
+
+
 if __name__ == '__main__':
     unittest.main()
