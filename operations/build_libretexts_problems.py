@@ -2,13 +2,15 @@
 
 The source is Common Pile's copy of LibreTexts (huggingface.co/datasets/
 common-pile/libretexts, one file, 00000_libretext.json.gz), which keeps each
-page's licence and address. Only math and statistics pages licensed CC BY
-(not share-alike, not non-commercial) or public domain are read.
+page's licence and address. Only math, statistics and medicine pages (the
+nursing books' dosage calculations) licensed CC BY (not share-alike, not
+non-commercial) or public domain are read.
 
 OpenStax's own math books (Prealgebra, Intermediate Algebra, Algebra and
 Trigonometry, Precalculus, Contemporary Mathematics) were CC BY 4.0 until
-OpenStax relicensed them CC BY-NC-SA 4.0 on 2026-04-23 (the
-md:license lines in github.com/openstax/osbooks-*). LibreTexts copied them
+OpenStax relicensed them CC BY-NC-SA 4.0 in 2026 (the LICENSE files of
+github.com/openstax/osbooks-* on 2026-03-12 to 03-19, their md:license
+lines on 2026-04-23). LibreTexts copied them
 while they were CC BY, and a CC licence cannot be withdrawn from copies
 already made, so those copies stay CC BY: that is what this script uses,
 never openstax.org's current books.
@@ -16,13 +18,16 @@ never openstax.org's current books.
 What is kept: numbered exercises ("12. There are 16 girls ..."), "Exercise
 N" blocks, and OpenStax's "Try It" exercises (their header did not survive
 into the text, so the question is the one paragraph before the answer),
-each with an "Answer" right after it, where
+each with an "Answer" (or "Answer:") right after it, the answer on the next
+line after a lone "-" or on the "- 340 yd" line itself, where
   - the question is one paragraph of prose (at least 10 words, a number,
     a question), with no figure, table, graph, other exercise or equation
-    it depends on, and no LaTeX left after the plain numbers are unwrapped;
+    it depends on, and no LaTeX left after the plain numbers, fractions of
+    whole numbers ("3 1/2") and degrees are unwrapped;
   - the answer holds exactly one number ("58 hardback books" is 58, "six
     boys" is 6, "$1,250" is 1250, "12%" is 12); answers with two numbers,
-    fractions, ratios, times or no number are dropped. A wrong pairing is
+    fractions, ratios, times or no number are dropped ("per" is a unit:
+    "60 miles per hour" is 60). A wrong pairing is
     worse than a lost problem, so anything unclear is dropped;
   - the question appears in no other kept page (course copies of the same
     book are common; a reworded copy has the same numbers, answer and most
@@ -34,7 +39,9 @@ each with an "Answer" right after it, where
 Each problem keeps its page's title, address, book and licence. The
 audit-sample.txt it writes holds the 100 problems with the smallest sha256
 of the question, for checking by hand (--audit-note puts the result in the
-manifest).
+manifest). --previous names an earlier build's problems.jsonl: each problem
+then says whether it is new (not the same problem as one there, by the
+near-copy rule), and the audit draws from the new ones only.
 
 These problems have answers but no worked solutions, so the token file is
 for evaluation and self-train (the model writes the work, the answer key
@@ -44,7 +51,12 @@ held-out test. Usage, from the repository root:
 
   python -I operations/build_libretexts_problems.py --pile data/libretexts-raw/00000_libretext.json.gz \\
       --heldout data/targeted-math/heldout.jsonl --cxxgpt build/cxxgpt.exe \\
-      --tok data/licensed-10b/tok.bpe --out data/libretexts-problems
+      --tok data/licensed-10b/tok.bpe --out data/libretexts-problems-2 \\
+      --previous data/libretexts-problems/problems.jsonl
+
+data/libretexts-problems (2026-10-17, 383 problems) was built before the
+"Answer:" layouts, the medicine pages, fractions and degrees in questions,
+"per" and a sentence's full stop after the answer ("The number is 4.").
 """
 import argparse
 import collections
@@ -73,6 +85,9 @@ SMALL = ('zero one two three four five six seven eight nine ten eleven twelve th
          'sixteen seventeen eighteen nineteen twenty').split()
 TENS = {'thirty': 30, 'forty': 40, 'fifty': 50, 'sixty': 60, 'seventy': 70, 'eighty': 80, 'ninety': 90}
 WORD_NUMBERS = {w: i for i, w in enumerate(SMALL)} | TENS
+# Math and statistics, and medicine for its dosage calculations ("The client weighs 176 lb. How many
+# milligrams ...?"): a question needs two numbers to compute with, so recall questions do not pass.
+HOSTS = re.compile(r'https://(math|stats|med)\.libretexts\.org/')
 NUMBER = re.compile(r'(?<![\w.])-?\d+(?:\.\d+)?(?![\w.])')
 
 
@@ -94,6 +109,11 @@ def unwrap(text):
         s = re.sub(r'\\(?:text|mathrm|textbf)\{([^{}]*)\}', r'\1', s)
         s = s.replace('\\$', '$').replace('\\%', '%').replace('\\,', '').replace('\\;', ' ').replace('\\ ', ' ')
         s = s.replace('{,}', ',').replace('\\!', '')
+        # Fractions of whole numbers and degrees, as a question would print them: "3\dfrac{1}{2}" is
+        # "3 1/2", "\frac{3}{4}" is "3/4", "27^{\circ}" is "27°". An answer with a "/" is still dropped.
+        s = re.sub(r'(\d)\s*\\[dt]?frac\s*\{\s*(\d+)\s*\}\s*\{\s*(\d+)\s*\}', r'\1 \2/\3', s)
+        s = re.sub(r'\\[dt]?frac\s*\{\s*(\d+)\s*\}\s*\{\s*(\d+)\s*\}', r'\1/\2', s)
+        s = re.sub(r'\s*\^\s*(?:\{\s*\\circ\s*\}|\\circ)', '°', s)
         return s
     text = re.sub(r'\\\((.*?)\\\)', inline, text)
     text = text.replace('\\$', '$').replace('\\%', '%')
@@ -112,11 +132,13 @@ def answer_number(text):
     if text is not None and re.match(r'([a-d][.)]\s|(example|exercise|solution|try it|section|chapter|lesson|'
                                      r'problem|step|figure|table)\b)', text, re.I):
         return None  # part a of several, or an empty answer followed by the next heading ("EXAMPLE 11")
-    if text is None or re.search(r'[/:±×=<>]|\bor\b|\band\b|\bto\b|\bper\b|\bremainder\b|\bR\d', text):
+    # ("per" is a unit, "1036.73 miles per hour"; a rate of two numbers, "3 per 100", has two numbers)
+    if text is None or re.search(r'[/:±×=<>]|\bor\b|\band\b|\bto\b|\bremainder\b|\bR\d', text):
         if text is None or not re.fullmatch(r'[a-z]\s*=\s*-?[\d,.]+', text):  # "x = 5" is fine
             return None
         text = text.split('=')[1]
     plain = re.sub(r'(?<=\d),(?=\d{3}\b)', '', text)
+    plain = re.sub(r'(?<=\d)\.$', '', plain.strip())  # a sentence's full stop: "The number is 4."
     found = NUMBER.findall(plain)
     words = [w for w in re.findall(r'[a-z]+(?:-[a-z]+)?', plain.lower())
              if w in WORD_NUMBERS or (w.split('-')[0] in TENS and w.split('-')[-1] in SMALL[1:10])]
@@ -177,12 +199,22 @@ def problems_of(text):
             continue
         if start is None and i > 0:
             start = i - 1  # OpenStax's "Try It" exercises lost their header: the paragraph before the answer
-        if start is None or m.group(1).strip() or i + 2 >= len(lines) or lines[i + 1].strip() != '-':
+        # "- Answer" or "- Answer:" (the colon in Precalculus 1e's review exercises and its copies), not
+        # "- Answer a", one part of several.
+        if start is None or m.group(1).strip() not in ('', ':') or i + 2 >= len(lines):
             dropped += 1
             start = None
             continue
         # The answer is one line: the next paragraph is already the next exercise or the book's text.
-        ans = lines[i + 2]
+        # It is the line after a lone "-", or the rest of a "- 340 yd" line.
+        if lines[i + 1].strip() == '-':
+            ans = lines[i + 2]
+        elif re.match(r'^- \S', lines[i + 1]):
+            ans = lines[i + 1][2:]
+        else:
+            dropped += 1
+            start = None
+            continue
         q, a = question_text(lines[start:i]), None if ITEM.match(ans) else answer_number(ans)
         if q and a is not None:
             found.append((q, a))
@@ -194,6 +226,18 @@ def problems_of(text):
 
 def key(q):
     return ' '.join(re.findall(r'[a-z0-9]+', q.lower()))
+
+
+def fingerprint(question, final):
+    """What two wordings of one problem share: the answer, the numbers in order, and the words."""
+    words = key(question).split()
+    return final, numbers(' '.join(str(WORD_NUMBERS.get(w, w)) for w in words)), set(words)
+
+
+def same_problem(a, b):
+    """Course remixes reword a little ("has an area of 15 ... 5 feet" and "has area 15 ... five feet"):
+    the same answer, the same numbers and mostly the same words is one problem."""
+    return a[0] == b[0] and a[1] == b[1] and len(a[2] & b[2]) >= 0.5 * len(a[2] | b[2])
 
 
 # Problems the hand audit found broken in the books themselves (the start of the question, and why).
@@ -221,6 +265,8 @@ def main():
     ap.add_argument('--out', required=True, help='a new folder')
     ap.add_argument('--audit', type=int, default=100, help='problems drawn for a hand audit')
     ap.add_argument('--audit-note', help="the hand audit's result, for the manifest")
+    ap.add_argument('--previous', help="an earlier build's problems.jsonl: each problem says whether it is new "
+                                       "there, and the audit draws from the new ones only")
     args = ap.parse_args()
     out = pathlib.Path(args.out)
     args.cxxgpt = str(pathlib.Path(args.cxxgpt).resolve())  # Windows does not search relative paths
@@ -239,16 +285,16 @@ def main():
         return any((tuple(k), answer) in held_numbers for k in [nums] + [nums[:i] + nums[i + 1:]
                                                                          for i in range(len(nums))])
 
-    stats, per_book, licences = collections.Counter(), collections.Counter(), collections.Counter()
+    stats = collections.Counter()
     kept, seen, answers = [], {}, collections.defaultdict(set)
     with gzip.open(args.pile, 'rt', encoding='utf-8') as f:
         for line in f:
             doc = json.loads(line)
             meta = doc['metadata']
             url = meta.get('url', '')
-            if not re.match(r'https://(math|stats)\.libretexts\.org/', url):
+            if not re.match(HOSTS, url):
                 continue
-            stats['math pages'] += 1
+            stats['pages read'] += 1
             if not allowed_licence(meta.get('license', '')):
                 stats['pages with another licence'] += 1
                 continue
@@ -280,27 +326,31 @@ def main():
                         'source': 'LibreTexts via Common Pile (common-pile/libretexts)', 'copies': 1}
                 seen[k] = item
                 kept.append(item)
-                per_book[book] += 1
-                licences[meta.get('license', '')] += 1
     disagree = [item for item in kept if len(answers[key(item['question'])]) > 1]
     stats['dropped: copies of the question disagree on the answer'] = len(disagree)
     kept = [item for item in kept if len(answers[key(item['question'])]) == 1]
-    # Course remixes reword a little ("has an area of 15 ... 5 feet" and "has area 15 ... five feet"):
-    # the same answer, the same numbers and mostly the same words is a copy too.
     unique = []
     for item in kept:
-        words = key(item['question']).split()
-        nums = numbers(' '.join(str(WORD_NUMBERS.get(w, w)) for w in words))
-        words = set(words)
-        twin = next((u for u, u_nums, u_words in unique if u['final'] == item['final'] and u_nums == nums and
-                     len(words & u_words) >= 0.5 * len(words | u_words)), None)
+        mark = fingerprint(item['question'], item['final'])
+        twin = next((u for u, u_mark in unique if same_problem(mark, u_mark)), None)
         if twin:
             twin['copies'] += item['copies']
             stats['near-copies of a kept question'] += 1
         else:
-            unique.append((item, nums, words))
-    kept = [item for item, _, _ in unique]
+            unique.append((item, mark))
+    kept = [item for item, _ in unique]
     stats['kept'] = len(kept)
+    per_book = collections.Counter(item['book'] for item in kept)  # of the problems written, not those found
+    licences = collections.Counter(item['license'] for item in kept)
+    if args.previous:
+        # The same problem in other words counts as old: the near-copy rule above decides.
+        before = [fingerprint(p['question'], p['final']) for p in
+                  map(json.loads, pathlib.Path(args.previous).read_text(encoding='utf-8').splitlines())]
+        for item, mark in unique:
+            item['new'] = not any(same_problem(mark, b) for b in before)
+        stats['kept, new since --previous'] = sum(item['new'] for item in kept)
+        stats['--previous problems not kept again'] = sum(not any(same_problem(b, mark) for _, mark in unique)
+                                                          for b in before)
     print(dict(stats), flush=True)
 
     out.mkdir(parents=True)
@@ -310,7 +360,8 @@ def main():
     subprocess.run([args.cxxgpt, 'prep-qa', '--in', str(out / 'problems.jsonl'), '--out', str(out / 'problems'),
                     '--bpe', args.tok, '--task', 'libretexts'], check=True)
     # The audit draws by each question's hash, so a filter that drops a problem leaves the rest of the draw.
-    audit = sorted(kept, key=lambda item: hashlib.sha256(item['question'].encode()).hexdigest())[:args.audit]
+    audit = sorted([item for item in kept if item.get('new', True)],
+                   key=lambda item: hashlib.sha256(item['question'].encode()).hexdigest())[:args.audit]
     with open(out / 'audit-sample.txt', 'w', encoding='utf-8', newline='\n') as dest:
         for i, item in enumerate(audit, 1):
             dest.write(f"{i}. {item['question']}\n   answer: {item['final']}\n   {item['url']}\n\n")
@@ -323,8 +374,10 @@ def main():
         'builder_commit': subprocess.run(['git', 'rev-parse', 'HEAD'], capture_output=True, text=True,
                                          check=True).stdout.strip(),
         'tokenizer_sha256': sha256(args.tok),
+        'previous': {'path': args.previous, 'sha256': sha256(args.previous)} if args.previous else None,
         'licences': dict(licences),
-        'licence_note': "OpenStax's math books were CC BY 4.0 until 2026-04-23 (then CC BY-NC-SA 4.0); "
+        'licence_note': "OpenStax's books were CC BY 4.0 until 2026 (then CC BY-NC-SA 4.0: the osbooks LICENSE "
+                        'files from 2026-03-12, the md:license lines from 2026-04-23); '
                         'the LibreTexts copies used here were made under CC BY and keep it (Common Pile '
                         'uploaded its LibreTexts file on 2025-03-17)',
         'use': 'evaluation and self-train only: final answers without worked solutions; LibreTexts is in '
