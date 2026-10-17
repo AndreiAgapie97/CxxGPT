@@ -646,12 +646,24 @@ grep -q '^kept 0 solutions -> ' "$TEST_DIR/self-a.log"
 [[ ! -s "$TEST_DIR/self-a.txt" ]]
 grep -q '"kept":0,' "$TEST_DIR/self-a.json"
 grep -q '"keep":2,' "$TEST_DIR/self-a.json"
+# --recheck checks an audit file's tries again without a model: the same
+# verdicts, and the sampling options are refused with it.
+"$CXXGPT" self-train --problems "$TEST_DIR/audit.txt" --recheck "$TEST_DIR/self-a.audit.jsonl" \
+    --out "$TEST_DIR/self-re" --audit "$TEST_DIR/self-re.audit.jsonl" --threads 2 > "$TEST_DIR/self-re.log"
+grep -q '^1 problems, 3 tries each, 3 tries, checked again from ' "$TEST_DIR/self-re.log"
+cmp "$TEST_DIR/self-a.audit.jsonl" "$TEST_DIR/self-re.audit.jsonl"
+grep -q '"recheck":"' "$TEST_DIR/self-re.json"
+status=0
+"$CXXGPT" self-train --problems "$TEST_DIR/audit.txt" --recheck "$TEST_DIR/self-a.audit.jsonl" \
+    --out "$TEST_DIR/self-re" --tries 2 --threads 2 > "$TEST_DIR/self-bad.log" 2>&1 || status=$?
+[[ "$status" == 1 ]]
+grep -q -- '--tries does nothing with --recheck' "$TEST_DIR/self-bad.log"
 # --exclude drops a problem that repeats an excluded question.
 "$CXXGPT" self-train --ckpt "$TEST_DIR/audit.ckpt" --problems "$TEST_DIR/audit.txt" --out "$TEST_DIR/self-x"     --exclude "$TEST_DIR/audit.txt" --tries 2 --max-new 4 --threads 2 > "$TEST_DIR/self-x.log"
 grep -q '^0 problems (1 excluded), ' "$TEST_DIR/self-x.log"
 # Refused: greedy tries (all the same), a negative cap, an unknown tool,
 # --gpu on the CPU build, a missing --out.
-for options in '--temp 0' '--keep -1' '--tools bogus' '--gpu' '--matmul bf16' '--tries 0'; do
+for options in '--temp 0' '--keep -1' '--tools bogus' '--gpu' '--matmul bf16' '--tries 0' '--same words'; do
     status=0
     "$CXXGPT" self-train --ckpt "$TEST_DIR/audit.ckpt" --problems "$TEST_DIR/audit.txt" --out "$TEST_DIR/self-bad"         $options --threads 2 > "$TEST_DIR/self-bad.log" 2>&1 || status=$?
     [[ "$status" == 1 ]]
