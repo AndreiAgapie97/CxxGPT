@@ -95,9 +95,9 @@ def evaluate(expression):
     if it is anything else or calc.h would reject it (a number or a step outside 64 bits,
     over 4096 bytes, over 128 nested parentheses and signs). Digit-grouping commas are
     dropped first, as calc.h drops them (ungroup)."""
-    expression = ungroup(expression)
-    if len(expression) > 4096:
+    if len(expression) > 4096:  # the text as written, before ungroup() makes it shorter
         return None
+    expression = ungroup(expression)
     tokens, pos = [], 0
     expression = expression.strip()
     while pos < len(expression):

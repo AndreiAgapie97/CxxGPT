@@ -46,6 +46,10 @@ class CalcNotes(unittest.TestCase):
     def test_depth_bound_is_calc_h_s(self):
         self.assertEqual(calc('(' * 127 + '1' + ')' * 127), '1')
 
+    def test_length_bound_is_before_the_commas_go(self):
+        self.assertIsNone(calc('1,000' + ' ' * 4092))
+        self.assertEqual(calc('1,000' + ' ' * 4091), '1000')
+
 
 if __name__ == '__main__':
     unittest.main()

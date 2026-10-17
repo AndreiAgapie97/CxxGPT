@@ -96,6 +96,8 @@ inline void test_calc() {
         EXPECT(!calc::evaluate(expr), "calculator must reject: %s", expr);
     EXPECT(!calc::evaluate(std::string(129, '(') + "1" + std::string(129, ')')), "calculator depth bound");
     EXPECT(!calc::evaluate(std::string(4097, '1')), "calculator length bound");
+    EXPECT(!calc::evaluate("1,000" + std::string(4092, ' ')), "the length bound is on the text before its commas go");
+    EXPECT(calc::evaluate("1,000" + std::string(4091, ' ')) == std::optional<std::string>("1000"), "4096 bytes with commas");
 
     // Random expression trees against an exact reference that never uses
     // fractions (see CalcDecimal). The calculator's answer must be exactly

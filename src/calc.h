@@ -175,6 +175,9 @@ inline std::string ungroup(std::string_view text) {
 }
 
 inline std::optional<std::string> evaluate(std::string_view expression) {
+    // The 4096-byte bound is on the text as written, before ungroup()
+    // makes it shorter.
+    if (expression.size() > 4096) return {};
     const auto r = Parser(ungroup(expression)).parse();
     if (!r) return {};
     int64_t d = r->den;
