@@ -53,6 +53,7 @@
 #include "reason_report.h"
 #include "redraw.h"
 #include "redraw_qa.h"
+#include "score_checks.h"
 #include "self_train.h"
 #include "tokenizer.h"
 #include "train.h"
@@ -1026,6 +1027,21 @@ int cmd_eval_reasoning(Args& a) {
     return 0;
 }
 
+// The stricter checks (self_train.h; README "Stricter checks"), off by
+// default: together they drop about twice as many lucky tries as clean
+// ones are lost, and a quarter of GSM8K's own solutions fail them. --strict
+// turns on all five.
+void strict_check_flags(Args& a, self_train::Options& o) {
+    const bool all = a.flag("strict");
+    const bool outside = a.flag("strict-outside"), dead = a.flag("check-dead"), mismatch = a.flag("check-mismatch"),
+               broken = a.flag("check-broken"), computed = a.flag("check-computed");
+    o.strict_outside = all || outside;
+    o.check_dead = all || dead;
+    o.check_mismatch = all || mismatch;
+    o.check_broken = all || broken;
+    o.check_computed = all || computed;
+}
+
 // The model's own checked solutions as training data (self_train.h): every
 // problem sampled --tries times, and only the tries with the right answer
 // and right arithmetic kept, written as OUT.txt (problems), OUT.tok (masked
@@ -1079,6 +1095,7 @@ int cmd_self_train(Args& a) {
     // gives every version's answer; with strict readings it is dropped as
     // ambiguous.
     opts.every_reading = !a.flag("strict-readings");
+    strict_check_flags(a, opts);
     // What makes two tries the same solution: their outline (the values of
     // their calculations, in order) or their text.
     const std::string same = a.str("same", "outline");
@@ -1262,7 +1279,12 @@ int cmd_self_train(Args& a) {
                        (opts.keep_gold ? "true" : "false") + ",\"recipes\":" + str(recipes_path) +
                        ",\"redraws\":" + std::to_string(redraws) + ",\"keep_unchecked\":" +
                        (opts.keep_unchecked ? "true" : "false") + ",\"every_reading\":" +
-                       (opts.every_reading ? "true" : "false") + ",\"ambiguous_passed\":" +
+                       (opts.every_reading ? "true" : "false") + ",\"strict_outside\":" +
+                       (opts.strict_outside ? "true" : "false") + ",\"check_dead\":" +
+                       (opts.check_dead ? "true" : "false") + ",\"check_mismatch\":" +
+                       (opts.check_mismatch ? "true" : "false") + ",\"check_broken\":" +
+                       (opts.check_broken ? "true" : "false") + ",\"check_computed\":" +
+                       (opts.check_computed ? "true" : "false") + ",\"ambiguous_passed\":" +
                        std::to_string(r.ambiguous_passed) + ",\"redrawn\":" + std::to_string(redrawn) +
                        ",\"redraw_draws\":" + std::to_string(draws) + ",\"with_constants\":" +
                        std::to_string(r.with_constants) + ",\"with_constants_passed\":" +
@@ -1312,6 +1334,60 @@ int cmd_self_train(Args& a) {
             }
         CHECK(std::fclose(log) == 0, "error writing %s", audit_path.c_str());
         std::printf("every try: %s\n", audit_path.c_str());
+    }
+    return 0;
+}
+
+// self-train's checks on tries labelled by hand (score_checks.h): of the
+// tries they keep, how many are clean, and which clean tries they drop.
+int cmd_score_checks(Args& a) {
+    const std::string path = a.str("labels", "tests/checker_labels.jsonl");
+    // The same switches as self-train's, to see what each check does.
+    self_train::Options o;
+    o.allow_loops = a.flag("allow-loops");
+    o.allow_outside = a.flag("allow-outside");
+    o.allow_unused = a.flag("allow-unused");
+    o.keep_gold = a.flag("keep-gold");
+    strict_check_flags(a, o);
+    // Prints the tune half's tries with this verdict and label
+    // ("kept:lucky"), to see what a new check could catch; the held-out
+    // half is never shown.
+    const std::string show = a.str("show", "");
+    a.done();
+    using namespace score_checks;
+    const std::vector<Labelled> tries = load(path);
+    if (!show.empty()) {
+        for (const Labelled& t : tries) {
+            if (t.split != "tune") continue;
+            const std::string v = self_train::verdict_name(self_train::check_try(t.problem, t.text, o));
+            if (v + ":" + kLabelNames[t.label] != show) continue;
+            std::printf("==== %s: %s\n  (answer %s)\n%s\n", t.set.c_str(), t.problem.question.c_str(),
+                        t.problem.answer.c_str(), t.text.c_str());
+        }
+        return 0;
+    }
+    const Score s = score(tries, o);
+    auto pct = [](long part, long whole) { return 100.0 * double(part) / double(std::max(1L, whole)); };
+    // The tune and held-out halves of every set together, then each group.
+    for (const char* split : {"tune", "held-out"}) {
+        long kept = 0, kept_clean = 0, kept_minor = 0, dropped = 0;
+        for (size_t g = 0; g < s.groups.size(); ++g)
+            if (s.groups[g].second == split)
+                kept += s.kept_total(g), kept_clean += s.kept(g, clean), kept_minor += s.kept(g, minor),
+                    dropped += s.clean_dropped(g);
+        std::printf("%-8s kept %ld: clean %ld (%.1f%%), clean or minor %ld (%.1f%%); clean tries dropped: %ld\n",
+                    split, kept, kept_clean, pct(kept_clean, kept), kept_clean + kept_minor,
+                    pct(kept_clean + kept_minor, kept), dropped);
+    }
+    for (size_t g = 0; g < s.groups.size(); ++g) {
+        std::printf("\n%s, %s\n  %-12s", s.groups[g].first.c_str(), s.groups[g].second.c_str(), "verdict");
+        for (const char* name : kLabelNames) std::printf(" %7s", name);
+        std::printf("\n");
+        for (const auto& [v, c] : s.counts[g]) {
+            std::printf("  %-12s", self_train::verdict_name(v));
+            for (long n : c) std::printf(" %7ld", n);
+            std::printf("\n");
+        }
     }
     return 0;
 }
@@ -2373,6 +2449,7 @@ int main(int argc, char** argv) {
         {"prep-qa", cmd_prep_qa, "turns question/answer JSON Lines into problems and token files"},
         {"eval-reasoning", cmd_eval_reasoning, "exact-answer accuracy on a problems file"},
         {"self-train", cmd_self_train, "keeps the model's own right, checked solutions as training tokens"},
+        {"score-checks", cmd_score_checks, "self-train's checks against hand-labelled tries: how many kept are clean"},
         {"eval-loss", cmd_eval_loss, "a checkpoint's loss on held-out token files"},
         {"bench-infer", cmd_bench_infer, "times the ternary inference engine against fp32 decoding"},
         {"redraw-qa", cmd_redraw_qa, "writes GSM8K train questions again with new numbers and exact answers"},

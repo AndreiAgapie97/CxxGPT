@@ -691,6 +691,12 @@ grep -q '"keep":2,' "$TEST_DIR/self-a.json"
 grep -q '^1 problems, 3 tries each, 3 tries, checked again from ' "$TEST_DIR/self-re.log"
 cmp "$TEST_DIR/self-a.audit.jsonl" "$TEST_DIR/self-re.audit.jsonl"
 grep -q '"recheck":"' "$TEST_DIR/self-re.json"
+grep -q '"strict_outside":false,"check_dead":false,' "$TEST_DIR/self-re.json"
+# --strict turns on the five stricter checks, and the JSON says so.
+"$CXXGPT" self-train --problems "$TEST_DIR/audit.txt" --recheck "$TEST_DIR/self-a.audit.jsonl" \
+    --out "$TEST_DIR/self-strict" --strict --threads 2 > "$TEST_DIR/self-strict.log"
+grep -q '"strict_outside":true,"check_dead":true,"check_mismatch":true,"check_broken":true,"check_computed":true,' \
+    "$TEST_DIR/self-strict.json"
 status=0
 "$CXXGPT" self-train --problems "$TEST_DIR/audit.txt" --recheck "$TEST_DIR/self-a.audit.jsonl" \
     --out "$TEST_DIR/self-re" --tries 2 --threads 2 > "$TEST_DIR/self-bad.log" 2>&1 || status=$?
@@ -699,6 +705,20 @@ grep -q -- '--tries does nothing with --recheck' "$TEST_DIR/self-bad.log"
 # --exclude drops a problem that repeats an excluded question.
 "$CXXGPT" self-train --ckpt "$TEST_DIR/audit.ckpt" --problems "$TEST_DIR/audit.txt" --out "$TEST_DIR/self-x"     --exclude "$TEST_DIR/audit.txt" --tries 2 --max-new 4 --threads 2 > "$TEST_DIR/self-x.log"
 grep -q '^0 problems (1 excluded), ' "$TEST_DIR/self-x.log"
+# score-checks: the hand-labelled tries (tests/checker_labels.jsonl) through
+# today's checks. A check that changes these numbers changes README's
+# "How clean are the kept tries?": update both. No clean try may be dropped.
+"$CXXGPT" score-checks > "$TEST_DIR/score.log"
+grep -q '^tune     kept 118: clean 9 (7.6%), clean or minor 28 (23.7%); clean tries dropped: 0$' "$TEST_DIR/score.log"
+grep -q '^held-out kept 111: clean 3 (2.7%), clean or minor 13 (11.7%); clean tries dropped: 0$' "$TEST_DIR/score.log"
+"$CXXGPT" score-checks --allow-unused > "$TEST_DIR/score-unused.log"
+grep -q '^held-out kept 181: ' "$TEST_DIR/score-unused.log"
+# The stricter checks (README "Stricter checks").
+"$CXXGPT" score-checks --strict > "$TEST_DIR/score-strict.log"
+grep -q '^tune     kept 72: clean 9 (12.5%), clean or minor 27 (37.5%); clean tries dropped: 0$' "$TEST_DIR/score-strict.log"
+grep -q '^held-out kept 59: clean 3 (5.1%), clean or minor 13 (22.0%); clean tries dropped: 0$' "$TEST_DIR/score-strict.log"
+"$CXXGPT" score-checks --check-dead --show kept:lucky > "$TEST_DIR/score-show.log"
+grep -q '^==== textbook: ' "$TEST_DIR/score-show.log"
 # The re-draw check: gen-word/gen-math --recipes writes one recipe per
 # problem and leaves the problems as they are; self-train draws each one
 # again (3 versions by default), records it in the summary and the JSON,

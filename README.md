@@ -418,6 +418,123 @@ right arithmetic (the area of a triangle as `7 x 7 = 49`, where `14 x 7 /
 version of the problem (the re-draw check, below), which these problems
 do not have. None of it is in a mix.
 
+#### How clean are the kept tries?
+
+```sh
+build/cxxgpt score-checks                  # tests/checker_labels.jsonl
+build/cxxgpt score-checks --allow-unused   # the same, one check off
+```
+
+The owner's rule (2026-10-17): self-train trains only on clean solutions.
+To measure how far the checks are from that, every try with the right
+answer in two 32-try audits of rp1 (20 minutes into night 2's mix, `--temp
+0.7 --seed 1 --tools calc-notes`) was labelled by hand, blind to the
+checks' verdicts: 546 tries, 217 on 106 of the 383 textbook problems and
+329 on 179 of the 500 GSM8K dev problems; tries the
+checks call duplicates are left out. The labels (`tests/checker_labels.jsonl`,
+written by `operations/build_checker_labels.py`, with each textbook page's
+address and CC BY licence; GSM8K is MIT; the tries are our model's own):
+- `clean`: every statement true, every calculation right and needed, a
+  method that would give the right answer with other numbers;
+- `padded`: a sound method, plus something not to train on (a calculation
+  never used, a false or nonsense sentence, a number copied wrong);
+  `minor` when that is one wrong word or unit (`5 x 2 = 10 miles per
+  hour` for miles a day);
+- `lucky`: the answer does not follow from a sound method (`7 x 7 = 49`
+  for a triangle of base 14 and height 7; `24 + 12 = 36` with the 12
+  never worked out).
+
+Of the 546: 27 clean, 93 minor, 108 padded, 318 lucky. Each problem is in a
+tune half or a held-out half (the first byte of the sha256 of its question,
+odd: held out); new checks are tried on the tune half, and the held-out
+half gives the number to believe. `score-checks` runs today's checks on
+every try:
+
+| half | kept | clean | clean or minor | clean tries dropped |
+|---|---|---|---|---|
+| tune | 118 | 9 (7.6%) | 28 (23.7%) | 0 |
+| held-out | 111 | 3 (2.7%) | 13 (11.7%) | 0 |
+
+- The checks never drop a clean try, but of what they keep, 2.7% is clean
+  on the held-out half (and half of it is lucky: 58 of 111). Each check
+  helps: with the loop, outside and unused checks off, 1.5% is clean.
+- The arithmetic, loop, outside and unused checks drop 232 tries, all
+  padded or lucky (114 by the unused check, 112 of them lucky).
+- Most clean GSM8K tries (15 of 17) are gold copies: the same outline as
+  GSM8K's own solution, which a sound short solution often is. The model
+  never saw these dev solutions, so they count as clean, but self-train
+  drops them on purpose (`--keep-gold` keeps them).
+- One reader labelled all 546 in one day. 30 tries labelled again blind,
+  in random order, got the same label, but the reader remembered many of
+  them; a second reader would be a better check.
+
+So today's checks are far from training only on clean solutions: on the
+held-out half they keep 36 tries that are not clean for every clean one. Nothing
+self-trained goes into a mix until a check set clears a bar fixed in
+advance on the held-out half (95% clean was proposed).
+
+#### Stricter checks
+
+```sh
+build/cxxgpt score-checks --strict                         # all five
+build/cxxgpt score-checks --check-dead --show kept:lucky   # the tune half's kept lucky tries
+build/cxxgpt self-train ... --strict                       # the same switches
+```
+
+Five more checks, off by default (2026-10-17), each found by reading
+the tune half's kept tries (`score-checks --show VERDICT:LABEL` prints
+the tune half only, never the held-out one):
+- `--strict-outside`: no number one +, -, * or / away from the question's
+  numbers (the outside check lets those in, which lets in almost any
+  small number); a number must be in the question (a percentage or an
+  amount in cents also as its hundredth), 1, 2, 100, a half, 0.01, a
+  constant, a result right after "=" (with its sign), or written earlier;
+  decimals without their 0 (`.731`) are read;
+- `--check-dead` (verdict `dead`): every calculation's result is used
+  later, or is the answer (`171 + 380 = 551` and never 551 again); a
+  percentage counts as its share (`100 - 25 = 75`, then `.75`);
+- `--check-mismatch` (`mismatch`): the calculation written before a note is
+  the note's (`.71 x 100 = <<171*100=17100>>`, `60 / 1 = <<60/4=15>>`): the
+  same value, or else no number the note leaves out;
+- `--check-broken` (`broken`): every note is written
+  `<<calculation=result>>` (not `<<19.45>>`, `<<60=60>>` or `45>>45>>45`);
+- `--check-computed` (`uncomputed`): some calculation gives the answer,
+  or it is written right after an "=" (`x = 2350`).
+
+Each was tried on the tune half, and on GSM8K train's own 7,473 solutions
+(the dev problems are not in it), which a check should keep: what it
+drops there are mostly clean solutions, sometimes real slips (`6*2.5 =
+<<6*3=18>>`, an answer of 66 after a work ending in 64, bare `<<12=12>>`
+notes). Kept tries on the tune half, and GSM8K solutions dropped:
+
+| checks | tune kept | clean | clean or minor | clean dropped | GSM8K solutions dropped |
+|---|---|---|---|---|---|
+| today's | 118 | 9 (7.6%) | 28 (23.7%) | 0 | 948 (12.7%) |
+| `--strict-outside` | 99 | 9 (9.1%) | 28 (28.3%) | 0 | 1,812 (24.2%) |
+| `--check-dead` | 96 | 9 (9.4%) | 28 (29.2%) | 0 | 1,021 (13.7%) |
+| `--check-mismatch` | 110 | 9 (8.2%) | 28 (25.5%) | 0 | 988 (13.2%) |
+| `--check-broken` | 109 | 9 (8.3%) | 27 (24.8%) | 0 | 1,210 (16.2%) |
+| `--check-computed` | 115 | 9 (7.8%) | 28 (24.3%) | 0 | 989 (13.2%) |
+| `--strict` (all five) | 72 | 9 (12.5%) | 27 (37.5%) | 0 | 1,940 (26.0%) |
+
+On the held-out half, `--strict` keeps 59 tries: 3 clean (5.1%, from
+2.7%), 13 clean or minor (22.0%, from 11.7%), no clean try dropped. (The
+held-out counts were printed once, by `score-checks` without `--show`,
+while the checks were being written, but no held-out try was read, and no
+check was chosen or changed for them.) Two other checks were tried and
+dropped: the same calculation twice (GSM8K writes `2 × $3` for each of two
+people's eggs) and a calculation times 1 (`5*1` for one nickel).
+
+What these checks cannot catch is most of what is left: every calculation
+right, every number from the question, and a method that has nothing to
+do with the story (`15 - 7 = 8`, `8 x 15 = 120`, `120 - 15 = 105` for
+seven penalties of 15 yards). No check on the text tells that from a
+sound solution, so the 95% bar is out of reach this way; the held-out
+half has too few clean tries (3) to measure such a bar anyway. What tells
+method from luck is the re-draw check below: the same story with other
+numbers. The stricter checks cost a quarter of GSM8K's own solutions,
+and a stronger model will write more like them than rp1's short tries do.
+
 #### The re-draw check: right by method, not by luck
 
 The checks above do not see a wrong plan that lands on the right number:
