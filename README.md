@@ -222,7 +222,13 @@ patterns for inspection and do not establish the cause of a wrong answer.
 ### The model's own checked solutions (self-train)
 
 ```sh
-build/cxxgpt-gpu self-train --gpu --ckpt runs/rp1.ckpt --bpe data/licensed-10b/tok.bpe     --problems data/licensed-10b/gsm8k-train.txt --out data/self/rp1-gsm8k     --tries 8 --temp 0.7 --seed 1 --keep 2     --exclude data/licensed-10b/gsm8k-test.txt,data/licensed-10b/gsm8k-dev.txt
+build/cxxgpt-gpu self-train --gpu --ckpt runs/rp1.ckpt --bpe data/licensed-10b/tok.bpe \
+    --problems data/math/fresh.txt --out data/self/rp1-fresh \
+    --tries 8 --temp 0.7 --seed 1 --keep 2 --audit data/self/rp1-fresh.audit.jsonl \
+    --exclude data/licensed-10b/gsm8k-test.txt,data/licensed-10b/gsm8k-dev.txt
+# The same tries checked again, with other settings or newer checks, without a model:
+build/cxxgpt self-train --bpe data/licensed-10b/tok.bpe --problems data/math/fresh.txt \
+    --recheck data/self/rp1-fresh.audit.jsonl --out data/self/rp1-fresh-text --same text
 ```
 
 The model tries every problem `--tries` times (the same sampler and seeds
@@ -240,14 +246,29 @@ as `eval-reasoning --tries`), and a try is kept only if (`src/self_train.h`):
   counted, not rejected;
 - no line of 12 or more characters is written twice (`--allow-loops` keeps
   those);
-- it is not the problem file's own solution word for word (`--keep-gold`
-  keeps those): a model that has learned its training problems by heart
-  writes them back, and they teach it nothing new;
+- it uses no number from outside the question: not in it (in digits or
+  words), not a result after `=`, and not one `+ - * /` away from numbers
+  already seen (the `--labels` outside flag), apart from 1, 2, 100 and a
+  few constants (7, 12, 24, 52, 60, 365, 1000: days a week, months,
+  hours, minutes, weeks and days a year, metric units). Numbers the work
+  writes in words (`Each box holds thirteen`) are checked too, against
+  the question's numbers, the work's own and one step from them. An invented
+  quantity is a wrong plan even when the answer comes out right
+  (`--allow-outside` keeps those);
+- it is not the problem file's own solution (`--keep-gold` keeps those):
+  a model that has learned its training problems, or a generator's
+  templates, writes them back, and they teach it nothing new;
 - it holds no `[[no-loss]]` marker and no BOS byte.
 
-Of those, an exact copy of an earlier try's work is dropped, and at most
-`--keep K` per problem are kept (0, the default: every distinct one), in
-try order, so the same seed writes the same files:
+Of those, a try that is the same solution as an earlier kept one is
+dropped, and at most `--keep K` per problem are kept (0, the default: every
+distinct one), in try order, so the same seed writes the same files. "The
+same solution", for the gold check too, means the same outline by default
+(`--same outline`): the same calculations' values in the same order, in
+whatever words (`12*4 = 48 pencils` and `The start is 12 x 4 = 48`). So
+`2 * 5 = 10` and `5 + 5 = 10` count as the same, which matters little
+past one step. Work without a readable calculation is compared as text,
+and `--same text` compares only text (spaces around it aside). The files:
 - `OUT.txt`: the kept solutions as a problems file (for a person,
   `leak-check` or `eval-reasoning`);
 - `OUT.tok`: the same as `prep-qa` writes them, the question masked out
@@ -259,11 +280,14 @@ try order, so the same seed writes the same files:
 The summary gives the problems tried, the first try's accuracy, the
 problems any try solved (pass@N) and those with a kept solution, and every
 try's verdict (`kept`, `unfinished`, `wrong`, `no_work`, `markers`,
-`arithmetic`, `loop`, `gold_copy`, `ambiguous`, `unchecked`, `redraw`,
-`duplicate`, `over_cap`, `too_long`); `--audit FILE.jsonl` writes every
-try's text and verdict. `--tools calc-notes`
-lets the calculator finish the model's notes while it writes, as in
-`eval-reasoning`.
+`arithmetic`, `loop`, `outside`, `gold_copy`, `ambiguous`, `unchecked`,
+`redraw`, `duplicate`, `over_cap`, `too_long`); `--audit FILE.jsonl` writes
+every try's text, verdict and outside numbers (and the re-draw check's
+record, below). `--recheck FILE.jsonl` (with the same `--problems`) checks
+an audit file's tries again without a model, for other settings or newer
+checks; options that decide the sampling are refused with it.
+`--tools calc-notes` lets the calculator finish the model's notes while
+it writes, as in `eval-reasoning`.
 
 The problems must be training problems: GSM8K train (as `prep-qa` writes
 it, without the dev problems), or the train split of a generator, never a
@@ -301,6 +325,28 @@ each.)
   whose text is not already in its training: problems with an answer but
   no worked solution, or kinds of problem it has not been taught.
 
+The same tries checked again (`--recheck`) with the outline and outside
+checks, the defaults since 2026-10-17 (kept with `--same text` in
+brackets, which reproduces the table above):
+
+| problems | kept | gold copies | outside | wrong step |
+|---|---|---|---|---|
+| GSM8K train, 16 | 0 (3) | 52 | 0 | 1 |
+| `gen-word`, 100 | 0 (752) | 798 | 0 | 0 |
+| `gen-math` equations, 100 | 0 (1) | 745 | 0 | 14 |
+| `gen-math` fractions, 100 | 0 (1) | 683 | 0 | 6 |
+
+- The 752 `gen-word` solutions were the generator's own, in another of its
+  sentence patterns: the same calculations in the same order.
+- GSM8K's wrong steps fell from 5 to 1 (`30 - 35 = 5`): the others were a
+  right chain, read link by link now.
+- No right try used an outside number: rp1 follows its templates here. On
+  GSM8K test answers of another model (`runs/night2.ckpt`, 15.3% greedy;
+  its `--labels` file), outside numbers (constants
+  aside) are in 1 of 202 right answers (a `0.10`) and 62 of 1,117 wrong
+  ones; without the constants, 6 right answers would be rejected (12, 7,
+  60).
+
 #### The re-draw check: right by method, not by luck
 
 The checks above do not see a wrong plan that lands on the right number:
@@ -336,7 +382,10 @@ build/cxxgpt-gpu self-train --gpu --ckpt runs/rp1.ckpt --bpe data/licensed-10b/t
 
 Constants stay the same in every version: a real one (100 for a
 percentage) passes, and a number the model worked out without writing it
-down ("12" for 3 boxes of 4) fails. A number with two possible sources (two
+down ("12" for 3 boxes of 4) fails. (The outside check runs first and
+already drops most invented numbers, `0.75` for 25% off; the re-draw check
+also catches the ones it allows, such as a 12 or a 7 that only happens to
+be right.) A number with two possible sources (two
 question numbers alike, a question number equal to an earlier result, a
 question number that is also 1, 2 or 100, or two calculations giving the
 answer) leaves the try **ambiguous**: dropped by default, or, with

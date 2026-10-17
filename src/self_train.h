@@ -15,16 +15,28 @@
 //     calculation is a lucky answer, and would teach the mistake;
 //   - it does not repeat a line of 12 or more characters (the failure
 //     labels' loop flag), unless loops are allowed;
-//   - it is not the problem file's own solution word for word (spaces
-//     around it aside), unless gold copies are allowed: a model that has
-//     learned its training problems by heart writes those back;
+//   - it uses no number from outside the question (the failure labels'
+//     outside flag: not in the question, not a result after "=", not one
+//     +, -, * or / away from numbers already seen), other than a few
+//     common constants (kConstants: 7 days a week, 60 minutes an hour,
+//     ...), unless outside numbers are allowed: an invented quantity is a
+//     wrong plan even when the answer comes out right;
+//   - it is not the problem file's own solution: a model that has learned
+//     its training problems, or a generator's templates, by heart writes
+//     those back, and they teach it nothing new;
 //   - for a generated problem with a recipe (redraw.h), the re-draw check:
 //     the try's calculations, as a formula over the question's numbers,
 //     give the answer of every version of the story with other numbers
 //     (see "The re-draw check" below).
-// Of the tries left, an exact copy of an earlier try's work is dropped, and
-// at most `keep` per problem are kept (0: all), in try order. Everything is
-// decided in a fixed order, so the same seed gives the same file.
+// Of the tries left, one that is the same solution as an earlier kept try
+// is dropped, and at most `keep` per problem are kept (0: all), in try
+// order. "The same solution" (for the gold solution too) means the same
+// outline by default: the same calculations' values in the same order, in
+// whatever words ("12*4 = 48 pencils" and "The start is 12 x 4 = 48");
+// work without a readable calculation is compared as text. With
+// Same::text, only the same text (spaces around it aside) is the same.
+// Everything is decided in a fixed order, so the same seed gives the same
+// file.
 //
 // A kept try is written as prep-qa writes a problem: BOS and "Q: ...\nA: "
 // masked out (not trained on), then the model's work and "#### " with the
@@ -66,14 +78,15 @@ enum class Verdict {
     markers,      // a "[[no-loss]]" marker or a BOS byte in the text
     arithmetic,   // the right answer, but a calculation in the work is wrong
     loop,         // the right answer, but a line repeats
-    gold_copy,    // the problem file's own solution, word for word: nothing new
+    outside,      // the right answer, but a number comes from outside the question
+    gold_copy,    // the problem file's own solution (outline or text): nothing new
     ambiguous,    // a number on the answer's path could come from two places
     unchecked,    // the re-draw check could not run: no formula for the answer, or no versions
     redraw,       // the formula misses a version's answer: right by luck
-    duplicate,    // the same work as an earlier kept try of the problem
+    duplicate,    // the same solution as an earlier kept try of the problem
     over_cap,     // the problem already has `keep` kept tries
 };
-inline constexpr int kVerdicts = 14;
+inline constexpr int kVerdicts = 15;
 
 inline const char* verdict_name(Verdict v) {
     switch (v) {
@@ -85,6 +98,7 @@ inline const char* verdict_name(Verdict v) {
         case Verdict::markers: return "markers";
         case Verdict::arithmetic: return "arithmetic";
         case Verdict::loop: return "loop";
+        case Verdict::outside: return "outside";
         case Verdict::gold_copy: return "gold_copy";
         case Verdict::ambiguous: return "ambiguous";
         case Verdict::unchecked: return "unchecked";
@@ -95,13 +109,65 @@ inline const char* verdict_name(Verdict v) {
     return "?";
 }
 
+// What makes two tries the same solution (see the top of this file).
+enum class Same { outline, text };
+
 struct Options {
-    int keep = 0;             // kept tries per problem at most; 0: all
-    bool allow_loops = false; // keep right tries that repeat a line
-    bool keep_gold = false;   // keep tries that copy the problem's own solution
+    int keep = 0;               // kept tries per problem at most; 0: all
+    bool allow_loops = false;   // keep right tries that repeat a line
+    bool allow_outside = false; // keep right tries with numbers from outside the question
+    bool keep_gold = false;     // keep tries that are the problem's own solution
+    Same same = Same::outline;
     bool keep_unchecked = false;  // keep tries the re-draw check cannot check
     bool every_reading = false;   // an ambiguous try passes if one of its readings does
 };
+
+// Numbers a solution may bring in without the question giving them: days
+// in a week, months and hours, minutes and seconds, weeks and days in a
+// year, and metric units. (The failure labels already allow 1, 2 and 100.)
+inline constexpr int64_t kConstants[] = {7, 12, 24, 52, 60, 365, 1000};
+
+inline bool is_constant(const calc::Rational& v) {
+    return v.den == 1 && std::find(std::begin(kConstants), std::end(kConstants), v.num) != std::end(kConstants);
+}
+
+// The outside numbers that are not common constants: the failure labels'
+// (digits, as written), then numbers the work writes in words ("Each box
+// holds thirteen"), which that flag does not read. A number word is
+// outside unless the question gives it (in digits or words), the work
+// writes it in digits too, it is one +, -, * or / away from those, or it
+// is 1, 2, 100 or a constant. Words are reported as "13 (in words)".
+inline std::vector<std::string> outside_numbers(const labels::AnswerLabel& label, const Problem& p,
+                                                const std::string& work) {
+    using namespace labels::detail;
+    std::vector<std::string> out;
+    for (const std::string& n : label.outside) {
+        const auto v = value_of(n);
+        if (!v || !is_constant(*v)) out.push_back(n);
+    }
+    const std::string digits = strip_digit_commas(work);
+    std::vector<calc::Rational> seen = number_words(p.question);
+    for (const Number& n : numbers_in(strip_digit_commas(p.question))) seen.push_back(n.value);
+    for (const Number& n : numbers_in(digits)) seen.push_back(n.value);
+    for (const int64_t c : {1, 2, 100}) seen.push_back({c, 1});
+    for (const calc::Rational& v : number_words(work))
+        if (!contains(seen, v) && !is_constant(v) && !one_step(seen, v))
+            out.push_back((v.den == 1 ? std::to_string(v.num) : std::to_string(v.num) + "/" + std::to_string(v.den)) +
+                          " (in words)");
+    return out;
+}
+
+// What a solution is, for telling two apart: its outline (the exact values
+// of its checked calculations, in order: "48;24;32;") or, with Same::text
+// or no readable calculation, its text.
+inline std::string solution_key(const labels::AnswerLabel& label, const std::string& work, Same same) {
+    if (same == Same::outline && !label.calcs.empty()) {
+        std::string key = "outline:";
+        for (const labels::Calculation& c : label.calcs) key += c.exact + ";";
+        return key;
+    }
+    return "text:" + work;
+}
 
 // The work before the "#### " line, trimmed: what a kept try trains on.
 inline std::string work_of(const std::string& text) {
@@ -382,15 +448,22 @@ inline Trace trace_try(const Problem& p, const labels::AnswerLabel& label, const
     return t;
 }
 
+// What check_try found besides the verdict.
+struct TryInfo {
+    std::string key;                   // solution_key, for a try that passed every check
+    std::vector<std::string> outside;  // numbers from outside the question (constants aside)
+    size_t calcs = 0, unreadable = 0;  // calculations, and those the calculator could not read
+    Trace trace;                       // the re-draw check's record, if it ran
+};
+
 // Every check that looks at one try alone (all but duplicate and over_cap).
-// calcs, if given, gets how many calculations the try's work had and how
-// many the calculator could not read ("10/3 = 3.33"; those are not wrong,
-// only unchecked). versions, if given, are the problem's re-drawn versions
-// (none: it could not be re-drawn), and the re-draw check runs; trace, if
-// given, gets its record.
-inline Verdict check_try(const Problem& p, const std::string& text, const Options& o,
-                         size_t* calcs = nullptr, size_t* unreadable = nullptr,
-                         const std::vector<Problem>* versions = nullptr, Trace* trace = nullptr) {
+// info, if given, gets the try's key, its outside numbers, how many
+// calculations its work had and how many the calculator could not read
+// ("10/3 = 3.33"; those are not wrong, only unchecked), and the re-draw
+// check's record. versions, if given, are the problem's re-drawn versions
+// (none: it could not be re-drawn), and the re-draw check runs.
+inline Verdict check_try(const Problem& p, const std::string& text, const Options& o, TryInfo* info = nullptr,
+                         const std::vector<Problem>* versions = nullptr) {
     if (text == kPromptTooLong) return Verdict::too_long;
     if (!completion_done(text)) return Verdict::unfinished;
     if (!answer_matches(text, p.answer)) return Verdict::wrong;
@@ -400,16 +473,26 @@ inline Verdict check_try(const Problem& p, const std::string& text, const Option
         text.find(char(kBos)) != std::string::npos)
         return Verdict::markers;
     const labels::AnswerLabel label = labels::label_answer(p, text);
-    if (calcs) *calcs += label.calcs.size();
-    if (unreadable) *unreadable += label.unreadable;
+    TryInfo local;
+    TryInfo& in = info ? *info : local;
+    in.calcs = label.calcs.size();
+    in.unreadable = label.unreadable;
+    in.outside = outside_numbers(label, p, work);
     if (label.wrong_calcs() > 0 || sign_wrong(label) || note_miscopied(work)) return Verdict::arithmetic;
     if (label.loop && !o.allow_loops) return Verdict::loop;
+    if (!in.outside.empty() && !o.allow_outside) return Verdict::outside;
+    in.key = solution_key(label, work, o.same);
     // A model that learned its training problems by heart (rp1 on GSM8K
-    // train) writes their solutions back; those teach it nothing new.
-    if (!o.keep_gold && work == trim(p.steps)) return Verdict::gold_copy;
+    // train), or a generator's templates (rp1 on gen-math), writes their
+    // solutions back; those teach it nothing new.
+    if (!o.keep_gold) {
+        const std::string gold = trim(p.steps);
+        if (work == gold || in.key == solution_key(labels::label_answer(p, p.completion()), gold, o.same))
+            return Verdict::gold_copy;
+    }
     if (versions) {
-        const Trace t = trace_try(p, label, *versions);
-        if (trace) *trace = t;
+        in.trace = trace_try(p, label, *versions);
+        const Trace& t = in.trace;
         if (t.ambiguous && (!o.every_reading || t.readings == 0)) return Verdict::ambiguous;
         if (t.readings == 0 || versions->empty()) return o.keep_unchecked ? Verdict::kept : Verdict::unchecked;
         if (!t.passed) return Verdict::redraw;
@@ -419,8 +502,10 @@ inline Verdict check_try(const Problem& p, const std::string& text, const Option
 
 struct Result {
     std::vector<Problem> kept;  // in problem order, then try order
-    // Per problem, one verdict per try (texts' layout).
+    // Per problem, one verdict per try (texts' layout), and each try's
+    // numbers from outside the question (TryInfo::outside).
     std::vector<std::vector<Verdict>> verdicts;
+    std::vector<std::vector<std::vector<std::string>>> outside;
     size_t problems = 0, tries = 0;
     size_t by_verdict[kVerdicts] = {};
     size_t first_right = 0;  // problems whose first try has the right answer
@@ -456,13 +541,18 @@ inline Result keep_checked(const std::vector<Problem>& problems, const std::vect
     r.traces.resize(problems.size());
     for (size_t i = 0; i < problems.size(); ++i) {
         const Problem& p = problems[i];
-        std::set<std::string> seen;  // the work of this problem's kept tries
+        std::set<std::string> seen;  // the keys of this problem's kept tries
         bool right = false;
+        r.outside.emplace_back();
         for (size_t t = 0; t < texts[i].size(); ++t) {
             const std::string& text = texts[i][t];
             const std::vector<Problem>* redrawn = versions && (*versions)[i] ? &*(*versions)[i] : nullptr;
-            Trace trace;
-            Verdict v = check_try(p, text, o, &r.calcs, &r.unreadable, redrawn, &trace);
+            TryInfo info;
+            Verdict v = check_try(p, text, o, &info, redrawn);
+            r.calcs += info.calcs;
+            r.unreadable += info.unreadable;
+            r.outside.back().push_back(info.outside);
+            const Trace& trace = info.trace;
             if (v == Verdict::kept && versions && !redrawn) ++r.no_recipe;
             if (v == Verdict::kept && trace.ran && (trace.readings == 0 || redrawn->empty())) ++r.kept_unchecked;
             const bool compared = trace.ran && trace.readings > 0 && !redrawn->empty();
@@ -471,18 +561,17 @@ inline Result keep_checked(const std::vector<Problem>& problems, const std::vect
                 r.with_constants_passed += trace.passed;
             }
             r.ambiguous_passed += compared && trace.ambiguous && trace.passed;
-            r.traces[i].push_back(std::move(trace));
+            r.traces[i].push_back(trace);
             const bool answer_right = v != Verdict::too_long && v != Verdict::unfinished && v != Verdict::wrong;
             right |= answer_right;
             if (t == 0 && answer_right) ++r.first_right;
             if (v == Verdict::kept) {
-                const std::string work = work_of(text);
-                if (seen.count(work)) v = Verdict::duplicate;
+                if (seen.count(info.key)) v = Verdict::duplicate;
                 else if (o.keep > 0 && seen.size() >= size_t(o.keep)) v = Verdict::over_cap;
                 else {
-                    seen.insert(work);
+                    seen.insert(info.key);
                     Problem k = p;
-                    k.steps = work;  // the answer stays the problem file's
+                    k.steps = work_of(text);  // the answer stays the problem file's
                     r.kept.push_back(std::move(k));
                 }
             }
