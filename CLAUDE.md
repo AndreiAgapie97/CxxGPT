@@ -60,13 +60,22 @@ Math problem-solving accuracy is the first evaluation focus.
   that finishes the arithmetic the model starts (`<<48/2=` or `16 x 7 = `);
   `eval-reasoning` then prints the score without and with it, and the call
   counts. Neither mode fires on the curriculum's `a*b=c` steps
-  (docs/calculator.md).
+  (docs/calculator.md). Until 2026-10-17 no training file had notes
+  (prep-qa strips them without `--keep-calc`; the generators ran with
+  `--notes off`), so calc-notes never fired. Night 2's math replay keeps
+  them (`operations/build_gsm8k_notes.py`, `build_targeted_math.py` and
+  `build_gen_math.py --notes on`): the same problems as before, checked
+  byte for byte with the notes removed, every note's result exact (docs/calculator.md,
+  "Notes in the training data"). `train --reason-tools calc-notes` takes
+  each training exam again with the calculator, on a line of its own
+  (docs/calculator.md, "In training's exams").
 - Scoring (since 2026-10-17, `canonical_answer` in `src/reasoning.h`):
   the text after `#### ` is compared with the gold answer as a number,
   exactly, digit by digit (no rounding): "57", "57.00", "$57", "57%" and
   "57 dollars" all match "57", "0.8" matches "0.80"; "57 or 58", "5.7",
-  "570", "-57", "1 million" and "57 or" do not. Anything that is not one number (and its `$`,
-  `%`, unit words, grouping commas, a final ".") is compared as text.
+  "570", "-57", "1 million" and "57 or" do not. Anything that is not
+  one number (and its `$`, `%`, unit words, grouping commas, a final
+  ".") is compared as text.
   eval-reasoning, the vote (equal numbers are one answer), failure labels
   and self-train all go through it. The old text match changed no saved
   score (README, "How answers are scored").
@@ -83,7 +92,11 @@ Math problem-solving accuracy is the first evaluation focus.
   format, arithmetic (a written calculation the exact calculator finds
   wrong), passed_gold (the right number in the work, another answer
   given) or other (for a person to judge), with flags for loops and
-  numbers from outside the question; one JSON line per problem.
+  numbers from outside the question; one JSON line per problem. Since
+  2026-10-17 (#72) it also reads plain arithmetic right after a word
+  ("30% of 270 is 270*30/100 = 81", `after_word`; not after one letter
+  or an operator word), which the calculator leaves alone: labels made
+  before count those as unreadable.
 - `train --unlikelihood ALPHA --ul-ngram N` (#34, off by default, CPU
   and GPU): at each trained position, every token that would
   repeat a run of N trained tokens of the same document (the no-repeat
@@ -260,19 +273,43 @@ Math problem-solving accuracy is the first evaluation focus.
   and seeds of `eval-reasoning --tries`, CPU or `--gpu`) and keeps a try
   only with the right answer, some work, every calculation right by
   calc.h (notes, the number after a note, and plain `16 x 7 = 112`, as
-  failure_labels.h finds them, sign included; a right chain `a = b = c`
-  is rejected), no repeated line (`--allow-loops`), not the gold solution
-  word for word (`--keep-gold`) and no
-  `[[no-loss]]` marker; exact copies dropped, at most `--keep K` per
-  problem. Writes `OUT.txt` (problems), `OUT.tok` (prep-qa's masking:
-  question masked, work and gold answer trained) and `OUT.json`
-  (settings, counts). `--exclude` drops problems repeating dev/test
-  questions. Tests: `tests/test_self_train.h` (scripted fake model) and
-  `tests/test_cli.sh`. On rp1 (README, "First runs"): it writes back
-  GSM8K train's gold solutions (memorized) and, on new gen-word and
-  gen-math problems, the generators' own text (both are in its mix), so
-  nothing new is kept yet; pass@8 is 3-4 points above the first try on
+  failure_labels.h finds them, sign included, chains `a = b = c` link by
+  link), no repeated line (`--allow-loops`), no number from outside the
+  question but a few constants (`--allow-outside`), not the gold solution
+  (`--keep-gold`) and no `[[no-loss]]` marker. "The same solution" (for
+  dedupe and the gold check) is the same outline by default: the
+  calculations' values in order, in any words (`--same text` for text
+  only); at most `--keep K` per problem. Writes `OUT.txt` (problems),
+  `OUT.tok` (prep-qa's masking: question masked, work and gold answer
+  trained) and `OUT.json` (settings, counts). `--exclude` drops problems
+  repeating dev/test questions; `--recheck AUDIT.jsonl` checks a run's
+  tries again without a model. Tests: `tests/test_self_train.h` (scripted
+  fake model) and `tests/test_cli.sh`. On rp1 (README, "First runs"): it
+  writes back GSM8K train's gold solutions (memorized) and, on new
+  gen-word and gen-math problems, the generators' own solutions (both are
+  in its mix; gen-word's in other sentence patterns, caught by outline),
+  so nothing is kept; pass@8 is 3-4 points above the first try on
   gen-math. Self-generated data is in no mix: the owner decides.
+  The re-draw check (`src/redraw.h`, README "The re-draw check",
+  2026-10-17): `gen-word`/`gen-math --recipes FILE` writes how to make
+  each problem again (the problems unchanged, byte for byte: the
+  generators' story choices and number choices are told apart,
+  `Choices`); `self-train --recipes FILE` (`--redraws 3`) makes each story
+  again with other numbers (same masked question and masked worked
+  solution; gen-math's second solver accepts it), turns a try's
+  calculations into a formula over the question's numbers (earlier
+  results substituted, other numbers constants) and keeps the try only if
+  it gives every version's exact answer (verdict `redraw` if not). A
+  number with two sources makes the try ambiguous: it passes if one
+  choice of sources does (the default since 2026-10-17, owner's
+  decision; `--strict-readings` drops it as `ambiguous`), no formula or no versions is
+  `unchecked` (`--keep-unchecked`). The generators' own solutions: with
+  one reading 36-67% pass (the rest ambiguous), with every reading
+  895 of 896. On rp1 (README): no lucky try (it writes the generators'
+  solutions), 35-67% of right tries ambiguous with one reading, 0-1%
+  with every reading; the failure labels now read "30% of 270 is
+  270*30/100 = 81" (`after_word`), which was 195 false failures. Tests:
+  `tests/test_redraw.h`, `tests/test_self_train.h`.
 - `src/cxxgpt.cpp`: the CLI (train, sample, eval, data prep, benchmarks).
 - `scripts/get_data.py`: downloads GSM8K into `data/gsm8k/` as JSON Lines
   (for `prep-qa`), with the 500 dev problems held out of train (the same

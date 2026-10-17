@@ -114,3 +114,55 @@ solutions commonly write:
 These deliberately narrow rules will miss equations containing currency
 symbols on both operands, worded units or mathematical markup. They avoid
 silently inventing the meaning of unsupported text.
+
+## Notes in the training data
+
+The notes mode needs a model that writes `<<48/2=`. Until 2026-10-17 no
+training file showed it one: `prep-qa` removes GSM8K's notes unless
+`--keep-calc`, and the generators ran with `--notes off`. That is why
+`calc-notes` never fired on GSM8K with the RunPod model, and why
+`calc-plain` fired on whatever the model happened to write (409 calls on
+the 383 textbook problems, 217 of them malformed).
+
+Night 2 (2026-10-17) trains on the same math problems as planned, with
+their notes kept:
+
+| File | Problems | Tokens without, with notes |
+|---|---|---|
+| `data/gsm8k-notes/gsm8k-train.tok` (`operations/build_gsm8k_notes.py`) | 6,966 | 1.24M, 1.48M |
+| `data/thin-notes-2026-10-17/word-notes-5.tok` (a fifth of `data/word-notes-1`) | 486,603 | 99.8M, 127.2M |
+| `data/thin-notes-2026-10-17/eq-train-3.tok` (a third of `data/gen-math-notes`) | 165,830 | 37.3M, 44.1M |
+| `data/thin-notes-2026-10-17/frac-train-3.tok` | 166,358 | 20.5M, 26.0M |
+
+The checks:
+- **The same problems.** For each file, `prep-qa` without `--keep-calc` on
+  the new JSON Lines gives the file it replaces byte for byte. The
+  generators write the same problems with notes on and off, and the
+  builders' overlap filters read each solution without its notes.
+- **Every note's result is exact.** A separate checker
+  (`operations/check_calc_notes.py FILE.jsonl ...`) evaluates each note
+  with exact fractions and calc.h's 64-bit limits, without calc.h's code
+  (`tests/test_calc_notes.py` checks the two agree), and compares the
+  result with what the calculator writes. In the generated files it found 15.6
+  million notes, none wrong.
+  GSM8K's own 22,088 train notes have no wrong result either. 638 of them
+  write the result another way (`144.00`, `.4`), and the builder rewrites
+  those as the calculator does (`144`, `0.4`), inside the note only. The
+  2 notes with `//` are left as they are.
+- **All of it is trained.** Every added token is an answer token.
+
+## In training's exams
+
+`train --reason-tools calc-notes` (or `calc-plain`; default `none`) takes
+each `--reason-test` exam a second time, with the calculator, as
+`eval-reasoning --tools` does. The exam without it prints as before, and
+the dashboard and `scripts/report.sh` read that one. The second exam is one
+line of its own, which `report.sh` shows in a column "with calculator":
+
+    reasoning with calculator (calc-notes) at step 58866: 2.8% (7 / 250), calls 417 fired, 12 malformed (123.9 s)
+
+The CSV log gets `# reasoning step N with calculator: c/t`. On the night
+model (rp1 after 82 steps of night 2's mix with notes, 250 GSM8K dev
+problems on the GPU), the exam took 23 s and the one with the calculator
+124 s (why it is five times slower is not yet measured). With an exam
+every 500 steps that is about 1 minute in 18.

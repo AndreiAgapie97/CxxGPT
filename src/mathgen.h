@@ -163,6 +163,7 @@ struct MathRecord {
     int distractor = -1;
     int64_t distractor_number = 0;
     std::string name, other, third;
+    Recipe recipe;  // how to make this problem again
 };
 
 struct EquationProblem : MathRecord {
@@ -187,7 +188,7 @@ inline std::string years(int64_t n) { return count_of(str(n), "year", "years"); 
 // Everything one story attempt shares: the random source, the people, the
 // sentences and question being built, and the worked solution.
 struct Story {
-    Rng& rng;
+    Choices& rng;
     const MathOptions& options;
     MathRecord& out;
     const std::array<const char*, 6>* patterns;  // the topic's sentence families
@@ -195,7 +196,7 @@ struct Story {
     std::string question;
     std::vector<int64_t> results;  // one per calculator step
 
-    Story(Rng& random, const MathOptions& opts, MathRecord& problem, const std::array<const char*, 6>* families)
+    Story(Choices& random, const MathOptions& opts, MathRecord& problem, const std::array<const char*, 6>* families)
         : rng(random), options(opts), out(problem), patterns(families) {
         static const std::array<const char*, 12> names = {
             "Alex", "Maya", "Noah", "Lina", "Sam", "Nora", "Leo", "Asha", "Ben", "Zoe", "Omar", "Iris"};
@@ -204,7 +205,7 @@ struct Story {
         do out.third = names[rng.below(names.size())]; while (out.third == out.name || out.third == out.other);
     }
 
-    int64_t draw(int64_t lo, int64_t hi) { return lo + int64_t(rng.below(uint64_t(hi - lo + 1))); }
+    int64_t draw(int64_t lo, int64_t hi) { return lo + int64_t(rng.number_below(uint64_t(hi - lo + 1))); }
 
     // Fills one of the split's wordings of `family`.
     void sentence(int family, const Fills& fills) {
@@ -339,22 +340,25 @@ inline std::string answer_and_notes(const MathRecord& p, const std::string& expe
 
 }  // namespace math_check
 
-// `count` different problems from `make_one(rng)`, which returns a record.
+// `count` different problems from `make_one(rng)`, which returns a record;
+// `recipes`, if given, gets each problem's recipe.
 template <class MakeOne>
-std::vector<Problem> make_unique_problems(uint64_t seed, int64_t count, MakeOne make_one) {
+std::vector<Problem> make_unique_problems(uint64_t seed, int64_t count, MakeOne make_one,
+                                          std::vector<Recipe>* recipes = nullptr) {
     CHECK(count >= 0, "problem count must be nonnegative");
     Rng rng(seed);
     std::vector<Problem> problems;
     std::set<std::string> questions;
     int duplicates = 0;
     while (problems.size() < uint64_t(count)) {
-        Problem p = make_one(rng).problem;
-        if (!questions.insert(p.question).second) {
+        auto made = make_one(rng);
+        if (!questions.insert(made.problem.question).second) {
             CHECK(++duplicates < 10000, "too many duplicate problems; request fewer problems");
             continue;
         }
         duplicates = 0;
-        problems.push_back(std::move(p));
+        problems.push_back(std::move(made.problem));
+        if (recipes) recipes->push_back(made.recipe);
     }
     return problems;
 }
@@ -523,7 +527,7 @@ inline bool puzzle_story(Story& s, int64_t& answer) {
             std::vector<int64_t> divisors;
             for (int64_t d = 2; d <= 9; ++d) if (v % d == 0) divisors.push_back(d);
             if (divisors.empty()) return false;
-            a = divisors[s.rng.below(divisors.size())];
+            a = divisors[s.rng.number_below(divisors.size())];
         }
         if (op == '+') v += a;
         if (op == '-') v -= a;
@@ -784,7 +788,7 @@ inline bool shares_story(Story& s, int64_t& answer) {
 }
 
 // One attempt at a story of the given kind; false means draw again.
-inline bool candidate(Rng& rng, const MathOptions& options, EquationProblem& out, int64_t& answer) {
+inline bool candidate(Choices& rng, const MathOptions& options, EquationProblem& out, int64_t& answer) {
     Story s(rng, options, out, patterns.data());
     bool made = false;
     switch (out.kind) {
@@ -949,8 +953,10 @@ inline EquationProblem make_equation_problem(Rng& rng, const MathOptions& option
     for (int attempt = 0; attempt < 10000; ++attempt) {
         EquationProblem result;
         result.kind = kind;
+        result.recipe = recipe_of("equations", options.distractors, options.test, 0, int(kind), rng);
         int64_t answer = 0;
-        if (!equation_detail::candidate(rng, options, result, answer)) continue;
+        Choices choices(rng);
+        if (!equation_detail::candidate(choices, options, result, answer)) continue;
         const std::string wrong = equation_check::problems_with(result);
         CHECK(wrong.empty(), "the checker rejects a generated problem (%s): %s\n%s", wrong.c_str(),
               result.problem.question.c_str(), result.problem.steps.c_str());
@@ -962,6 +968,7 @@ inline EquationProblem make_equation_problem(Rng& rng, const MathOptions& option
     return {};
 }
 
-inline std::vector<Problem> make_equation_problems(uint64_t seed, int64_t count, const MathOptions& options = {}) {
-    return make_unique_problems(seed, count, [&](Rng& rng) { return make_equation_problem(rng, options); });
+inline std::vector<Problem> make_equation_problems(uint64_t seed, int64_t count, const MathOptions& options = {},
+                                                   std::vector<Recipe>* recipes = nullptr) {
+    return make_unique_problems(seed, count, [&](Rng& rng) { return make_equation_problem(rng, options); }, recipes);
 }

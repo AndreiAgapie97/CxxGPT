@@ -7,8 +7,71 @@
 #include <algorithm>
 #include <array>
 #include <set>
+#include <vector>
 
 #include "reasoning.h"
+
+// A generator's random choices, of two kinds (src/redraw.h): below() for
+// what the story is (people, wordings, which steps, where the distractor
+// goes) and number_below() for the numbers in it. To make a problem, both
+// come from one Rng, in the order they are made, as before they were told
+// apart: the same seed gives the same files. To write the same story with
+// other numbers, its story choices are recorded once, then played back
+// while the numbers come from another Rng.
+class Choices {
+public:
+    // One choice: the range [0, n) and what was drawn.
+    struct Choice {
+        uint64_t n = 0, value = 0;
+    };
+
+    // Both kinds from `rng`; if `record` is given, it gets every story choice.
+    explicit Choices(Rng& rng, std::vector<Choice>* record = nullptr) : rng_(rng), record_(record) {}
+    // The story choices from `story`, in order; the numbers from `numbers`.
+    Choices(const std::vector<Choice>& story, Rng& numbers) : rng_(numbers), story_(&story) {}
+
+    uint64_t below(uint64_t n) {
+        if (story_) {
+            // A story made with other numbers asked for another choice: the
+            // numbers changed the story. Go on with random choices (so loops
+            // such as "draw a name until it differs" still end) and say so.
+            if (next_ < story_->size() && (*story_)[next_].n == n) return (*story_)[next_++].value;
+            diverged_ = true;
+            return rng_.below(n);
+        }
+        const uint64_t v = rng_.below(n);
+        if (record_) record_->push_back({n, v});
+        return v;
+    }
+    uint64_t number_below(uint64_t n) { return rng_.below(n); }
+
+    // Playing back: every recorded choice was asked for, and nothing else.
+    bool played_back() const { return story_ && !diverged_ && next_ == story_->size(); }
+
+private:
+    Rng& rng_;
+    std::vector<Choice>* record_ = nullptr;
+    const std::vector<Choice>* story_ = nullptr;
+    size_t next_ = 0;
+    bool diverged_ = false;
+};
+
+// How to make one generated problem again (src/redraw.h): its generator,
+// the options that change its question, what was chosen before its story
+// (word: the steps and the shape; gen-math: the kind, in `shape`) and the
+// random state its story was drawn from.
+struct Recipe {
+    std::string topic;  // "word", "equations" or "fractions"
+    bool distractors = true, test = false;
+    int steps = 0, shape = 0;
+    uint64_t state[4] = {};
+};
+
+inline Recipe recipe_of(const std::string& topic, bool distractors, bool test, int steps, int shape, const Rng& rng) {
+    Recipe r{topic, distractors, test, steps, shape, {}};
+    for (int i = 0; i < 4; ++i) r.state[i] = rng.state()[i];
+    return r;
+}
 
 struct WordOptions {
     int min_steps = 2, max_steps = 8;
@@ -45,6 +108,7 @@ struct WordProblem {
     int64_t distractor_number = 0;
     // The story's people and objects, so tests can check the solution names them.
     std::string name, other, third, object;
+    Recipe recipe;  // how to make this problem again
 };
 
 namespace word_detail {
@@ -315,7 +379,7 @@ struct StepText {
 // Everything one story attempt shares: the random source, the people and
 // objects, the current unit, and the plan, sentences and question being built.
 struct Story {
-    Rng& rng;
+    Choices& rng;
     const WordOptions& options;
     WordProblem& out;
     std::string name, other, third, object, time;
@@ -326,7 +390,7 @@ struct Story {
 
     // These draws happen for every shape, in this order, even when a shape
     // does not use them, so the random sequence stays the same.
-    Story(Rng& random, const WordOptions& opts, WordProblem& problem) : rng(random), options(opts), out(problem) {
+    Story(Choices& random, const WordOptions& opts, WordProblem& problem) : rng(random), options(opts), out(problem) {
         static const std::array<const char*, 12> names = {
             "Alex", "Maya", "Noah", "Lina", "Sam", "Nora", "Leo", "Asha", "Ben", "Zoe", "Omar", "Iris"};
         static const std::array<const char*, 8> objects = {
@@ -354,7 +418,7 @@ struct Story {
         return object;
     }
 
-    int64_t draw(int lo, int hi) { return int64_t(lo + int(rng.below(uint64_t(hi - lo + 1)))); }
+    int64_t draw(int lo, int hi) { return int64_t(lo + int(rng.number_below(uint64_t(hi - lo + 1)))); }
 
     // Fills one sentence pattern of `family` (a split-specific variant) with
     // the story's people, unit and the numbers a..d.
@@ -648,7 +712,7 @@ inline bool change_story(Story& s, int steps) {
         if (pay <= 2 * bill + 5 * scale && std::find(payments.begin(), payments.end(), pay) == payments.end())
             payments.push_back(pay);
     }
-    in[2] = payments[s.rng.below(payments.size())];
+    in[2] = payments[s.rng.number_below(payments.size())];
     if (!opening(s, shopping, in, '*',
                  {"In dollars, the items cost", s.name + " spends", "dollars on the " + s.object}))
         return false;
@@ -719,7 +783,7 @@ inline void write_solution(Story& s) {
 
 // One attempt. A failed operation discards the whole story, including its
 // partial solution. Randomly chosen inputs are never silently adjusted.
-inline bool candidate(Rng& rng, const WordOptions& options, int steps, WordProblem& out) {
+inline bool candidate(Choices& rng, const WordOptions& options, int steps, WordProblem& out) {
     Story s(rng, options, out);
     bool made = false;
     switch (out.shape) {
@@ -754,26 +818,31 @@ inline WordProblem make_word_problem(Rng& rng, const WordOptions& options = {}) 
     for (int attempt = 0; attempt < 10000; ++attempt) {
         WordProblem result;
         result.shape = shape;
-        if (word_detail::candidate(rng, options, steps, result)) return result;
+        result.recipe = recipe_of("word", options.distractors, options.test, steps, int(shape), rng);
+        Choices choices(rng);
+        if (word_detail::candidate(choices, options, steps, result)) return result;
     }
     CHECK(false, "could not generate a valid word problem in 10000 attempts");
     return {};
 }
 
-inline std::vector<Problem> make_word_problems(uint64_t seed, int64_t count, const WordOptions& options = {}) {
+// `recipes`, if given, gets each problem's recipe.
+inline std::vector<Problem> make_word_problems(uint64_t seed, int64_t count, const WordOptions& options = {},
+                                               std::vector<Recipe>* recipes = nullptr) {
     CHECK(count >= 0, "word problem count must be nonnegative");
     Rng rng(seed);
     std::vector<Problem> problems;
     std::set<std::string> questions;
     int duplicates = 0;
     while (problems.size() < uint64_t(count)) {
-        Problem p = make_word_problem(rng, options).problem;
-        if (!questions.insert(p.question).second) {
+        WordProblem w = make_word_problem(rng, options);
+        if (!questions.insert(w.problem.question).second) {
             CHECK(++duplicates < 10000, "too many duplicate word problems; request fewer problems");
             continue;
         }
         duplicates = 0;
-        problems.push_back(std::move(p));
+        problems.push_back(std::move(w.problem));
+        if (recipes) recipes->push_back(w.recipe);
     }
     return problems;
 }

@@ -48,6 +48,7 @@
 #include "qa_context.h"
 #include "reasoning.h"
 #include "reason_report.h"
+#include "redraw.h"
 #include "self_train.h"
 #include "tokenizer.h"
 #include "train.h"
@@ -528,6 +529,8 @@ int cmd_gen_word(Args& a) {
     const int64_t min_steps = a.integer("min-steps", 2), max_steps = a.integer("max-steps", 8);
     const std::string split = a.str("split", "train");
     const std::string distractors = a.str("distractors", "on"), notes = a.str("notes", "on");
+    // How to make each problem again, for self-train's re-draw check (redraw.h).
+    const std::string recipes_path = a.str("recipes", "");
     a.done();
     CHECK(!out.empty(), "--out must be a nonempty prefix");
     CHECK(count >= 0 && seed >= 0, "--count and --seed must be nonnegative");
@@ -537,8 +540,10 @@ int cmd_gen_word(Args& a) {
     CHECK(distractors == "on" || distractors == "off", "--distractors must be on or off");
     CHECK(notes == "on" || notes == "off", "--notes must be on or off");
     const WordOptions options{int(min_steps), int(max_steps), distractors == "on", notes == "on", split == "test"};
-    const auto problems = make_word_problems(uint64_t(seed), count, options);
+    std::vector<Recipe> recipes;
+    const auto problems = make_word_problems(uint64_t(seed), count, options, &recipes);
     write_problem_files(out, problems);
+    if (!recipes_path.empty()) redraw::save_recipes(recipes_path, recipes);
     std::printf("%s.txt and %s.text: %zu %s word problems, %lld..%lld steps\n", out.c_str(), out.c_str(),
                 problems.size(), split.c_str(), (long long)min_steps, (long long)max_steps);
     return 0;
@@ -555,6 +560,8 @@ int cmd_gen_math(Args& a) {
     const std::string distractors = a.str("distractors", "on"), notes = a.str("notes", "on");
     // Questions not to repeat, such as GSM8K test and dev (README, gen-math).
     const std::string exclude = a.str("exclude", "");
+    // How to make each problem again, for self-train's re-draw check (redraw.h).
+    const std::string recipes_path = a.str("recipes", "");
     a.done();
     CHECK(topic == "equations" || topic == "fractions", "--topic must be equations or fractions");
     CHECK(!out.empty(), "--out must be a nonempty prefix");
@@ -565,9 +572,11 @@ int cmd_gen_math(Args& a) {
     std::unique_ptr<Exclusions> exclusions;
     if (!exclude.empty()) exclusions = std::make_unique<Exclusions>(exclude);
     const MathOptions options{distractors == "on", notes == "on", split == "test", exclusions.get()};
-    const auto problems = topic == "equations" ? make_equation_problems(uint64_t(seed), count, options)
-                                               : make_fraction_problems(uint64_t(seed), count, options);
+    std::vector<Recipe> recipes;
+    const auto problems = topic == "equations" ? make_equation_problems(uint64_t(seed), count, options, &recipes)
+                                               : make_fraction_problems(uint64_t(seed), count, options, &recipes);
     write_problem_files(out, problems);
+    if (!recipes_path.empty()) redraw::save_recipes(recipes_path, recipes);
     std::printf("%s.txt and %s.text: %zu %s %s problems, each solved again by the checker\n", out.c_str(),
                 out.c_str(), problems.size(), split.c_str(), topic.c_str());
     if (exclusions)
@@ -755,10 +764,10 @@ void print_eval(const EvalResult& r, size_t show_failures) {
 }
 
 // Keep both entry points strict: a misspelled mode must not change a score silently.
-calc::Mode calculator_mode(Args& a) {
-    const std::string mode = a.str("tools", "none");
+calc::Mode calculator_mode(Args& a, const char* option = "tools") {
+    const std::string mode = a.str(option, "none");
     CHECK(mode == "none" || mode == "calc-notes" || mode == "calc-plain",
-          "--tools must be none, calc-notes or calc-plain");
+          "--%s must be none, calc-notes or calc-plain", option);
     return mode == "calc-notes" ? calc::Mode::notes :
            mode == "calc-plain" ? calc::Mode::plain : calc::Mode::none;
 }
@@ -941,12 +950,37 @@ int cmd_self_train(Args& a) {
     opts.keep = a.integer_int("keep", 0);
     CHECK(opts.keep >= 0, "--keep must not be negative");
     opts.allow_loops = a.flag("allow-loops");
-    // Keep tries that copy the problem file's own solution word for word.
+    // Keep tries with numbers from outside the question (constants aside).
+    opts.allow_outside = a.flag("allow-outside");
+    // Keep tries that are the problem file's own solution.
     opts.keep_gold = a.flag("keep-gold");
+    // The re-draw check (redraw.h): each generated problem's story written
+    // again with other numbers, --redraws times, from gen-word/gen-math
+    // --recipes; a try is kept only if its calculations give every
+    // version's answer. 0: no check.
+    const std::string recipes_path = a.str("recipes", "");
+    const int redraws = a.integer_int("redraws", recipes_path.empty() ? 0 : 3);
+    CHECK(redraws >= 0, "--redraws must not be negative");
+    CHECK(redraws == 0 || !recipes_path.empty(), "--redraws needs --recipes FILE (gen-word/gen-math --recipes)");
+    // Keep the tries the re-draw check cannot check (no formula for the
+    // answer, or a story that could not be drawn again).
+    opts.keep_unchecked = a.flag("keep-unchecked");
+    // A try whose numbers could come from two places passes if one choice
+    // gives every version's answer; with strict readings it is dropped as
+    // ambiguous.
+    opts.every_reading = !a.flag("strict-readings");
+    // What makes two tries the same solution: their outline (the values of
+    // their calculations, in order) or their text.
+    const std::string same = a.str("same", "outline");
+    CHECK(same == "outline" || same == "text", "--same must be outline or text");
+    opts.same = same == "text" ? self_train::Same::text : self_train::Same::outline;
     // Questions not to train on, such as GSM8K test and dev (gen-math's rule).
     const std::string exclude = a.str("exclude", "");
     // Every try's text and verdict, one JSON line per try, for audits.
     const std::string audit_path = a.str("audit");
+    // Checks again the tries of an earlier run's --audit file (with the same
+    // --problems), without a model: for new or changed checks.
+    const std::string recheck = a.str("recheck");
     const std::string bpe = a.str("bpe");
     const calc::Mode tool = calculator_mode(a);
     const bool use_gpu = a.flag("gpu");
@@ -955,21 +989,31 @@ int cmd_self_train(Args& a) {
     CHECK(matmul == "fp32" || matmul == "tf32" || matmul == "bf16", "--matmul takes fp32, tf32 or bf16");
     a.done();
     CHECK(!problems_path.empty() && !out.empty(),
-          "usage: cxxgpt self-train --ckpt model.ckpt --problems FILE.txt --out PREFIX [--tries 8 --temp 0.7]");
+          "usage: cxxgpt self-train --ckpt model.ckpt --problems FILE.txt --out PREFIX [--tries 8 --temp 0.7] "
+          "[--recipes FILE --redraws 3]");
+    // The tries come from the file, so nothing that decides how they are
+    // sampled or which problems are tried may be given with it.
+    for (const char* option : {"ckpt", "tries", "temp", "seed", "no-repeat", "max-new", "batch", "limit", "exclude",
+                               "tools", "gpu", "matmul"})
+        CHECK(recheck.empty() || !a.has(option), "--%s does nothing with --recheck: the tries come from the file",
+              option);
 #ifndef CXXGPT_CUDA
     CHECK(!use_gpu, "this cxxgpt was built without CUDA; use cxxgpt-gpu (make gpu) for --gpu");
 #endif
     const Tokenizer tok = load_tokenizer(bpe);
-    Model<float> model(peek_checkpoint_config(ckpt));
-    load_checkpoint(ckpt, model, nullptr, nullptr);
+    std::unique_ptr<Model<float>> model;
+    if (recheck.empty()) {
+        model = std::make_unique<Model<float>>(peek_checkpoint_config(ckpt));
+        load_checkpoint(ckpt, *model, nullptr, nullptr);
+    }
 #ifdef CXXGPT_CUDA
     std::unique_ptr<GpuTrainer> gpu;
     int gpu_batch = 0;
     if (use_gpu) {
         const Matmul mm = matmul == "fp32" ? Matmul::fp32 : matmul == "bf16" ? Matmul::bf16 : Matmul::tf32;
-        gpu = std::make_unique<GpuTrainer>(model.cfg, model.infos, mm, false, /*inference=*/true);
-        gpu->set_params(model.params.data());
-        gpu->set_router_bias(model.router_bias);
+        gpu = std::make_unique<GpuTrainer>(model->cfg, model->infos, mm, false, /*inference=*/true);
+        gpu->set_params(model->params.data());
+        gpu->set_router_bias(model->router_bias);
         gpu_batch = gpu->decode_capacity(batch);
         CHECK(gpu_batch >= vote.tries,
               "the GPU has room for %d answers at a time (%zu MB each, %zu MB free), fewer than --tries %d",
@@ -981,37 +1025,96 @@ int cmd_self_train(Args& a) {
     // Each problem keeps its place in the file as its number, so its tries
     // are seeded the same whatever --limit or --exclude leave out.
     const std::vector<Problem> all = load_problems(problems_path);
+    std::vector<Recipe> recipes;
+    if (redraws > 0) {
+        recipes = redraw::load_recipes(recipes_path);
+        CHECK(recipes.size() == all.size(), "%s has %zu recipes for %zu problems in %s", recipes_path.c_str(),
+              recipes.size(), all.size(), problems_path.c_str());
+    }
     std::vector<Problem> problems;
     std::unique_ptr<Exclusions> exclusions;
     if (!exclude.empty()) exclusions = std::make_unique<Exclusions>(exclude);
     size_t excluded = 0;
-    const size_t wanted = limit > 0 ? std::min(size_t(limit), all.size()) : all.size();
-    for (size_t i = 0; i < wanted; ++i) {
-        const size_t place = limit > 0 ? i * all.size() / wanted : i;  // an even sample, as eval-reasoning's
-        if (exclusions && exclusions->excludes(all[place], 0)) {
-            ++excluded;
-            continue;
+    std::vector<std::vector<std::string>> texts;
+    if (!recheck.empty()) {
+        // The audit file's tries, problem by problem, in the order written.
+        std::ifstream f(recheck, std::ios::binary);
+        CHECK(f, "cannot open %s", recheck.c_str());
+        long line_no = 0;
+        for (std::string line; std::getline(f, line);) {
+            ++line_no;
+            if (line.find_first_not_of(" \t\r") == std::string::npos) continue;
+            Json j;
+            std::string err;
+            CHECK(Json::parse(line, j, &err), "%s:%ld: %s", recheck.c_str(), line_no, err.c_str());
+            const Json *problem = j.get("problem"), *attempt = j.get("try"), *text = j.get("text");
+            CHECK(problem && attempt && text && problem->type == Json::Number && attempt->type == Json::Number &&
+                      text->type == Json::String,
+                  "%s:%ld: not a self-train --audit line", recheck.c_str(), line_no);
+            const size_t place = size_t(problem->number);
+            CHECK(problem->number >= 0 && place < all.size(), "%s:%ld: problem %s is not in %s", recheck.c_str(),
+                  line_no, problem->str.c_str(), problems_path.c_str());
+            if (vote.problem_ids.empty() || vote.problem_ids.back() != place) {
+                vote.problem_ids.push_back(place);
+                problems.push_back(all[place]);
+                texts.emplace_back();
+            }
+            CHECK(size_t(attempt->number) == texts.back().size(), "%s:%ld: try %s out of order", recheck.c_str(),
+                  line_no, attempt->str.c_str());
+            texts.back().push_back(text->str);
         }
-        problems.push_back(all[place]);
-        vote.problem_ids.push_back(place);
+        vote.tries = texts.empty() ? 0 : int(texts[0].size());
+        for (const auto& tries : texts)
+            CHECK(int(tries.size()) == vote.tries, "%s: problems with different numbers of tries", recheck.c_str());
+    } else {
+        const size_t wanted = limit > 0 ? std::min(size_t(limit), all.size()) : all.size();
+        for (size_t i = 0; i < wanted; ++i) {
+            const size_t place = limit > 0 ? i * all.size() / wanted : i;  // an even sample, as eval-reasoning's
+            if (exclusions && exclusions->excludes(all[place], 0)) {
+                ++excluded;
+                continue;
+            }
+            problems.push_back(all[place]);
+            vote.problem_ids.push_back(place);
+        }
     }
+    // Each problem's versions, seeded from --seed and its place in the file.
+    std::vector<std::optional<std::vector<Problem>>> versions(problems.size());
+    size_t redrawn = 0, draws = 0;
+    if (redraws > 0)
+        for (size_t i = 0; i < problems.size(); ++i) {
+            const size_t place = vote.problem_ids[i];
+            const redraw::Versions v = redraw::versions_of(recipes[place], problems[i], redraws,
+                                                           uint64_t(seed) * 0x100000001B3ull + place);
+            draws += v.draws;
+            if (int(v.versions.size()) == redraws) {
+                versions[i] = v.versions;
+                ++redrawn;
+            } else {
+                versions[i] = std::vector<Problem>();  // could not be re-drawn: its tries are unchecked
+            }
+        }
     const double t0 = now_seconds();
     calc::Counts calls;
-    std::vector<std::vector<std::string>> texts;
 #ifdef CXXGPT_CUDA
     if (gpu) {
-        GpuDecoder dec{model.cfg, *gpu};
+        GpuDecoder dec{model->cfg, *gpu};
         texts = sample_tries(dec, problems, tok, gpu_batch, max_new, vote, tool, &calls);
     }
 #endif
-    if (texts.empty() && !problems.empty()) texts = sample_tries(model, problems, tok, batch, max_new, vote, tool, &calls);
-    const self_train::Result r = self_train::keep_checked(problems, texts, opts);
+    if (model && texts.empty() && !problems.empty())
+        texts = sample_tries(*model, problems, tok, batch, max_new, vote, tool, &calls);
+    const self_train::Result r = self_train::keep_checked(problems, texts, opts, redraws > 0 ? &versions : nullptr);
     self_train::write(out, r.kept, tok);
 
     auto pct = [](size_t part, size_t whole) { return 100.0 * double(part) / double(std::max<size_t>(1, whole)); };
     const std::string no_repeat = vote.no_repeat ? ", no-repeat " + std::to_string(vote.no_repeat) : "";
-    std::printf("%zu problems (%zu excluded), %d tries each (temp %g, seed %ld%s), %zu tries\n", r.problems,
-                excluded, vote.tries, vote.temperature, seed, no_repeat.c_str(), r.tries);
+    if (recheck.empty())
+        std::printf("%zu problems (%zu excluded), %d tries each (temp %g, seed %ld%s), %zu tries\n", r.problems,
+                    excluded, vote.tries, vote.temperature, seed, no_repeat.c_str(), r.tries);
+    else
+        std::printf("%zu problems, %d tries each, %zu tries, checked again from %s\n", r.problems, vote.tries,
+                    r.tries, recheck.c_str());
     std::printf("first try right: %.1f%% (%zu); solved by any try (pass@%d): %.1f%% (%zu); "
                 "with a kept solution: %.1f%% (%zu)\n",
                 pct(r.first_right, r.problems), r.first_right, vote.tries, pct(r.solved, r.problems), r.solved,
@@ -1023,21 +1126,37 @@ int cmd_self_train(Args& a) {
                 r.unreadable);
     if (tool != calc::Mode::none)
         std::printf("calculator calls: %zu fired, %zu malformed\n", calls.fired, calls.malformed);
+    if (redraws > 0)
+        std::printf("re-draw check: %zu of %zu problems drawn again %d times (%zu stories drawn); "
+                    "%zu tries with a constant on the answer's path, %zu of them passed; %zu kept unchecked "
+                    "(--keep-unchecked); %zu ambiguous tries passed through one reading (dropped by --strict-readings)\n",
+                    redrawn, r.problems, redraws, draws, r.with_constants, r.with_constants_passed, r.kept_unchecked,
+                    r.ambiguous_passed);
     std::printf("kept %zu solutions -> %s.txt, %s.tok, %s.json (%.1f s)\n", r.kept.size(), out.c_str(),
                 out.c_str(), out.c_str(), now_seconds() - t0);
 
     auto str = [](const std::string& s) { return "\"" + labels::json_escape(s) + "\""; };
     char temp[32];
     std::snprintf(temp, sizeof temp, "%g", vote.temperature);
-    std::string json = "{\"ckpt\":" + str(ckpt) + ",\"problems\":" + str(problems_path) + ",\"bpe\":" + str(bpe) +
+    std::string json = "{\"ckpt\":" + str(recheck.empty() ? ckpt : "") + ",\"recheck\":" + str(recheck) +
+                       ",\"problems\":" + str(problems_path) + ",\"bpe\":" + str(bpe) +
                        ",\"exclude\":" + str(exclude) + ",\"limit\":" + std::to_string(limit) +
                        ",\"tries\":" + std::to_string(vote.tries) + ",\"temp\":" + std::string(temp) +
                        ",\"seed\":" + std::to_string(seed) + ",\"no_repeat\":" + std::to_string(vote.no_repeat) +
                        ",\"max_new\":" + std::to_string(max_new) + ",\"tools\":" +
                        str(tool == calc::Mode::notes ? "calc-notes" : tool == calc::Mode::plain ? "calc-plain" : "none") +
                        ",\"keep\":" + std::to_string(opts.keep) + ",\"allow_loops\":" +
-                       (opts.allow_loops ? "true" : "false") + ",\"keep_gold\":" +
-                       (opts.keep_gold ? "true" : "false") + ",\"gpu\":" + (use_gpu ? "true" : "false") +
+                       (opts.allow_loops ? "true" : "false") + ",\"allow_outside\":" +
+                       (opts.allow_outside ? "true" : "false") + ",\"same\":" + str(same) + ",\"keep_gold\":" +
+                       (opts.keep_gold ? "true" : "false") + ",\"recipes\":" + str(recipes_path) +
+                       ",\"redraws\":" + std::to_string(redraws) + ",\"keep_unchecked\":" +
+                       (opts.keep_unchecked ? "true" : "false") + ",\"every_reading\":" +
+                       (opts.every_reading ? "true" : "false") + ",\"ambiguous_passed\":" +
+                       std::to_string(r.ambiguous_passed) + ",\"redrawn\":" + std::to_string(redrawn) +
+                       ",\"redraw_draws\":" + std::to_string(draws) + ",\"with_constants\":" +
+                       std::to_string(r.with_constants) + ",\"with_constants_passed\":" +
+                       std::to_string(r.with_constants_passed) + ",\"kept_unchecked\":" +
+                       std::to_string(r.kept_unchecked) + ",\"gpu\":" + (use_gpu ? "true" : "false") +
                        ",\"matmul\":" + str(matmul) + ",\"problems_tried\":" + std::to_string(r.problems) +
                        ",\"excluded\":" + std::to_string(excluded) + ",\"first_right\":" +
                        std::to_string(r.first_right) + ",\"solved\":" + std::to_string(r.solved) +
@@ -1053,11 +1172,33 @@ int cmd_self_train(Args& a) {
         FILE* log = create_file(audit_path, "wb");
         CHECK(log, "cannot write %s", audit_path.c_str());
         for (size_t i = 0; i < problems.size(); ++i)
-            for (size_t t = 0; t < texts[i].size(); ++t)
-                CHECK(std::fprintf(log, "{\"problem\":%zu,\"try\":%zu,\"verdict\":%s,\"text\":%s}\n",
+            for (size_t t = 0; t < texts[i].size(); ++t) {
+                std::string outside;  // the try's numbers from outside the question
+                for (const std::string& n : r.outside[i][t]) outside += (outside.empty() ? "" : ",") + str(n);
+                // The re-draw check's record, when it ran: the formula, its
+                // constants, and its value against each version's answer.
+                std::string check;
+                const self_train::Trace& tr = r.traces[i][t];
+                if (tr.ran) {
+                    check = ",\"redraw\":{\"formula\":" + str(tr.formula) + ",\"ambiguous\":" +
+                            (tr.ambiguous ? "true" : "false") + ",\"readings\":" + std::to_string(tr.readings) +
+                            ",\"passed\":" + (tr.passed ? "true" : "false") +
+                            ",\"constants\":[";
+                    for (size_t k = 0; k < tr.constants.size(); ++k) check += (k ? "," : "") + str(tr.constants[k]);
+                    check += "],\"versions\":[";
+                    const std::vector<Problem>& vs = *versions[i];
+                    for (size_t k = 0; k < vs.size(); ++k)
+                        check += std::string(k ? "," : "") + "{\"question\":" + str(vs[k].question) +
+                                 ",\"answer\":" + str(vs[k].answer) + ",\"formula_gives\":" +
+                                 str(k < tr.values.size() ? tr.values[k] : "") + "}";
+                    check += "]}";
+                }
+                CHECK(std::fprintf(log,
+                                   "{\"problem\":%zu,\"try\":%zu,\"verdict\":%s,\"outside\":[%s]%s,\"text\":%s}\n",
                                    vote.problem_ids[i], t, str(self_train::verdict_name(r.verdicts[i][t])).c_str(),
-                                   str(texts[i][t]).c_str()) >= 0,
+                                   outside.c_str(), check.c_str(), str(texts[i][t]).c_str()) >= 0,
                       "error writing %s", audit_path.c_str());
+            }
         CHECK(std::fclose(log) == 0, "error writing %s", audit_path.c_str());
         std::printf("every try: %s\n", audit_path.c_str());
     }
@@ -1091,9 +1232,10 @@ struct Backend {
     // Brings the weights and optimizer state into the host Model and AdamW,
     // for checkpoints and evaluations.
     virtual void sync() = 0;
-    // The reasoning exam on the current weights: greedy, exact answers.
+    // The reasoning exam on the current weights: greedy, exact answers,
+    // with the calculator `tool` finishing the model's calculations or not.
     virtual EvalResult reason(const std::vector<Problem>& problems, const Tokenizer& tok, int max_new,
-                              bool keep_completions) = 0;
+                              bool keep_completions, calc::Mode tool) = 0;
     // Device memory held, for the GPU; 0 on the CPU.
     virtual size_t device_bytes() const { return 0; }
     // Unlikelihood training (#34). While it is on, forward() still returns
@@ -1167,8 +1309,8 @@ struct CpuBackend : Backend {
     double load_ratio() override { return load_; }
     void sync() override {}
     EvalResult reason(const std::vector<Problem>& problems, const Tokenizer& tok, int max_new,
-                      bool keep_completions) override {
-        return eval_reasoning(model, problems, tok, 64, max_new, 8, keep_completions);
+                      bool keep_completions, calc::Mode tool) override {
+        return eval_reasoning(model, problems, tok, 64, max_new, 8, keep_completions, {}, tool);
     }
 };
 
@@ -1231,7 +1373,7 @@ struct GpuBackend : Backend {
     // computes it (bf16 products by default), so a CPU eval-reasoning of
     // the checkpoint can differ by a problem or two.
     EvalResult reason(const std::vector<Problem>& problems, const Tokenizer& tok, int max_new,
-                      bool keep_completions) override {
+                      bool keep_completions, calc::Mode tool) override {
         const int batch = gpu.decode_capacity(64);
         if (batch == 0) {
             std::printf("reasoning eval skipped: the GPU decoder needs %zu MB per answer, and the gradient buffer "
@@ -1241,7 +1383,7 @@ struct GpuBackend : Backend {
         }
         std::printf("reasoning eval on the GPU, %d answers at a time\n", batch);
         GpuDecoder dec{model.cfg, gpu};
-        return eval_reasoning(dec, problems, tok, batch, max_new, 8, keep_completions);
+        return eval_reasoning(dec, problems, tok, batch, max_new, 8, keep_completions, {}, tool);
     }
     size_t device_bytes() const override { return gpu.device_bytes(); }
 };
@@ -1298,6 +1440,8 @@ int cmd_train(Args& a) {
             "        waits for); --moe-grouped or --moe-cublas picks one for any precision\n"
             "reason: --reason-test FILE --reason-every STEPS --reason-limit 300 --max-new 200\n"
             "        --reason-report PREFIX (optional answers/labels in PREFIX.step-N.jsonl)\n"
+            "        --reason-tools calc-notes|calc-plain: each exam again with the calculator (as\n"
+            "        eval-reasoning --tools), on a line of its own after the exam; default none\n"
             "Ctrl-C saves a checkpoint and stops; --resume continues from --out, and\n"
             "takes precedence over --init once --out exists.\n");
         return 0;
@@ -1356,6 +1500,8 @@ int cmd_train(Args& a) {
     const std::string reason_path = a.str("reason-test");
     const std::string reason_report_prefix = a.str("reason-report");
     CHECK(reason_report_prefix.empty() || !reason_path.empty(), "--reason-report requires --reason-test");
+    const calc::Mode reason_tool = calculator_mode(a, "reason-tools");
+    CHECK(reason_tool == calc::Mode::none || !reason_path.empty(), "--reason-tools requires --reason-test");
     const Tokenizer tok = load_tokenizer(a.str("bpe"));
     const int reason_every = a.integer_int("reason-every", 0), reason_limit = a.integer_int("reason-limit", 300);
     const int max_new = a.integer_int("max-new", 200);
@@ -1568,7 +1714,7 @@ int cmd_train(Args& a) {
     auto reason_eval = [&](long at_step) {
         if (reason_test.empty()) return;
         const double t0 = now_seconds();
-        const EvalResult r = be.reason(reason_test, tok, max_new, !reason_report_prefix.empty());
+        const EvalResult r = be.reason(reason_test, tok, max_new, !reason_report_prefix.empty(), calc::Mode::none);
         if (r.total == 0) return;  // skipped (no room on the GPU)
         std::printf("reasoning eval at step %ld (%.1f s):\n", at_step, now_seconds() - t0);
         print_eval(r, 1);  // one wrong answer, to see what the model writes
@@ -1584,6 +1730,20 @@ int cmd_train(Args& a) {
         }
         if (log) {
             std::fprintf(log, "# reasoning step %ld: %d/%d\n", at_step, r.correct, r.total);
+            std::fflush(log);
+        }
+        if (reason_tool == calc::Mode::none) return;
+        // The same problems again with the calculator, on one line of its own
+        // (not "overall ...", which the dashboard and report.sh read as the exam).
+        const double t1 = now_seconds();
+        const EvalResult c = be.reason(reason_test, tok, max_new, false, reason_tool);
+        if (c.total == 0) return;
+        std::printf("reasoning with calculator (%s) at step %ld: %.1f%% (%d / %d), calls %zu fired, %zu malformed "
+                    "(%.1f s)\n", reason_tool == calc::Mode::notes ? "calc-notes" : "calc-plain", at_step,
+                    100.0 * c.correct / std::max(1, c.total), c.correct, c.total, c.tool_calls.fired,
+                    c.tool_calls.malformed, now_seconds() - t1);
+        if (log) {
+            std::fprintf(log, "# reasoning step %ld with calculator: %d/%d\n", at_step, c.correct, c.total);
             std::fflush(log);
         }
     };

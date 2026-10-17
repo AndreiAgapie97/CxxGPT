@@ -152,7 +152,14 @@ grep -q 'expert load log header differs' "$TEST_DIR/load-invalid.log"
 # %.6g writes tiny shares in exponent form (5e-05); awk must still read them.
 mkdir -p "$TEST_DIR/report/scripts" "$TEST_DIR/report/runs"
 cp scripts/report.sh "$TEST_DIR/report/scripts/report.sh"
-printf 'model: tiny fixture\nstep 40 | loss 1.0 | 100 tok/s\n' > "$TEST_DIR/report/runs/fixture.log"
+cat > "$TEST_DIR/report/runs/fixture.log" <<'LOG'
+model: tiny fixture
+step 40 | loss 1.0 | 100 tok/s
+step 40 | val 2.5000
+reasoning eval at step 40 (1.0 s):
+overall 2.0% (5 / 250) (greedy)
+reasoning with calculator (calc-notes) at step 40: 3.2% (8 / 250), calls 31 fired, 2 malformed (1.1 s)
+LOG
 cat > "$TEST_DIR/report/runs/fixture.load.csv" <<'CSV'
 step,layer,expert_0,expert_1,max_load_ratio
 10,0,0.5,0.5,1
@@ -167,6 +174,7 @@ step,layer,expert_0,expert_1,max_load_ratio
 40,2,0.6,0.4,1.2
 CSV
 bash "$TEST_DIR/report/scripts/report.sh" fixture > "$TEST_DIR/report.txt"
+grep -Eq '^ +40 +2\.5000 +2\.0% \(5 / 250\) +3\.2% \(8 / 250\)$' "$TEST_DIR/report.txt"
 grep -Fq 'layer 0: final shares [0.4000 0.6000]; first under 1%: step 20' "$TEST_DIR/report.txt"
 grep -Fq 'layer 1: final shares [0.3000 0.7000]; first under 1%: step 10' "$TEST_DIR/report.txt"
 grep -Fq 'layer 2: final shares [0.6000 0.4000]; first under 1%: never' "$TEST_DIR/report.txt"
@@ -562,6 +570,23 @@ grep -q 'gold completions exceeding --max-new 2147483647: 0 / 1' "$TEST_DIR/cap-
 "$CXXGPT" train "${COMMON[@]}" --init "$TEST_DIR/audit.ckpt" --out "$TEST_DIR/cap.ckpt" \
     --reason-test "$TEST_DIR/audit.txt" --max-new 1 > "$TEST_DIR/train-cap.log"
 grep -q 'gold completions exceeding --max-new 1: 1 / 1' "$TEST_DIR/train-cap.log"
+# --reason-tools: each exam again with the calculator, on its own line (not
+# "overall ...", which report.sh and the dashboard read as the exam).
+"$CXXGPT" train "${COMMON[@]}" --init "$TEST_DIR/audit.ckpt" --out "$TEST_DIR/calc-exam.ckpt" \
+    --reason-test "$TEST_DIR/audit.txt" --reason-tools calc-notes > "$TEST_DIR/train-calc.log"
+grep -Eq '^reasoning with calculator \(calc-notes\) at step [0-9]+: [0-9.]+% \([0-9]+ / 1\), calls [0-9]+ fired, [0-9]+ malformed' \
+    "$TEST_DIR/train-calc.log"
+[[ $(grep -c '^overall ' "$TEST_DIR/train-calc.log") == $(grep -c '^reasoning with calculator ' "$TEST_DIR/train-calc.log") ]]
+status=0
+"$CXXGPT" train "${COMMON[@]}" --out "$TEST_DIR/calc-bad.ckpt" --reason-test "$TEST_DIR/audit.txt" \
+    --reason-tools calc > "$TEST_DIR/train-calc-bad.log" 2>&1 || status=$?
+[[ "$status" == 1 ]]
+grep -q -- '--reason-tools must be none, calc-notes or calc-plain' "$TEST_DIR/train-calc-bad.log"
+status=0
+"$CXXGPT" train "${COMMON[@]}" --out "$TEST_DIR/calc-alone.ckpt" --reason-tools calc-notes \
+    > "$TEST_DIR/train-calc-alone.log" 2>&1 || status=$?
+[[ "$status" == 1 ]]
+grep -q -- '--reason-tools requires --reason-test' "$TEST_DIR/train-calc-alone.log"
 status=0
 "$CXXGPT" eval-reasoning --ckpt "$TEST_DIR/audit.ckpt" --test "$TEST_DIR/audit.txt" --max-new 0 > "$TEST_DIR/bad-cap.log" 2>&1 || status=$?
 [[ "$status" == 1 ]]
@@ -646,12 +671,51 @@ grep -q '^kept 0 solutions -> ' "$TEST_DIR/self-a.log"
 [[ ! -s "$TEST_DIR/self-a.txt" ]]
 grep -q '"kept":0,' "$TEST_DIR/self-a.json"
 grep -q '"keep":2,' "$TEST_DIR/self-a.json"
+# --recheck checks an audit file's tries again without a model: the same
+# verdicts, and the sampling options are refused with it.
+"$CXXGPT" self-train --problems "$TEST_DIR/audit.txt" --recheck "$TEST_DIR/self-a.audit.jsonl" \
+    --out "$TEST_DIR/self-re" --audit "$TEST_DIR/self-re.audit.jsonl" --threads 2 > "$TEST_DIR/self-re.log"
+grep -q '^1 problems, 3 tries each, 3 tries, checked again from ' "$TEST_DIR/self-re.log"
+cmp "$TEST_DIR/self-a.audit.jsonl" "$TEST_DIR/self-re.audit.jsonl"
+grep -q '"recheck":"' "$TEST_DIR/self-re.json"
+status=0
+"$CXXGPT" self-train --problems "$TEST_DIR/audit.txt" --recheck "$TEST_DIR/self-a.audit.jsonl" \
+    --out "$TEST_DIR/self-re" --tries 2 --threads 2 > "$TEST_DIR/self-bad.log" 2>&1 || status=$?
+[[ "$status" == 1 ]]
+grep -q -- '--tries does nothing with --recheck' "$TEST_DIR/self-bad.log"
 # --exclude drops a problem that repeats an excluded question.
 "$CXXGPT" self-train --ckpt "$TEST_DIR/audit.ckpt" --problems "$TEST_DIR/audit.txt" --out "$TEST_DIR/self-x"     --exclude "$TEST_DIR/audit.txt" --tries 2 --max-new 4 --threads 2 > "$TEST_DIR/self-x.log"
 grep -q '^0 problems (1 excluded), ' "$TEST_DIR/self-x.log"
+# The re-draw check: gen-word/gen-math --recipes writes one recipe per
+# problem and leaves the problems as they are; self-train draws each one
+# again (3 versions by default), records it in the summary and the JSON,
+# and refuses a recipe file of another length or for other problems.
+"$CXXGPT" gen-word --out "$TEST_DIR/redraw-word" --seed 5 --count 6 > /dev/null
+"$CXXGPT" gen-word --out "$TEST_DIR/redraw-word-r" --seed 5 --count 6 --recipes "$TEST_DIR/redraw-word.recipes" > /dev/null
+cmp "$TEST_DIR/redraw-word.txt" "$TEST_DIR/redraw-word-r.txt"
+[[ $(wc -l < "$TEST_DIR/redraw-word.recipes") == 6 ]]
+grep -q '^word distractors=1 test=0 steps=[2-8] shape=[0-5] state=' "$TEST_DIR/redraw-word.recipes"
+"$CXXGPT" gen-math --topic fractions --out "$TEST_DIR/redraw-frac" --seed 5 --count 6 \
+    --recipes "$TEST_DIR/redraw-frac.recipes" > /dev/null
+grep -q '^fractions distractors=1 test=0 steps=0 shape=[0-6] state=' "$TEST_DIR/redraw-frac.recipes"
+"$CXXGPT" self-train --ckpt "$TEST_DIR/audit.ckpt" --problems "$TEST_DIR/redraw-word.txt" --out "$TEST_DIR/self-r" \
+    --recipes "$TEST_DIR/redraw-word.recipes" --tries 2 --max-new 4 --threads 2 > "$TEST_DIR/self-r.log"
+grep -q '^re-draw check: 6 of 6 problems drawn again 3 times' "$TEST_DIR/self-r.log"
+grep -q '"redraws":3,' "$TEST_DIR/self-r.json"
+grep -q '"redrawn":6,' "$TEST_DIR/self-r.json"
+head -n 4 "$TEST_DIR/redraw-word.recipes" > "$TEST_DIR/redraw-short.recipes"
+for case in 'redraw-short:has 4 recipes for 6 problems' 'redraw-frac:the recipe does not make this problem'; do
+    status=0
+    "$CXXGPT" self-train --ckpt "$TEST_DIR/audit.ckpt" --problems "$TEST_DIR/redraw-word.txt" \
+        --out "$TEST_DIR/self-bad" --recipes "$TEST_DIR/${case%%:*}.recipes" --tries 2 --max-new 4 --threads 2 \
+        > "$TEST_DIR/self-bad.log" 2>&1 || status=$?
+    [[ "$status" == 1 ]]
+    grep -q "${case#*:}" "$TEST_DIR/self-bad.log"
+done
 # Refused: greedy tries (all the same), a negative cap, an unknown tool,
 # --gpu on the CPU build, a missing --out.
-for options in '--temp 0' '--keep -1' '--tools bogus' '--gpu' '--matmul bf16' '--tries 0'; do
+for options in '--temp 0' '--keep -1' '--tools bogus' '--gpu' '--matmul bf16' '--tries 0' '--same words' \
+    '--redraws 3'; do
     status=0
     "$CXXGPT" self-train --ckpt "$TEST_DIR/audit.ckpt" --problems "$TEST_DIR/audit.txt" --out "$TEST_DIR/self-bad"         $options --threads 2 > "$TEST_DIR/self-bad.log" 2>&1 || status=$?
     [[ "$status" == 1 ]]

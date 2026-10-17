@@ -189,7 +189,9 @@ inline bool times_sign(std::string_view text, size_t i) {
 
 // Called only after a model token, never after our own result tokens.
 // nullopt means no call, an empty string means a malformed call.
-inline std::optional<std::string> response(std::string_view text, Mode mode) {
+// `expression`, if given, gets what was worked out ("16 * 7" for "16 x 7"),
+// for a call whose expression could be read.
+inline std::optional<std::string> response(std::string_view text, Mode mode, std::string* expression = nullptr) {
     if (mode == Mode::none || text.empty()) return {};
     std::string expr;
     if (mode == Mode::notes) {
@@ -273,6 +275,7 @@ inline std::optional<std::string> response(std::string_view text, Mode mode) {
     }
     auto result = evaluate(expr);
     if (!result) return std::string{};
+    if (expression) *expression = expr;
     if (mode == Mode::notes) *result += ">>";
     return result;
 }
