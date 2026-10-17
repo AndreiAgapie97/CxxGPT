@@ -980,7 +980,9 @@ The plan: not in night 3, which tests one change (GSM8K's own questions
 with new numbers, `cxxgpt redraw-qa`, PR #86) against night 2 on the dev
 set. Number theory comes after that at a small share, about 1-2% of the
 mix, taken from gen-word's share at the same total tokens, and is tested
-first on a copy of the checkpoint against the dev set. No mix file and no
+first on a copy of the checkpoint against the GSM8K dev set (`nt-dev` is
+for the topic's own exam and `--val-sources`, not for deciding the mix).
+No mix file and no
 `night.sh` default includes it yet.
 
 Built 2026-10-17 at fbe174a into `data/gen-math-nt` (git-ignored, on the
@@ -991,6 +993,12 @@ again 534 problems sharing a 13-word run with the dev file and 49,819 with
 a dev or GSM8K problem's numbers and answer (small stories often share
 them), so the dev file stays held out; Python's cruder numbers check then
 dropped 7 dev and 2,725 train problems. No factor problem in either file.
+That keeps out some of the simplest stories: against the same seed with
+only GSM8K excluded, problems whose question numbers are all under 20 fall
+from 12.7% to 11.0% of the file (answers of 5 or less: 20.4% and 21.2%).
+The files come again only with the same options: `gen-math --seed
+202610174 --skip-kinds factors` (leaving a kind out changes every draw),
+as `manifest.json` records.
 
 A hand check of 30 problems (seed 2026, train) and 15 (seed 77, test): all
 45 answers and solutions right; one train wording asked "How many trays

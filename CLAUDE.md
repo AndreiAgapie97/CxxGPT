@@ -244,7 +244,7 @@ Math problem-solving accuracy is the first evaluation focus.
   300 stories). Mix plan (owner's decision, 2026-10-17): not in night 3
   (which tests #86's GSM8K variants); after it, about 1-2% of the mix in
   place of part of gen-word's share, first tested on a checkpoint copy
-  against the dev set. Next topic: counting (the answer format of
+  against the GSM8K dev set. Next topic: counting (the answer format of
   probability needs a decision first).
 - `operations/build_libretexts_problems.py` (2026-10-17): 383 human-written
   word problems with their book answers (one number, no worked solution)

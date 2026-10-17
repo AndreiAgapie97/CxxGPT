@@ -274,7 +274,8 @@ whether the next is worth building:
    about 1-2% of the mix, taken from gen-word's share at the same total
    tokens (`operations/build_gen_math.py --topics number-theory --notes
    on`; its factor-counting kind is left out, about 300 stories), tested
-   first on a copy of the checkpoint against the dev set before any night.
+   first on a copy of the checkpoint against the GSM8K dev set before any
+   night.
 3. Self-train on number theory waits until the re-draw check can follow
    its solutions (today 8 and 7 of 80 gold solutions pass, on the train
    and test wordings): a quotient's parts, a common multiple found by
