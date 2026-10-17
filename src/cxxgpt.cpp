@@ -1235,9 +1235,29 @@ int cmd_score_checks(Args& a) {
     o.allow_outside = a.flag("allow-outside");
     o.allow_unused = a.flag("allow-unused");
     o.keep_gold = a.flag("keep-gold");
+    o.strict_outside = a.flag("strict-outside");
+    o.check_dead = a.flag("check-dead");
+    o.check_mismatch = a.flag("check-mismatch");
+    o.check_computed = a.flag("check-computed");
+    o.check_broken = a.flag("check-broken");
+    // Prints the tune half's tries with this verdict and label
+    // ("kept:lucky"), to see what a new check could catch; the held-out
+    // half is never shown.
+    const std::string show = a.str("show", "");
     a.done();
     using namespace score_checks;
-    const Score s = score(load(path), o);
+    const std::vector<Labelled> tries = load(path);
+    if (!show.empty()) {
+        for (const Labelled& t : tries) {
+            if (t.split != "tune") continue;
+            const std::string v = self_train::verdict_name(self_train::check_try(t.problem, t.text, o));
+            if (v + ":" + kLabelNames[t.label] != show) continue;
+            std::printf("==== %s: %s\n  (answer %s)\n%s\n", t.set.c_str(), t.problem.question.c_str(),
+                        t.problem.answer.c_str(), t.text.c_str());
+        }
+        return 0;
+    }
+    const Score s = score(tries, o);
     auto pct = [](long part, long whole) { return 100.0 * double(part) / double(std::max(1L, whole)); };
     // The tune and held-out halves of every set together, then each group.
     for (const char* split : {"tune", "held-out"}) {
