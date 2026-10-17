@@ -932,7 +932,7 @@ For self-train the difference is plain: options 1 and 2 leave the re-draw
 check as it is (the 20 and the 8 of option 1, or a rounded 28.57, are still
 numbers its formulas keep as constants), so right tries on this topic would
 still be dropped. Option 3 fixes only the kinds that hinge on a whole
-quotient (remainders, multiples, patterns, about 60% of the problems), at
+quotient (remainders, most multiples, patterns: about half the problems), at
 the cost of changing calc.h, the formula reader and the calculator evals
 together. Common multiples and divisors found by counting up or listing
 factors, the first even locker and the digit puzzle would still need
