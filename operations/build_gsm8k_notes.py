@@ -32,6 +32,7 @@ import collections
 import datetime
 import fractions
 import json
+import math
 import pathlib
 import re
 import subprocess
@@ -42,10 +43,48 @@ from build_targeted_math import grams, sha256  # noqa: E402
 
 NOTE = re.compile(r'<<([^<>]*?)=([^<>]*)>>')
 TOKEN = re.compile(r'\s*(\d+\.\d+|\d+\.|\d+|\.\d+|[-+*/()])')
+INT64_MAX = 2**63 - 1  # calc.h never holds INT64_MIN either, so |x| <= INT64_MAX
+
+
+def fits(*values):
+    if any(abs(x) > INT64_MAX for x in values):
+        raise ValueError  # calc.h counts the call as malformed
+    return values[0]
+
+
+# calc.h's arithmetic in 64 bits (times, plus): the same products and sums,
+# each of which must fit, so a note the calculator cannot finish is never
+# counted right because Python's integers have no limit.
+def times(a, b):
+    g1, g2 = math.gcd(a.numerator, b.denominator), math.gcd(b.numerator, a.denominator)
+    num = fits((a.numerator // g1) * (b.numerator // g2))
+    den = fits((a.denominator // g2) * (b.denominator // g1))
+    return fractions.Fraction(num, den)
+
+
+def plus(a, b):
+    g = math.gcd(a.denominator, b.denominator)
+    left = fits(a.numerator * (b.denominator // g))
+    right = fits(b.numerator * (a.denominator // g))
+    total = fits(left + right)
+    g2 = math.gcd(total, g)
+    den = fits((a.denominator // g) * (b.denominator // g2))
+    return fractions.Fraction(total // g2, den)
+
+
+def literal(text):
+    """A decimal number as calc.h reads it: its digits and its power of ten must each fit before reducing."""
+    whole, _, places = text.partition('.')
+    fits(int(whole + places or '0'), 10 ** len(places))
+    return fractions.Fraction(text)
 
 
 def evaluate(expression):
-    """The exact value of + - * / ( ) over decimal numbers, or None if it is anything else."""
+    """The exact value of + - * / ( ) over decimal numbers as src/calc.h computes it, or None
+    if it is anything else or calc.h would reject it (a number or a step outside 64 bits,
+    over 4096 bytes, over 128 nested parentheses and signs)."""
+    if len(expression) > 4096:
+        return None
     tokens, pos = [], 0
     expression = expression.strip()
     while pos < len(expression):
@@ -54,7 +93,7 @@ def evaluate(expression):
             return None
         tokens.append(m.group(1))
         pos = m.end()
-    i = 0
+    i = depth = 0
 
     def peek():
         return tokens[i] if i < len(tokens) else None
@@ -66,7 +105,7 @@ def evaluate(expression):
             op = tokens[i]
             i += 1
             w = product()
-            v = v + w if op == '+' else v - w
+            v = plus(v, w if op == '+' else -w)
         return v
 
     def product():
@@ -76,27 +115,34 @@ def evaluate(expression):
             op = tokens[i]
             i += 1
             w = signed()
-            v = v * w if op == '*' else v / w  # a division by zero raises
+            if op == '/' and w == 0:
+                raise ZeroDivisionError
+            v = times(v, w if op == '*' else 1 / w)
         return v
 
     def signed():
-        nonlocal i
+        nonlocal i, depth
+        depth += 1  # calc.h's atom(): signs and parentheses nest at most 128 deep
+        if depth > 128:
+            raise ValueError
         if peek() in ('+', '-'):
             op = tokens[i]
             i += 1
             v = signed()
-            return v if op == '+' else -v
-        if peek() == '(':
+            v = v if op == '+' else -v
+        elif peek() == '(':
             i += 1
             v = sum_()
             if peek() != ')':
                 raise ValueError
             i += 1
-            return v
-        if peek() is None or not re.fullmatch(r'[\d.]+', peek()):
+        elif peek() is None or not re.fullmatch(r'[\d.]+', peek()):
             raise ValueError
-        i += 1
-        return fractions.Fraction(tokens[i - 1])
+        else:
+            i += 1
+            v = literal(tokens[i - 1])
+        depth -= 1
+        return v
 
     try:
         v = sum_()

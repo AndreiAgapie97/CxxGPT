@@ -2,9 +2,10 @@
 
     python -I operations/check_calc_notes.py FILE.jsonl ...
 
-Each note's expression is evaluated with exact fractions (build_gsm8k_notes's
-evaluator, not calc.h) and its result compared with what the calculator would
-write. Prints, per file, how many notes are right as the calculator writes
+Each note's expression is evaluated with exact fractions and calc.h's 64-bit
+limits (build_gsm8k_notes's evaluator, not calc.h itself; tests/test_calc_notes.py
+checks the two agree on calc.h's own test cases) and its result compared with
+what the calculator would write. Prints, per file, how many notes are right as the calculator writes
 them, right but spelled another way (144.00), wrong, or unreadable to the
 calculator, with examples; exits 1 if any note is wrong.
 """

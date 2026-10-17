@@ -141,8 +141,9 @@ The checks:
   builders' overlap filters read each solution without its notes.
 - **Every note's result is exact.** A separate checker
   (`operations/check_calc_notes.py FILE.jsonl ...`) evaluates each note
-  with exact fractions, without calc.h, and compares the result with
-  what the calculator writes. In the generated files it found 15.6
+  with exact fractions and calc.h's 64-bit limits, without calc.h's code
+  (`tests/test_calc_notes.py` checks the two agree), and compares the
+  result with what the calculator writes. In the generated files it found 15.6
   million notes, none wrong.
   GSM8K's own 22,088 train notes have no wrong result either. 638 of them
   write the result another way (`144.00`, `.4`), and the builder rewrites
